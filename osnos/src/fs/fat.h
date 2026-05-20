@@ -75,3 +75,21 @@ int  fat_read_file(const fat_dirent_t *de, uint32_t off,
  */
 int  fat_readdir(const fat_dirent_t *dir, uint32_t cursor,
                  fat_dirent_t *out, uint32_t *next_cursor);
+
+/* ----- Write-side (FASE 8.4) ----- */
+/*
+ * All write ops keep the on-disk FAT mirror consistent — every FAT
+ * entry update is replayed across all num_fats copies before returning.
+ * Crash-recovery ordering is: allocate-new-chain → write-data →
+ * update-dirent → free-old-chain. A crash in the middle leaves either
+ * the old state intact or an orphan chain (lost clusters; fsck'able).
+ *
+ * Return 0 on success, negative errno-style codes on failure:
+ *   -2  ENOENT  -17 EEXIST  -20 ENOTDIR  -21 EISDIR  -22 EINVAL
+ *   -28 ENOSPC  -39 ENOTEMPTY                          -5 EIO
+ */
+int  fat_write_path  (const char *path, const char *buf, uint32_t len);
+int  fat_append_path (const char *path, const char *buf, uint32_t len);
+int  fat_unlink_path (const char *path);
+int  fat_mkdir_path  (const char *path);
+int  fat_rmdir_path  (const char *path);

@@ -219,13 +219,18 @@ static bool dirent_is_valid(const uint8_t *e) {
 
 #define ENTRIES_PER_SECTOR  (SECTOR_SIZE / DIRENT_SIZE)
 
-/* Read one raw 32-byte slot at linear index `idx` in `dir`. Returns
- *   0 if the slot was read into `slot_out` and lives at `lba/off`,
- *   1 if `idx` is past end-of-directory (0x00 marker or chain end),
- *  -1 on I/O error. */
-static int read_dir_slot(const fat_dirent_t *dir, uint32_t idx,
-                          uint8_t slot_out[DIRENT_SIZE],
-                          uint32_t *lba_out, uint32_t *off_out) {
+/*
+ * Locate slot `idx` in `dir` and copy its raw 32 bytes. Does NOT
+ * interpret the marker byte — callers decide.
+ *   0 → slot exists; lba/off filled
+ *   1 → idx is past the directory's allocated storage (root region
+ *       exhausted, or cluster chain truly ended). Caller may then
+ *       choose to extend the dir.
+ *  -1 → I/O error
+ */
+static int dir_slot_locate(const fat_dirent_t *dir, uint32_t idx,
+                            uint8_t slot_out[DIRENT_SIZE],
+                            uint32_t *lba_out, uint32_t *off_out) {
     uint8_t buf[SECTOR_SIZE];
 
     if (dir->first_cluster == 0) {
@@ -238,14 +243,12 @@ static int read_dir_slot(const fat_dirent_t *dir, uint32_t idx,
         if (block_ata_read_sector(lba, buf) != 0) return -1;
 
         uint8_t *e = buf + i * DIRENT_SIZE;
-        if (e[0] == 0x00) return 1;          /* end marker */
         for (uint32_t k = 0; k < DIRENT_SIZE; k++) slot_out[k] = e[k];
         *lba_out = lba;
         *off_out = i * DIRENT_SIZE;
         return 0;
     }
 
-    /* Subdirectory: walk cluster chain. */
     uint32_t entries_per_cluster = fs.sectors_per_cluster * ENTRIES_PER_SECTOR;
     uint32_t cluster_idx = idx / entries_per_cluster;
     uint32_t in_cluster  = idx % entries_per_cluster;
@@ -264,10 +267,21 @@ static int read_dir_slot(const fat_dirent_t *dir, uint32_t idx,
     uint32_t lba = cluster_to_lba(cluster) + s;
     if (block_ata_read_sector(lba, buf) != 0) return -1;
     uint8_t *e = buf + i * DIRENT_SIZE;
-    if (e[0] == 0x00) return 1;
     for (uint32_t k = 0; k < DIRENT_SIZE; k++) slot_out[k] = e[k];
     *lba_out = lba;
     *off_out = i * DIRENT_SIZE;
+    return 0;
+}
+
+/* read_dir_slot: same as locate, plus 0x00 first-byte → 1 (end-of-dir).
+ * This is what iteration / lookup want — bail at the first 0x00 marker
+ * because everything past it is guaranteed unused. */
+static int read_dir_slot(const fat_dirent_t *dir, uint32_t idx,
+                          uint8_t slot_out[DIRENT_SIZE],
+                          uint32_t *lba_out, uint32_t *off_out) {
+    int rc = dir_slot_locate(dir, idx, slot_out, lba_out, off_out);
+    if (rc != 0) return rc;
+    if (slot_out[0] == 0x00) return 1;
     return 0;
 }
 
@@ -415,4 +429,503 @@ int fat_read_file(const fat_dirent_t *de, uint32_t off,
     }
 
     return (int)total;
+}
+
+/* ================================================================ */
+/* Write side (FASE 8.4)                                            */
+/* ================================================================ */
+
+/* errno-style returns; sign-flipped to fit the int convention. */
+#define FAT_OK         0
+#define FAT_EIO        -5
+#define FAT_ENOENT     -2
+#define FAT_EEXIST     -17
+#define FAT_ENOTDIR    -20
+#define FAT_EISDIR     -21
+#define FAT_EINVAL     -22
+#define FAT_ENOSPC     -28
+#define FAT_ENOTEMPTY  -39
+
+/*
+ * Write `value` into FAT entry for `cluster`, replicating across every
+ * FAT copy (mirror). Without the mirror update, the on-disk image
+ * fails fsck and any OS that mounts the second FAT first sees stale
+ * chains.
+ */
+static int fat_set_entry(uint16_t cluster, uint16_t value) {
+    uint8_t buf[SECTOR_SIZE];
+    for (uint8_t fat_idx = 0; fat_idx < fs.num_fats; fat_idx++) {
+        uint32_t fat_base = fs.fat_lba +
+                            (uint32_t)fat_idx * fs.fat_size_sectors;
+        uint32_t byte_off = (uint32_t)cluster * 2;
+        uint32_t sec      = fat_base + byte_off / SECTOR_SIZE;
+        uint32_t in_sec   = byte_off % SECTOR_SIZE;
+
+        if (block_ata_read_sector(sec, buf) != 0) return -1;
+        buf[in_sec]     = (uint8_t)(value);
+        buf[in_sec + 1] = (uint8_t)(value >> 8);
+        if (block_ata_write_sector(sec, buf) != 0) return -1;
+    }
+    return 0;
+}
+
+/* Find first free FAT entry (== 0) starting at cluster 2 and claim it
+ * by marking it as EOF. Returns the cluster number, or 0 if disk full. */
+static uint16_t fat_alloc_cluster(void) {
+    uint32_t max_entries = (uint32_t)fs.fat_size_sectors * SECTOR_SIZE / 2;
+    if (max_entries > 65525) max_entries = 65525;
+
+    uint8_t buf[SECTOR_SIZE];
+    uint32_t cached_sec = (uint32_t)-1;
+
+    for (uint32_t c = 2; c < max_entries; c++) {
+        uint32_t byte_off = c * 2;
+        uint32_t sec      = fs.fat_lba + byte_off / SECTOR_SIZE;
+        uint32_t in_sec   = byte_off % SECTOR_SIZE;
+
+        if (sec != cached_sec) {
+            if (block_ata_read_sector(sec, buf) != 0) return 0;
+            cached_sec = sec;
+        }
+        uint16_t val = (uint16_t)buf[in_sec] | ((uint16_t)buf[in_sec + 1] << 8);
+        if (val == 0) {
+            if (fat_set_entry((uint16_t)c, 0xFFFF) != 0) return 0;
+            return (uint16_t)c;
+        }
+    }
+    return 0;
+}
+
+/* Walk chain, mark every entry as free (0). Stops at EOF or invalid. */
+static int fat_free_chain(uint16_t first) {
+    uint16_t cur = first;
+    while (cur >= 2 && cur < FAT16_EOF_MIN) {
+        uint16_t next;
+        if (fat_get_entry(cur, &next) != 0) return -1;
+        if (fat_set_entry(cur, 0) != 0) return -1;
+        cur = next;
+    }
+    return 0;
+}
+
+/* Allocate a chain of `count` linked clusters. *first_out gets the head.
+ * On any failure frees what was allocated so far. count==0 → first=0. */
+static int fat_alloc_chain(uint32_t count, uint16_t *first_out) {
+    *first_out = 0;
+    if (count == 0) return 0;
+
+    uint16_t first = 0;
+    uint16_t prev  = 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint16_t c = fat_alloc_cluster();
+        if (c == 0) {
+            if (first != 0) fat_free_chain(first);
+            return FAT_ENOSPC;
+        }
+        if (first == 0) {
+            first = c;
+        } else if (fat_set_entry(prev, c) != 0) {
+            fat_free_chain(first);
+            return FAT_EIO;
+        }
+        prev = c;
+    }
+    *first_out = first;
+    return 0;
+}
+
+/* Copy `len` bytes from `src` into the cluster chain starting at
+ * `first`, padding the final sector with zeros. Caller pre-allocated
+ * enough clusters. */
+static int write_data_into_chain(uint16_t first, const char *src, uint32_t len) {
+    uint16_t cluster = first;
+    uint32_t written = 0;
+    uint8_t  sbuf[SECTOR_SIZE];
+
+    while (written < len) {
+        if (cluster < 2 || cluster >= FAT16_EOF_MIN) return FAT_EIO;
+
+        uint32_t lba_start = cluster_to_lba(cluster);
+        for (uint32_t s = 0; s < fs.sectors_per_cluster && written < len; s++) {
+            uint32_t chunk = SECTOR_SIZE;
+            if (chunk > len - written) chunk = len - written;
+
+            for (uint32_t k = 0; k < chunk; k++) {
+                sbuf[k] = (uint8_t)src[written + k];
+            }
+            for (uint32_t k = chunk; k < SECTOR_SIZE; k++) sbuf[k] = 0;
+
+            if (block_ata_write_sector(lba_start + s, sbuf) != 0) return FAT_EIO;
+            written += chunk;
+        }
+
+        if (written < len) {
+            uint16_t next;
+            if (fat_get_entry(cluster, &next) != 0) return FAT_EIO;
+            cluster = next;
+        }
+    }
+    return 0;
+}
+
+/* ----- dirent slot writes ----- */
+
+static int read_modify_write_dirent(uint32_t lba, uint32_t off,
+                                     const uint8_t raw[DIRENT_SIZE]) {
+    uint8_t buf[SECTOR_SIZE];
+    if (block_ata_read_sector(lba, buf) != 0) return FAT_EIO;
+    for (uint32_t i = 0; i < DIRENT_SIZE; i++) buf[off + i] = raw[i];
+    if (block_ata_write_sector(lba, buf) != 0) return FAT_EIO;
+    return 0;
+}
+
+static void build_dirent_raw(uint8_t raw[DIRENT_SIZE],
+                              const char *name11, uint8_t attr,
+                              uint16_t first_cluster, uint32_t size) {
+    for (int i = 0; i < DIRENT_SIZE; i++) raw[i] = 0;
+    for (int i = 0; i < 11; i++) raw[i] = (uint8_t)name11[i];
+    raw[11] = attr;
+    /* 12..21 left zero — case, create-time, last-access-date.
+     * 22..25 left zero — write time/date (we have no clock yet). */
+    raw[26] = (uint8_t)(first_cluster);
+    raw[27] = (uint8_t)(first_cluster >> 8);
+    raw[28] = (uint8_t)(size);
+    raw[29] = (uint8_t)(size >> 8);
+    raw[30] = (uint8_t)(size >> 16);
+    raw[31] = (uint8_t)(size >> 24);
+}
+
+/* Locate a slot for a new entry in `dir`. Reuses the first 0xE5
+ * (deleted) slot, else claims the first 0x00 slot encountered (and
+ * the post-mformat-zero invariant keeps the next slot as 0x00 so the
+ * end-of-dir marker is preserved). Returns FAT_ENOSPC if exhausted. */
+static int find_free_dir_slot(const fat_dirent_t *dir,
+                               uint32_t *lba_out, uint32_t *off_out) {
+    uint32_t idx = 0;
+    for (;;) {
+        uint8_t slot[DIRENT_SIZE];
+        uint32_t lba, off;
+        int rc = dir_slot_locate(dir, idx, slot, &lba, &off);
+        if (rc < 0) return FAT_EIO;
+        if (rc == 1) return FAT_ENOSPC;     /* dir would need extending */
+        if (slot[0] == 0xE5 || slot[0] == 0x00) {
+            *lba_out = lba;
+            *off_out = off;
+            return 0;
+        }
+        idx++;
+    }
+}
+
+/* Resolve `parent_path` (which may end with '/') and split out the
+ * last component as `base_out`. Examples:
+ *   "/foo/bar"  → parent dir from path "/foo", base "bar"
+ *   "/bar"      → root, base "bar"
+ *   "/"         → invalid (no base)
+ */
+static int split_parent_base(const char *path,
+                              char parent_path[64],
+                              char base_out[64]) {
+    /* Skip leading slashes. */
+    while (*path == '/') path++;
+    if (*path == 0) return FAT_EINVAL;
+
+    /* Find last '/' in the remainder. */
+    const char *last_slash = 0;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/') last_slash = p;
+    }
+
+    if (!last_slash) {
+        parent_path[0] = '/';
+        parent_path[1] = 0;
+        int i;
+        for (i = 0; i < 62 && path[i]; i++) base_out[i] = path[i];
+        base_out[i] = 0;
+        return base_out[0] ? 0 : FAT_EINVAL;
+    }
+
+    /* parent = "/" + path[..last_slash) */
+    size_t parent_len = (size_t)(last_slash - path);
+    if (parent_len + 2 > 64) return FAT_EINVAL;
+    parent_path[0] = '/';
+    for (size_t i = 0; i < parent_len; i++) parent_path[1 + i] = path[i];
+    parent_path[1 + parent_len] = 0;
+
+    const char *base = last_slash + 1;
+    int i;
+    for (i = 0; i < 62 && base[i]; i++) base_out[i] = base[i];
+    base_out[i] = 0;
+    return base_out[0] ? 0 : FAT_EINVAL;
+}
+
+/* ----- public write API ----- */
+
+int fat_unlink_path(const char *path) {
+    if (!fs_ready) return FAT_EIO;
+
+    fat_dirent_t de;
+    if (fat_lookup(path, &de) != 0) return FAT_ENOENT;
+    if (de.is_dir) return FAT_EISDIR;
+    if (de.dirent_lba == 0) return FAT_EINVAL;       /* root sentinel */
+
+    if (fat_free_chain(de.first_cluster) != 0) return FAT_EIO;
+
+    uint8_t raw[DIRENT_SIZE];
+    if (block_ata_read_sector(de.dirent_lba, raw) != 0) return FAT_EIO;
+    /* The dirent we want is inside this sector at de.dirent_offset.
+     * Patch first byte to 0xE5 (deleted marker), rewrite sector. */
+    uint8_t sb[SECTOR_SIZE];
+    if (block_ata_read_sector(de.dirent_lba, sb) != 0) return FAT_EIO;
+    sb[de.dirent_offset] = 0xE5;
+    if (block_ata_write_sector(de.dirent_lba, sb) != 0) return FAT_EIO;
+    return 0;
+}
+
+/*
+ * Common path for write/append: prepare `*existing` (whether the target
+ * exists, and where its dirent lives). Returns FAT_OK and fills the
+ * out params; on missing-path returns FAT_OK with `exists=false` and
+ * the parent_dir/name11 fields populated for create.
+ */
+typedef struct {
+    bool          exists;
+    fat_dirent_t  de;            /* valid only when exists==true */
+    fat_dirent_t  parent_dir;    /* valid in both cases */
+    char          name11[11];    /* 8.3 form of last component */
+} write_target_t;
+
+static int resolve_write_target(const char *path, write_target_t *out) {
+    fat_dirent_t de;
+    if (fat_lookup(path, &de) == 0) {
+        if (de.is_dir) return FAT_EISDIR;
+        if (de.dirent_lba == 0) return FAT_EINVAL;
+        out->exists     = true;
+        out->de         = de;
+        out->parent_dir.is_dir = true;
+        out->parent_dir.first_cluster = 0;   /* unused on overwrite */
+        for (int i = 0; i < 11; i++) out->name11[i] = ' ';
+        return 0;
+    }
+
+    char parent_path[64];
+    char base[64];
+    int rc = split_parent_base(path, parent_path, base);
+    if (rc != 0) return rc;
+
+    if (fat_lookup(parent_path, &out->parent_dir) != 0) return FAT_ENOENT;
+    if (!out->parent_dir.is_dir) return FAT_ENOTDIR;
+
+    if (!name_to_83(base, out->name11)) return FAT_EINVAL;
+    out->exists = false;
+    return 0;
+}
+
+/* Write/replace file content. Strategy:
+ *   1. Allocate the new chain (if any data).
+ *   2. Write data into the chain.
+ *   3. Update / create the dirent so it points at the new chain.
+ *   4. Free the old chain (overwrite case only).
+ * Crash between step 1 and step 3 leaks clusters but never corrupts
+ * the visible filesystem.
+ */
+int fat_write_path(const char *path, const char *buf, uint32_t len) {
+    if (!fs_ready) return FAT_EIO;
+
+    write_target_t t;
+    int rc = resolve_write_target(path, &t);
+    if (rc != 0) return rc;
+
+    uint32_t cluster_size = (uint32_t)fs.sectors_per_cluster * SECTOR_SIZE;
+    uint32_t clusters_needed = (len + cluster_size - 1) / cluster_size;
+
+    uint16_t new_chain = 0;
+    rc = fat_alloc_chain(clusters_needed, &new_chain);
+    if (rc != 0) return rc;
+
+    if (len > 0) {
+        rc = write_data_into_chain(new_chain, buf, len);
+        if (rc != 0) {
+            fat_free_chain(new_chain);
+            return rc;
+        }
+    }
+
+    if (t.exists) {
+        uint16_t old_chain = t.de.first_cluster;
+        uint8_t raw[DIRENT_SIZE];
+        uint8_t sb[SECTOR_SIZE];
+        if (block_ata_read_sector(t.de.dirent_lba, sb) != 0) {
+            fat_free_chain(new_chain);
+            return FAT_EIO;
+        }
+        for (uint32_t i = 0; i < DIRENT_SIZE; i++) {
+            raw[i] = sb[t.de.dirent_offset + i];
+        }
+        raw[26] = (uint8_t)(new_chain);
+        raw[27] = (uint8_t)(new_chain >> 8);
+        raw[28] = (uint8_t)(len);
+        raw[29] = (uint8_t)(len >> 8);
+        raw[30] = (uint8_t)(len >> 16);
+        raw[31] = (uint8_t)(len >> 24);
+        rc = read_modify_write_dirent(t.de.dirent_lba, t.de.dirent_offset, raw);
+        if (rc != 0) {
+            fat_free_chain(new_chain);
+            return rc;
+        }
+        if (old_chain >= 2 && old_chain < FAT16_EOF_MIN) {
+            fat_free_chain(old_chain);
+        }
+        return 0;
+    }
+
+    /* Create a fresh dirent in parent. */
+    uint32_t slot_lba, slot_off;
+    rc = find_free_dir_slot(&t.parent_dir, &slot_lba, &slot_off);
+    if (rc != 0) {
+        fat_free_chain(new_chain);
+        return rc;
+    }
+
+    uint8_t raw[DIRENT_SIZE];
+    build_dirent_raw(raw, t.name11, ATTR_ARCH, new_chain, len);
+    rc = read_modify_write_dirent(slot_lba, slot_off, raw);
+    if (rc != 0) {
+        fat_free_chain(new_chain);
+        return rc;
+    }
+    return 0;
+}
+
+/* Append: cheap implementation. Read existing → tack on → rewrite.
+ * Bounded by the 8 KiB scratch buffer; bigger appends fail. Enough
+ * for `echo … >>` use-cases. */
+#define FAT_APPEND_SCRATCH 8192
+
+int fat_append_path(const char *path, const char *buf, uint32_t len) {
+    if (!fs_ready) return FAT_EIO;
+
+    static char scratch[FAT_APPEND_SCRATCH];
+
+    fat_dirent_t de;
+    int looked_up = fat_lookup(path, &de);
+
+    uint32_t existing_size = 0;
+    if (looked_up == 0) {
+        if (de.is_dir) return FAT_EISDIR;
+        existing_size = de.size;
+        if (existing_size > FAT_APPEND_SCRATCH) return FAT_ENOSPC;
+        if (existing_size > 0) {
+            int n = fat_read_file(&de, 0, scratch, existing_size);
+            if (n < 0 || (uint32_t)n != existing_size) return FAT_EIO;
+        }
+    }
+    if (existing_size + len > FAT_APPEND_SCRATCH) return FAT_ENOSPC;
+    for (uint32_t i = 0; i < len; i++) {
+        scratch[existing_size + i] = buf[i];
+    }
+    return fat_write_path(path, scratch, existing_size + len);
+}
+
+/* mkdir: create empty subdir cluster with "." and ".." entries. */
+int fat_mkdir_path(const char *path) {
+    if (!fs_ready) return FAT_EIO;
+
+    fat_dirent_t existing;
+    if (fat_lookup(path, &existing) == 0) return FAT_EEXIST;
+
+    char parent_path[64], base[64];
+    int rc = split_parent_base(path, parent_path, base);
+    if (rc != 0) return rc;
+
+    fat_dirent_t parent;
+    if (fat_lookup(parent_path, &parent) != 0) return FAT_ENOENT;
+    if (!parent.is_dir) return FAT_ENOTDIR;
+
+    char name11[11];
+    if (!name_to_83(base, name11)) return FAT_EINVAL;
+
+    uint16_t dir_cluster = fat_alloc_cluster();
+    if (dir_cluster == 0) return FAT_ENOSPC;
+
+    /* Write . and .. + zeros to the whole cluster (zero = end-of-dir). */
+    uint8_t sec[SECTOR_SIZE];
+    for (uint32_t i = 0; i < SECTOR_SIZE; i++) sec[i] = 0;
+
+    char dot11[11]    = { '.', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
+    char dotdot11[11] = { '.', '.', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
+
+    uint8_t dot_raw[DIRENT_SIZE];
+    uint8_t dotdot_raw[DIRENT_SIZE];
+    build_dirent_raw(dot_raw, dot11, ATTR_DIR, dir_cluster, 0);
+    /* ".." → parent's first cluster (0 means "the root", FAT convention). */
+    build_dirent_raw(dotdot_raw, dotdot11, ATTR_DIR, parent.first_cluster, 0);
+
+    for (uint32_t i = 0; i < DIRENT_SIZE; i++) sec[i] = dot_raw[i];
+    for (uint32_t i = 0; i < DIRENT_SIZE; i++) sec[DIRENT_SIZE + i] = dotdot_raw[i];
+
+    /* Cluster spans `sectors_per_cluster` sectors. Write . / .. in the
+     * first sector; zero the rest. */
+    uint32_t lba_start = cluster_to_lba(dir_cluster);
+    if (block_ata_write_sector(lba_start, sec) != 0) {
+        fat_free_chain(dir_cluster);
+        return FAT_EIO;
+    }
+    for (uint32_t i = 0; i < SECTOR_SIZE; i++) sec[i] = 0;
+    for (uint32_t s = 1; s < fs.sectors_per_cluster; s++) {
+        if (block_ata_write_sector(lba_start + s, sec) != 0) {
+            fat_free_chain(dir_cluster);
+            return FAT_EIO;
+        }
+    }
+
+    /* Add dirent to parent. */
+    uint32_t slot_lba, slot_off;
+    rc = find_free_dir_slot(&parent, &slot_lba, &slot_off);
+    if (rc != 0) {
+        fat_free_chain(dir_cluster);
+        return rc;
+    }
+    uint8_t raw[DIRENT_SIZE];
+    build_dirent_raw(raw, name11, ATTR_DIR, dir_cluster, 0);
+    rc = read_modify_write_dirent(slot_lba, slot_off, raw);
+    if (rc != 0) {
+        fat_free_chain(dir_cluster);
+        return rc;
+    }
+    return 0;
+}
+
+/* rmdir: empty subdir, then unlink-like teardown. */
+int fat_rmdir_path(const char *path) {
+    if (!fs_ready) return FAT_EIO;
+
+    fat_dirent_t de;
+    if (fat_lookup(path, &de) != 0) return FAT_ENOENT;
+    if (!de.is_dir) return FAT_ENOTDIR;
+    if (de.dirent_lba == 0) return FAT_EINVAL;       /* root */
+
+    /* Scan dir entries; any valid one other than "." / ".." → not empty. */
+    uint32_t idx = 0;
+    for (;;) {
+        uint8_t slot[DIRENT_SIZE];
+        uint32_t lba, off;
+        int rc = read_dir_slot(&de, idx, slot, &lba, &off);
+        if (rc < 0) return FAT_EIO;
+        if (rc == 1) break;
+        idx++;
+        if (!dirent_is_valid(slot)) continue;
+        /* "." / ".." — name11 first byte is '.' and (slot[1]==' ' or '.') */
+        if (slot[0] == '.' && (slot[1] == ' ' || slot[1] == '.')) continue;
+        return FAT_ENOTEMPTY;
+    }
+
+    if (fat_free_chain(de.first_cluster) != 0) return FAT_EIO;
+
+    uint8_t sb[SECTOR_SIZE];
+    if (block_ata_read_sector(de.dirent_lba, sb) != 0) return FAT_EIO;
+    sb[de.dirent_offset] = 0xE5;
+    if (block_ata_write_sector(de.dirent_lba, sb) != 0) return FAT_EIO;
+    return 0;
 }

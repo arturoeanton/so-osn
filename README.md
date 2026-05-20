@@ -14,6 +14,10 @@ mini-libc propia para programas de usuario en ring 3.
    bienvenido a osnos.
    /home > hello_libc
    hola desde ring 3 con libc!
+   /home > echo persistente > /sd/note
+   /home > # reboot
+   /home > cat /sd/note
+   persistente
 ```
 
 > **TL;DR para reentrar al proyecto después de meses:** instalar Limine
@@ -78,6 +82,12 @@ máquina host y el script lo levanta de ahí.
 | QEMU         | `brew install qemu`     | `sudo dnf install qemu-system-x86`  | `sudo apt install qemu-system-x86` | `sudo pacman -S qemu-full` |
 | xorriso      | `brew install xorriso`  | `sudo dnf install xorriso`          | `sudo apt install xorriso`         | `sudo pacman -S libisoburn`|
 | Clang + lld  | `brew install llvm`     | `sudo dnf install clang lld`        | `sudo apt install clang lld`       | `sudo pacman -S clang lld` |
+| mtools       | `brew install mtools`   | `sudo dnf install mtools`           | `sudo apt install mtools`          | `sudo pacman -S mtools`    |
+
+`mtools` (mformat + mcopy) se usa para crear `sd.img` — la imagen FAT16
+de 16 MiB que el kernel monta en `/sd`. No requiere sudo ni loopback
+mount. Si no necesitás disco real podés ignorar la dependencia y borrar
+el target `sd.img` del `GNUmakefile`, pero entonces `/sd` no aparece.
 
 Los headers de build (`cc-runtime`, `freestnd-c-hdrs`,
 `limine-protocol`, `linker-scripts`) **sí** están vendoreados bajo
@@ -103,9 +113,10 @@ fijos definidos en el script).
     │   ├── kernel/         #   kmain, panic
     │   ├── micro/          #   core: task, scheduler, ipc, gdt/idt/tss,
     │   │                   #         pmm, vmm, kmalloc, syscall, uaccess
-    │   ├── drivers/        #   framebuffer, teclado PS/2, PIC, LAPIC, timer
+    │   ├── drivers/        #   framebuffer, teclado PS/2, PIC, LAPIC, timer,
+    │   │                   #   block_ata (ATA PIO sobre IDE primary master)
     │   ├── servers/        #   shell, console, keyboard, fs (en ring 0 hoy)
-    │   ├── fs/             #   VFS + backends (ramfs, sysfs, devfs, binfs)
+    │   ├── fs/             #   VFS + backends (ramfs, sysfs, devfs, binfs, fat)
     │   ├── proc/           #   exec, ELF loader, builtins
     │   ├── lib/            #   helpers freestanding (memcpy, strlcpy, printf)
     │   └── include/        #   headers públicos (osnos_status, osnos_keys, ...)
@@ -132,11 +143,12 @@ fijos definidos en el script).
 
 ## Arquitectura
 
-OSnOS es un microkernel cooperativo. Todo corre en ring 0 todavía,
-pero los subsistemas están separados como si fueran servidores
-userspace y se comunican exclusivamente por IPC (excepto los drivers
-de bajo nivel). Cuando lleguen ring 3 + preempción "de verdad" (fase
-10 del roadmap), mover servers a userspace debería ser mecánico.
+OSnOS es un microkernel con scheduler **preemptivo timer-driven**
+(quantum de 50 ms, sólo CPL=3) sobre un core cooperativo en ring 0.
+Los subsistemas están separados como si fueran servidores userspace y
+se comunican exclusivamente por IPC (excepto los drivers de bajo
+nivel). Cuando llegue la migración de servers a ring 3 (fase 10 del
+roadmap), mover los servidores debería ser mecánico.
 
 ### Diagrama de capas (resumen)
 
@@ -156,12 +168,16 @@ de bajo nivel). Cuando lleguen ring 3 + preempción "de verdad" (fase
 ├─────────────────────────────────────────────────────────────┤
 │ keyboard_server │ console_server │ fs_server (vfs wrapper)  │
 ├─────────────────────────────────────────────────────────────┤
+│ VFS: ramfs (/) │ sysfs (/sys) │ devfs (/dev) │ binfs (/bin) │
+│                │ fat16  (/sd, persistente sobre sd.img)     │
+├─────────────────────────────────────────────────────────────┤
 │  IPC: 1 cola, 64 slots, payload 1024B, blocking + wakeup    │
 ├─────────────────────────────────────────────────────────────┤
-│  micro/ core: task, scheduler (cooperativo), ipc, gdt/idt/  │
-│  tss, pmm/vmm/kmalloc, syscall, uaccess (fault-recoverable) │
+│  micro/ core: task, scheduler (preempt @ CPL=3 + coop),     │
+│  ipc, gdt/idt/tss, pmm/vmm/kmalloc, syscall, uaccess        │
 ├─────────────────────────────────────────────────────────────┤
-│  drivers/: PS/2, framebuffer + font 8x8, PIC, LAPIC, PIT    │
+│  drivers/: PS/2, framebuffer + font 8x8, PIC, LAPIC, PIT,   │
+│            ATA PIO (block_ata: primary IDE master)          │
 ├─────────────────────────────────────────────────────────────┤
 │                    Limine bootloader                         │
 └─────────────────────────────────────────────────────────────┘
@@ -177,9 +193,11 @@ están en [`osnos/ARCH.md`](osnos/ARCH.md).
 2. Memoria: `pmm_init → vmm_init → kheap_init`.
 3. CPU: `gdt_init → tss_init → idt_init → uaccess_init → syscall_msr_init`.
 4. Interrupciones: `pic_init → lapic_init → timer_init` (PIT @ 100 Hz).
+   Acto seguido `block_ata_init` corre IDENTIFY contra el primary IDE
+   master; si responde, FASE 8 monta `/sd`.
 5. Microkernel: `ipc_init → task_init → reaper_init → scheduler_init →
    syscall_init → ramfs_init → bootstrap_fs (monta `/`, `/sys`, `/dev`,
-   `/bin`)`.
+   `/bin`, y `/sd` si hay FAT16 válido)`.
 6. Crear una task por server (`task_create`), registrar IDs
    (`service_register`), llamar a cada `*_init()`. **El orden importa:**
    el shell manda el banner inicial y necesita al console_server ya
@@ -208,9 +226,12 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | ELF loader (Elf64 ET_EXEC, PT_LOAD, ring 3) | ✅ |
 | mini-libc (stdio, stdlib, string, unistd, malloc) | ✅ |
 | Programas /bin en ring 3 (hello_libc, ls, cat, osh, top, …) | ✅ |
-| Scheduler preemptivo, timer-driven | ⏳ (fase 9 del roadmap) |
-| Drivers de disco real (ATA / VirtIO) | ⏳ |
-| Networking | ❌ |
+| Scheduler preemptivo timer-driven (CPL=3, 50 ms quantum) | ✅ |
+| Sleep real + Ctrl+C live + background jobs (`&`) + `kill` | ✅ |
+| Driver ATA PIO + FAT16 read/write + persistencia en `/sd` | ✅ |
+| Networking | ⏳ (fase 8.5: libc surface lista, falta driver + stack) |
+| Servers en ring 3 (hoy todos ring 0) | ⏳ (fase 10) |
+| `fork` / `exec` real | ❌ |
 | Multi-core (SMP) | ❌ |
 
 ---
@@ -365,16 +386,26 @@ lejano y muy difícil de debuggear. Están repetidas en
 
 ## Roadmap
 
+Cerrado recientemente:
+
+- **FASE 9 — Scheduler preempt** con timer-driven quantum sobre CPL=3
+  + sleep real + Ctrl+C live + background jobs.
+- **FASE 8 — Disco real**: driver ATA PIO + FAT16 read/write sobre
+  `sd.img` (16 MiB). `/sd` se monta solo si hay disco, con persistencia
+  verificada (escribir → reboot → leer).
+
 Las próximas fases grandes:
 
-1. **Scheduler preemptivo** real con quantum de timer, no cooperativo.
-2. **Driver de disco** (ATA PIO primero, después VirtIO) + FAT16/FAT32
-   sobre `sd.img`.
-3. **Mover servers a ring 3** (shell, fs, console, keyboard como
-   procesos de usuario).
-4. **fork/exec** real (hoy `exec` reemplaza la task actual, no hay
+1. **Stack de red** (FASE 8.5): driver RTL8139 + ARP/IPv4/ICMP + UDP/TCP
+   minimal. La superficie POSIX (`<arpa/inet.h>`, `<sys/socket.h>`) ya
+   está en la libc desde FASE 7.7, hoy con stubs `ENOSYS`.
+2. **Mover servers a ring 3** (FASE 10): shell, fs, console, keyboard
+   como procesos de usuario con IPC kernel-mediated.
+3. **fork/exec** real (hoy `exec` reemplaza la task actual, no hay
    `fork`).
-5. **Stack de red** (eventualmente).
+4. **TUI potente** (FASE 11): mini Norton Commander, viewer, editor —
+   ahora que FAT da archivos persistentes vale la pena editar.
+5. **Gráfico** (FASE 12): window server + terminal en ventana + mouse.
 6. **SMP** (mucho después).
 
 Detalle en `osnos/PLAN.md` y `osnos/STATUS.md`.

@@ -531,11 +531,117 @@ OK FASE 7.7 — libc Tier 1 (pre-networking) — VERIFICADO en QEMU
    - socket(AF_INET, SOCK_STREAM, 0) → -1 + errno=ENOSYS
    42 PASS / 0 FAIL en QEMU.
 
-### FASE 8 — Disco real
-35. block driver (ATA PIO o VirtIO sobre el sd.img que ya tenemos)
-36. simplefs o FAT
-37. persistencia real
-38. fsck simple
+### FASE 8 — Disco real — CERRADA (excepto fsck)
+
+OK 8.1 ATA PIO block driver — VERIFICADO en QEMU
+   - src/drivers/block_ata.{c,h}: driver PIO @ Primary IDE (0x1F0/0x3F6),
+     LBA28. `block_ata_init()` corre IDENTIFY (cmd 0xEC), parsea sector
+     count (words 60..61) + model (words 27..46 byte-swapped). Sin DMA,
+     sin IRQs — polling de BSY/DRQ con presupuesto 1M iters.
+   - block_ata_read_sector / block_ata_write_sector: 512B PIO; write
+     emite FLUSH_CACHE (0xE7) post-data para write-through, sin buffer
+     cache en el kernel.
+   - block_ata_present / block_ata_sector_count / block_ata_model
+     expuestos para el sysfs.
+   - kmain: block_ata_init() corre después de timer_init(); falla
+     silenciosa (present=false) si no hay disco.
+   - sysfs nuevo: /sys/disks (model + sectors + bytes); /sys/mounts ya
+     listaba /sd automáticamente vía longest-prefix.
+
+OK 8.1 wiring QEMU + sd.img — VERIFICADO en QEMU
+   - GNUmakefile: target `sd.img` que crea imagen de 16 MiB via mtools
+     (mformat + mcopy con seeds README.TXT y HELLO.TXT). Sin sudo /
+     sin loopback mount.
+   - run-bios depende de sd.img; pasa `-drive file=sd.img,format=raw,
+     if=ide,index=0,media=disk` y usa **-M pc** (i440FX + PIIX3-IDE)
+     en vez de q35.
+   - q35 monta el disco vía ich9-ahci (SATA AHCI), NO en puertos
+     legacy 0x1F0/0x3F6. -M pc levanta piix3-ide con IDE legacy
+     wired. Diagnosticado vía `info qtree` en monitor QEMU al ver
+     que `/sys/disks` no detectaba nada con q35.
+
+OK 8.2 FAT16 parser (read-only) — VERIFICADO en QEMU
+   - src/fs/fat.{c,h}: parser puro sobre block_ata.
+   - fat_init: lee sector 0, valida boot signature 0x55AA + BPB,
+     calcula fat_lba / root_dir_lba / data_lba. Rechaza FAT12 y FAT32
+     vía cluster-count check ([4085, 65525)).
+   - dir_slot_locate / read_dir_slot: dos primitivas separadas. La
+     primera no interpreta marker bytes (la usa el alocador de slots);
+     la segunda devuelve "end-of-dir" en 0x00 (la usan lookup/readdir).
+   - fat_lookup: walk de componentes, conversion 8.3 case-insensitive
+     ("readme.txt" → "README  TXT"), navega root + subdirs.
+   - fat_read_file: walk cluster chain con offset arbitrario,
+     copia sector-a-sector.
+   - fat_readdir: cursor lineal opaco; skip de 0xE5 / LFN / volume label.
+   - Solo 8.3 short names. LFN se ignora silenciosamente.
+
+OK 8.3 VFS adapter — VERIFICADO en QEMU
+   - src/fs/fat_vfs.{c,h}: const vfs_ops_t fat_vfs_ops. Strip de "/sd"
+     antes de delegar al parser. Esconde "." y ".." en readdir (convención
+     POSIX/VFS).
+   - bootstrap_fs: `if (fat_init() == 0) vfs_mount("/sd", &fat_vfs_ops, 0)`.
+     Sin disco el mount no aparece; el resto del FS sigue intacto.
+   - `cat /sd/README.TXT` imprime "hola desde el disco".
+   - `ls /sd` lista README.TXT + HELLO.TXT.
+
+OK 8.4 FAT write support — VERIFICADO en QEMU (round-trip + reboot persistence)
+   - fat_set_entry: setea FAT[c] = value en TODAS las copias del FAT
+     (mirror). Sin esto cada write rompe consistencia y fsck explota.
+   - fat_alloc_cluster: scan lineal desde cluster 2, primer free claimea
+     marcando como EOF (0xFFFF).
+   - fat_free_chain: walk + set 0 en cada eslabón.
+   - fat_alloc_chain(N): aloca + enlaza N clusters; rollback completo
+     en cualquier fallo (no deja chain parcial).
+   - write_data_into_chain: copia bytes a través del chain, padea última
+     sector con zeros (no leak de RAM del kernel a disco).
+   - Orden crash-safe en write: alloc-new-chain → write-data →
+     update-dirent → free-old-chain. Crash entre fases deja como mucho
+     clusters huérfanos (fsck-recoverable), nunca dirent apuntando a
+     basura.
+   - fat_write_path: maneja overwrite (free old chain al final) y
+     create (split parent/base, name_to_83, find_free_dir_slot, build_dirent_raw).
+   - fat_append_path: read-existing-into-scratch + concat + write. Cap
+     FAT_APPEND_SCRATCH = 8 KiB.
+   - fat_unlink_path: free chain + raw[0]=0xE5 en el dirent.
+   - fat_mkdir_path: aloca un cluster, zero-llena, escribe . y .. en
+     los primeros 64 bytes, registra dirent en parent con ATTR_DIR.
+     ".." apunta al first_cluster del parent (0 para root, convención FAT).
+   - fat_rmdir_path: rechaza si encuentra cualquier valid entry que no
+     sea . / ..; free chain + 0xE5 en dirent.
+   - find_free_dir_slot: reusa primer 0xE5 (deleted), o claimea primer
+     0x00 (end-of-dir). En post-mformat-zero el slot inmediatamente
+     siguiente sigue siendo 0x00, así que la marca de fin se preserva
+     sin escribir un terminator explícito.
+   - Sin LFN (los nombres se almacenan SIEMPRE como 8.3 uppercase).
+   - Sin rename in-place: vfs_move cae al fallback copy+unlink.
+   - fat_vfs_ops migrado: write/append/mkdir/rmdir/unlink ya no son
+     EROFS. .rename = NULL.
+
+TODO 8.5 fsck minimal — pendiente
+   - cluster leak audit (huérfanos = en FAT pero no referenciados desde
+     ningún dirent)
+   - cross-link detection (mismo cluster en 2 chains)
+   - FAT mirror divergence check
+   - dirent size vs chain length consistency
+
+TODO opcional rename in-place — pendiente
+   - Hoy vfs_move usa copy+unlink (O(file size)). Para mismo-directorio
+     basta con sobrescribir los primeros 11 bytes del dirent con un nuevo
+     8.3 name — O(1).
+
+TODO opcional LFN (Long File Names) — pendiente
+   - Hoy nombres > 8 chars o con minúsculas se rechazan en name_to_83.
+     LFN agrega series de dirent slots con attr 0x0F antes del 8.3 entry.
+
+### FASE 8.5 — Networking (post-FAT)
+La libc ya tiene la superficie POSIX preparada (arpa/inet.h, netinet/in.h,
+sys/socket.h con stubs ENOSYS) desde FASE 7.7. Cuando lleguemos:
+39. driver de red (RTL8139 ~200 LOC en QEMU; e1000 ~400)
+40. ARP + IPv4 + ICMP echo minimal
+41. UDP socket
+42. TCP socket (server + client minimal)
+43. Reemplazar stubs en lib/libc/inet.c con osnos_syscall*
+44. Demo: /bin/httpd sirviendo /sd/index.html
 
 ### FASE 9 — Scheduler real — CERRADA
 OK 9.1 timer IRQ infra — VERIFICADO en QEMU

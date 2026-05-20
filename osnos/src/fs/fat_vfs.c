@@ -21,6 +21,13 @@ static const char *strip_mount(const char *path) {
     return path + FAT_MOUNT_PREFIX_LEN;
 }
 
+/* fat_*_path returns negative errno-style ints whose absolute values
+ * match osnos_status_t. Convert with one negation. */
+static osnos_status_t fat_rc_to_status(int rc) {
+    if (rc >= 0) return OSNOS_OK;
+    return (osnos_status_t)(-rc);
+}
+
 static osnos_status_t fat_vfs_stat(void *priv, const char *path,
                                     vfs_stat_t *out) {
     (void)priv;
@@ -32,8 +39,6 @@ static osnos_status_t fat_vfs_stat(void *priv, const char *path,
 
     out->type  = de.is_dir ? VFS_NODE_DIR : VFS_NODE_REG;
     out->size  = de.is_dir ? 0 : de.size;
-    /* dirent_lba<<16 | offset is a stable id per file lifetime. The
-     * root sentinel hits 0 here, which matches sysfs/ramfs convention. */
     out->inode = ((uint64_t)de.dirent_lba << 16) | de.dirent_offset;
     out->mode  = de.is_dir ? 0755 : 0644;
     return OSNOS_OK;
@@ -53,8 +58,17 @@ static osnos_status_t fat_vfs_readdir(void *priv, const char *path,
 
     fat_dirent_t ent;
     uint32_t next = (uint32_t)cursor;
-    if (fat_readdir(&dir, (uint32_t)cursor, &ent, &next) != 0) {
-        return OSNOS_ENOENT;
+    for (;;) {
+        if (fat_readdir(&dir, (uint32_t)cursor, &ent, &next) != 0) {
+            return OSNOS_ENOENT;
+        }
+        /* Hide "." and ".." — VFS convention. */
+        if (ent.name[0] == '.' &&
+            (ent.name[1] == 0 || (ent.name[1] == '.' && ent.name[2] == 0))) {
+            cursor = next;
+            continue;
+        }
+        break;
     }
 
     os_strlcpy(out->name, ent.name, OSNOS_NAME_MAX);
@@ -81,31 +95,61 @@ static osnos_status_t fat_vfs_read(void *priv, const char *path,
     return OSNOS_OK;
 }
 
-static osnos_status_t fat_vfs_rofs(void *priv, const char *path) {
-    (void)priv; (void)path;
-    return OSNOS_EROFS;
+static osnos_status_t fat_vfs_write(void *priv, const char *path,
+                                     const char *buf, size_t buf_size) {
+    (void)priv;
+    const char *rel = strip_mount(path);
+    if (!rel) return OSNOS_ENOENT;
+    if (buf_size > 0xFFFFFFFFu) return OSNOS_EINVAL;
+    return fat_rc_to_status(fat_write_path(rel, buf, (uint32_t)buf_size));
 }
 
-static osnos_status_t fat_vfs_rofs_write(void *priv, const char *path,
-                                          const char *buf, size_t n) {
-    (void)priv; (void)path; (void)buf; (void)n;
-    return OSNOS_EROFS;
+static osnos_status_t fat_vfs_append(void *priv, const char *path,
+                                      const char *buf, size_t buf_size) {
+    (void)priv;
+    const char *rel = strip_mount(path);
+    if (!rel) return OSNOS_ENOENT;
+    if (buf_size > 0xFFFFFFFFu) return OSNOS_EINVAL;
+    return fat_rc_to_status(fat_append_path(rel, buf, (uint32_t)buf_size));
 }
 
-static osnos_status_t fat_vfs_rofs_rename(void *priv, const char *a,
-                                           const char *b) {
-    (void)priv; (void)a; (void)b;
-    return OSNOS_EROFS;
+static osnos_status_t fat_vfs_mkdir(void *priv, const char *path) {
+    (void)priv;
+    const char *rel = strip_mount(path);
+    if (!rel) return OSNOS_ENOENT;
+    return fat_rc_to_status(fat_mkdir_path(rel));
 }
+
+static osnos_status_t fat_vfs_rmdir(void *priv, const char *path) {
+    (void)priv;
+    const char *rel = strip_mount(path);
+    if (!rel) return OSNOS_ENOENT;
+    return fat_rc_to_status(fat_rmdir_path(rel));
+}
+
+static osnos_status_t fat_vfs_unlink(void *priv, const char *path) {
+    (void)priv;
+    const char *rel = strip_mount(path);
+    if (!rel) return OSNOS_ENOENT;
+    return fat_rc_to_status(fat_unlink_path(rel));
+}
+
+/*
+ * No fast-path rename: vfs_move falls back to copy + unlink, which is
+ * correct (just not atomic). Implementing a true in-place rename would
+ * mean rewriting the dirent under a new 8.3 name without touching the
+ * data chain — a worthwhile FASE 8.5 nice-to-have, not a correctness
+ * blocker today.
+ */
 
 const vfs_ops_t fat_vfs_ops = {
     .stat    = fat_vfs_stat,
     .readdir = fat_vfs_readdir,
     .read    = fat_vfs_read,
-    .write   = fat_vfs_rofs_write,
-    .append  = fat_vfs_rofs_write,
-    .mkdir   = fat_vfs_rofs,
-    .rmdir   = fat_vfs_rofs,
-    .unlink  = fat_vfs_rofs,
-    .rename  = fat_vfs_rofs_rename
+    .write   = fat_vfs_write,
+    .append  = fat_vfs_append,
+    .mkdir   = fat_vfs_mkdir,
+    .rmdir   = fat_vfs_rmdir,
+    .unlink  = fat_vfs_unlink,
+    .rename  = 0
 };
