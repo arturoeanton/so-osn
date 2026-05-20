@@ -56,10 +56,11 @@
 #define NUM_TX_SLOTS   4
 
 static struct {
-    bool      present;
-    uint16_t  io_base;
-    uint8_t   irq_line;
-    uint8_t   mac[6];
+    bool             present;
+    uint16_t         io_base;
+    uint8_t          irq_line;
+    uint8_t          mac[6];
+    rtl8139_rx_fn    rx_cb;
 
     uint8_t  *rx_buf_virt;
     uint64_t  rx_buf_phys;
@@ -157,6 +158,13 @@ static void drain_rx(void) {
         dev.rx_packets++;
         if (length >= 4) dev.rx_bytes += (uint32_t)(length - 4);
 
+        /* Frame payload starts at p+4 (after hdr+len); chip-appended
+         * 4-byte CRC is at the tail. Hand the trimmed frame to the
+         * stack callback. */
+        if (dev.rx_cb && length > 4) {
+            dev.rx_cb(p + 4, (size_t)(length - 4));
+        }
+
         /* Skip 4-byte header + payload, then 4-byte align. */
         uint32_t step = (uint32_t)length + 4u;
         dev.rx_offset = (uint16_t)((dev.rx_offset + step + 3u) & ~3u);
@@ -164,6 +172,10 @@ static void drain_rx(void) {
 
         outw(dev.io_base + R_CAPR, (uint16_t)(dev.rx_offset - 0x10));
     }
+}
+
+void rtl8139_set_rx_callback(rtl8139_rx_fn fn) {
+    dev.rx_cb = fn;
 }
 
 void rtl8139_irq_handle(void) {

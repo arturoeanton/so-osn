@@ -6,6 +6,8 @@
 #include "../drivers/framebuffer.h"
 #include "../fs/fat.h"
 #include "../fs/vfs.h"
+#include "../net/arp.h"
+#include "../net/eth.h"
 #include "../include/osnos_dirent.h"
 #include "../include/osnos_fcntl.h"
 #include "../include/osnos_elf.h"
@@ -327,6 +329,7 @@ static void cmd_test(const char *args);
 static void cmd_ps(const char *args);
 static void cmd_mem(const char *args);
 static void cmd_mount(const char *args);
+static void cmd_arp(const char *args);
 static void cmd_exec(const char *args);
 static void cmd_kill(const char *args);
 static void cmd_neof(const char *args);
@@ -368,6 +371,7 @@ static const shell_command_t commands[] = {
     CMD("ps",      cmd_ps,      "ps"),
     CMD("mem",     cmd_mem,     "mem"),
     CMD("mount",   cmd_mount,   "mount"),
+    CMD("arp",     cmd_arp,     "arp [IP] (default: gateway)"),
     CMD("exec",    cmd_exec,    "exec /bin/PROG [args] [&]"),
     CMD("kill",    cmd_kill,    "kill PID"),
     CMD("neof",    cmd_neof,    "neof"),
@@ -1921,6 +1925,80 @@ static void cmd_mem(const char *args) {
 static void cmd_mount(const char *args) {
     (void)args;
     check_fs(shell_send_fs1(IPC_FS_READ, "/sys/mounts"));
+}
+
+/* Parse a dotted-quad like "10.0.2.2" into a uint32 in host order
+ * (most-significant byte = first octet). Returns false on malformed
+ * input. Trailing whitespace is ignored. */
+static bool parse_ipv4(const char *s, uint32_t *out) {
+    uint32_t parts[4] = {0, 0, 0, 0};
+    int idx = 0;
+    while (*s && idx < 4) {
+        if (*s < '0' || *s > '9') return false;
+        uint32_t v = 0;
+        int digits = 0;
+        while (*s >= '0' && *s <= '9' && digits < 3) {
+            v = v * 10 + (uint32_t)(*s - '0');
+            s++;
+            digits++;
+        }
+        if (v > 255 || digits == 0) return false;
+        parts[idx++] = v;
+        if (*s == '.') { s++; continue; }
+        if (*s == 0 || *s == ' ' || *s == '\t' || *s == '\n') break;
+        return false;
+    }
+    if (idx != 4) return false;
+    *out = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
+    return true;
+}
+
+static void cmd_arp(const char *args) {
+    while (*args == ' ' || *args == '\t') args++;
+
+    uint32_t ip;
+    if (*args == 0) {
+        ip = net_gateway_ip();
+    } else if (!parse_ipv4(args, &ip)) {
+        shell_send_console_color("\nusage: arp [IP]\n", 0xff5555);
+        prompt();
+        return;
+    }
+
+    char line[128];
+    line[0] = 0;
+    os_strlcat(line, "\nresolving ", sizeof(line));
+
+    char num[8];
+    for (int i = 3; i >= 0; i--) {
+        os_format_u64((ip >> (i * 8)) & 0xFF, num, sizeof(num));
+        os_strlcat(line, num, sizeof(line));
+        if (i > 0) os_strlcat(line, ".", sizeof(line));
+    }
+    os_strlcat(line, " ...\n", sizeof(line));
+    shell_send_console(line);
+
+    uint8_t mac[6];
+    if (!arp_resolve(ip, mac, 500)) {
+        shell_send_console_color("timeout\n", 0xff5555);
+        prompt();
+        return;
+    }
+
+    line[0] = 0;
+    os_strlcat(line, "  → ", sizeof(line));
+    for (int m = 0; m < 6; m++) {
+        char nh[3];
+        uint8_t b = mac[m];
+        nh[0] = (char)((b >> 4) < 10 ? '0' + (b >> 4) : 'a' + (b >> 4) - 10);
+        nh[1] = (char)((b & 0xF) < 10 ? '0' + (b & 0xF) : 'a' + (b & 0xF) - 10);
+        nh[2] = 0;
+        os_strlcat(line, nh, sizeof(line));
+        if (m < 5) os_strlcat(line, ":", sizeof(line));
+    }
+    os_strlcat(line, "\n", sizeof(line));
+    shell_send_console(line);
+    prompt();
 }
 
 static void cmd_exec(const char *args) {

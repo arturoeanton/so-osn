@@ -29,6 +29,7 @@
 #include "../micro/vmm.h"
 #include "../fs/bootstrap.h"
 #include "../fs/ramfs.h"
+#include "../net/eth.h"
 #include "../servers/fs_server.h"
 
 // ======================================================
@@ -124,6 +125,7 @@ void kmain(void) {
     timer_init();          /* PIT @ 100 Hz, installs IDT[0x20], unmask IRQ0 */
     block_ata_init();      /* IDENTIFY primary master; FS layer mounts it */
     rtl8139_init();        /* PCI scan + driver; silent if no NIC */
+    net_init();            /* register RX dispatch + ARP cache */
 
     ipc_init();
     task_init();

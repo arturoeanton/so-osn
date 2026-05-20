@@ -43,3 +43,13 @@ uint64_t    rtl8139_errors(void);
  * slot is still owned by the chip (all four busy).
  */
 bool rtl8139_tx(const void *buf, size_t len);
+
+/*
+ * Register a callback that's invoked from IRQ context for each
+ * received Ethernet frame (already trimmed of the trailing 4-byte
+ * CRC). The callback runs with interrupts ENABLED so anything it does
+ * with shared state has to handle re-entry; keep it short — append
+ * to a queue or do a quick stateless dispatch.
+ */
+typedef void (*rtl8139_rx_fn)(const uint8_t *frame, size_t len);
+void rtl8139_set_rx_callback(rtl8139_rx_fn fn);

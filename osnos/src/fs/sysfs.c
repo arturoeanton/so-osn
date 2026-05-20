@@ -5,6 +5,7 @@
 #include "../fs/fat.h"
 #include "../fs/ramfs.h"
 #include "../lib/string.h"
+#include "../net/arp.h"
 #include "../micro/idt.h"
 #include "../micro/ipc.h"
 #include "../micro/kmalloc.h"
@@ -327,6 +328,14 @@ static char hex_nib(uint8_t n) {
     return (char)(n < 10 ? '0' + n : 'a' + (n - 10));
 }
 
+static void gen_arp(char *out, size_t out_size) {
+    if (!rtl8139_present()) {
+        os_strlcpy(out, "no NIC\n", out_size);
+        return;
+    }
+    arp_dump(out, out_size);
+}
+
 static void gen_net(char *out, size_t out_size) {
     out[0] = 0;
 
@@ -407,7 +416,8 @@ static const sysfs_entry_t entries[] = {
     { "timer",    gen_timer    },
     { "disks",    gen_disks    },
     { "fat_fsck", gen_fat_fsck },
-    { "net",      gen_net      }
+    { "net",      gen_net      },
+    { "arp",      gen_arp      }
 };
 
 #define SYSFS_ENTRY_COUNT (sizeof(entries) / sizeof(entries[0]))
