@@ -1,5 +1,6 @@
 #include "sysfs.h"
 
+#include "../drivers/block_ata.h"
 #include "../fs/ramfs.h"
 #include "../lib/string.h"
 #include "../micro/idt.h"
@@ -295,6 +296,26 @@ static void gen_cpuinfo(char *out, size_t out_size) {
     os_strlcat(out, "cores     : 1 (no SMP yet)\n", out_size);
 }
 
+static void gen_disks(char *out, size_t out_size) {
+    out[0] = 0;
+
+    if (!block_ata_present()) {
+        os_strlcat(out, "no ATA disk detected\n", out_size);
+        return;
+    }
+
+    char num[24];
+    os_strlcat(out, "ata0 model:   ", out_size);
+    os_strlcat(out, block_ata_model(), out_size);
+    os_strlcat(out, "\nata0 sectors: ", out_size);
+    os_format_u64(block_ata_sector_count(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\nata0 bytes:   ", out_size);
+    os_format_u64(block_ata_sector_count() * 512, num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\n", out_size);
+}
+
 static void gen_build(char *out, size_t out_size) {
     out[0] = 0;
     os_strlcat(out, "compiled: " __DATE__ " " __TIME__ "\n", out_size);
@@ -317,7 +338,8 @@ static const sysfs_entry_t entries[] = {
     { "services", gen_services },
     { "mounts",   gen_mounts   },
     { "meminfo",  gen_meminfo  },
-    { "timer",    gen_timer    }
+    { "timer",    gen_timer    },
+    { "disks",    gen_disks    }
 };
 
 #define SYSFS_ENTRY_COUNT (sizeof(entries) / sizeof(entries[0]))

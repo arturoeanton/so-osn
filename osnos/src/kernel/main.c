@@ -4,6 +4,7 @@
 
 #include <limine.h>
 
+#include "../drivers/block_ata.h"
 #include "../drivers/framebuffer.h"
 #include "../drivers/lapic.h"
 #include "../drivers/pic.h"
@@ -120,6 +121,7 @@ void kmain(void) {
     pic_init();            /* remap 8259 to 0x20-0x2F, mask all lines */
     lapic_init();          /* enable LAPIC + LINT0=ExtINT (q35 needs this) */
     timer_init();          /* PIT @ 100 Hz, installs IDT[0x20], unmask IRQ0 */
+    block_ata_init();      /* IDENTIFY primary master; FS layer mounts it */
 
     ipc_init();
     task_init();

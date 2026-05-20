@@ -260,4 +260,3 @@ Window server, terminal en ventana, mouse, compositor simple.
 [ ] Abrir este PLAN.md en split + src/drivers/lapic.c como template
 [ ] Empezar por block_ata.c — IDENTIFY primero, read después
 ```
-claude --resume 03fa4eb3-b7ff-42c3-aa5b-e8756c186085

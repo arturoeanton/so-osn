@@ -135,6 +135,30 @@ LIMINE_DIR ?= $(shell \
 
 QEMUFLAGS ?= -m 2G
 
+# ---------------------------------------------------------------------------
+# sd.img — 16 MiB FAT volume seeded with a couple of files. Built with
+# mtools (mformat + mcopy) so no sudo / loopback mount is needed. On a
+# 16 MiB volume mformat picks FAT16 by default, which is what our parser
+# expects.
+# ---------------------------------------------------------------------------
+SD_IMG       := sd.img
+SD_SIZE_MB   ?= 16
+SD_TMP       := $(BUILD)/sd_seed
+SD_README_TXT = hola desde el disco
+SD_HELLO_TXT  = fat works!
+
+$(SD_IMG):
+	@command -v mformat >/dev/null 2>&1 || { echo "error: mtools (mformat/mcopy) not found. Install: brew install mtools / sudo apt install mtools" >&2; exit 1; }
+	@command -v mcopy   >/dev/null 2>&1 || { echo "error: mtools (mformat/mcopy) not found. Install: brew install mtools / sudo apt install mtools" >&2; exit 1; }
+	dd if=/dev/zero of=$@ bs=1048576 count=$(SD_SIZE_MB) status=none
+	mformat -i $@ ::
+	mkdir -p $(SD_TMP)
+	printf '%s\n' '$(SD_README_TXT)' > $(SD_TMP)/README.TXT
+	printf '%s\n' '$(SD_HELLO_TXT)'  > $(SD_TMP)/HELLO.TXT
+	mcopy -i $@ $(SD_TMP)/README.TXT ::README.TXT
+	mcopy -i $@ $(SD_TMP)/HELLO.TXT  ::HELLO.TXT
+	rm -rf $(SD_TMP)
+
 iso: $(ISO)
 
 $(ISO): $(BUILD)/$(OUTPUT) limine.conf
@@ -160,8 +184,10 @@ $(ISO): $(BUILD)/$(OUTPUT) limine.conf
 
 run: run-bios
 
-run-bios: $(ISO)
-	$(QEMU) -M q35 -cdrom $(ISO) -boot d $(QEMUFLAGS)
+run-bios: $(ISO) $(SD_IMG)
+	$(QEMU) -M pc -cdrom $(ISO) -boot d \
+	    -drive file=$(SD_IMG),format=raw,if=ide,index=0,media=disk \
+	    $(QEMUFLAGS)
 
 -include $(DEPS)
 
@@ -216,4 +242,4 @@ $(BUILD)/tests/%.elf.o: $(BUILD)/tests/%.elf
 	    $(notdir $<) $(notdir $@)
 
 clean:
-	rm -rf $(BUILD)
+	rm -rf $(BUILD) $(SD_IMG)
