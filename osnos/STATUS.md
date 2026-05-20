@@ -887,7 +887,42 @@ OK 8.5.3 IPv4 + ICMP echo — VERIFICADO en QEMU
      resolve, 0ms con cache) y ping a 10.0.2.3 (DNS slirp) andando.
      ping a 10.0.2.15 (self) hace timeout — esperado: el chip no
      devuelve sus propios frames y slirp tampoco bouncea localhost.
-TODO 8.5.4 UDP socket + syscalls
+OK 8.5.4a UDP layer + kernel socket API — VERIFICADO en QEMU
+   - src/net/udp.{c,h}: header 8 bytes (sports, dport, length, cs BE).
+     udp_compute_checksum arma pseudo-header (src/dst IP + 0 + proto17
+     + udp length) seguido del segmento UDP, reusa ip_checksum. Sender
+     transmite 0xFFFF cuando el cálculo da 0 (RFC 768). Receiver
+     respeta cs=0 como "skip verify".
+   - src/net/socket.{c,h}: socket table 8 slots, espacio de
+     descriptores propio (independiente del fd table — 8.5.4b lo
+     integra). RX ring de 8 datagrams × 1024B cada uno. sock_create/
+     bind/close/recvfrom/sendto. sock_bind admite port=0 (ephemeral
+     en 40000..60000) e ip=0 (INADDR_ANY).
+   - sock_recvfrom: busy-poll cli/sti contra rx_count, timer_ms
+     deadline. Lock cli/sti porque sock_deliver_udp corre en IRQ
+     context y modifica el ring.
+   - sock_sendto: auto-bind si no había puerto local (para ephemeral
+     send). Llama udp_send → ip_send → arp_resolve → eth_send →
+     rtl8139_tx.
+   - sock_deliver_udp: invocado desde udp_handle. Busca el socket
+     bindeado al dst_port (cualquier local_ip), enqueue. Si queue
+     full → drop silencioso.
+   - Hook en ip.c: IP_PROTO_UDP → udp_handle. Hook en udp_handle →
+     sock_deliver_udp.
+   - Shell nuevo: `udptest [PORT]` (default 1234) — bind, recibe 10s,
+     imprime "rx IP:PORT [contenido]" y echo back al sender.
+   - QEMU: agregado hostfwd=udp::1234-:1234 al -netdev user.
+   - /sys/net: counters udp rx/tx/drop.
+   - **Bugfix crítico**: el asm stub rtl8139_irq_entry usaba r12 como
+     scratch para alinear rsp sin guardarlo. r12 es callee-saved en
+     SystemV x86-64; el código interrumpido lo veía corrupto post-iretq.
+     Disparaba GPF aleatorios durante udptest. Fix: pushq %r12 al
+     entrar, popq %r12 al salir.
+   - Verificado: desde Mac `echo hola | nc -u -w1 127.0.0.1 1234`,
+     OSnOS muestra "rx 10.0.2.2:NNNNN [hola.]" — 3 datagrams seguidos
+     con source ports random vía slirp NAT.
+
+TODO 8.5.4b syscall wiring + libc — siguiente
 TODO 8.5.5 TCP state machine
 TODO 8.5.6 Syscalls wireados + libc
 TODO 8.5.7 /bin/httpd sirviendo /sd/index.html

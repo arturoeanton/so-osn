@@ -9,6 +9,7 @@
 #include "../net/arp.h"
 #include "../net/eth.h"
 #include "../net/icmp.h"
+#include "../net/socket.h"
 #include "../include/osnos_dirent.h"
 #include "../include/osnos_fcntl.h"
 #include "../include/osnos_elf.h"
@@ -332,6 +333,7 @@ static void cmd_mem(const char *args);
 static void cmd_mount(const char *args);
 static void cmd_arp(const char *args);
 static void cmd_ping(const char *args);
+static void cmd_udptest(const char *args);
 static void cmd_exec(const char *args);
 static void cmd_kill(const char *args);
 static void cmd_neof(const char *args);
@@ -375,6 +377,7 @@ static const shell_command_t commands[] = {
     CMD("mount",   cmd_mount,   "mount"),
     CMD("arp",     cmd_arp,     "arp [IP] (default: gateway)"),
     CMD("ping",    cmd_ping,    "ping IP (one ICMP echo, 1s timeout)"),
+    CMD("udptest", cmd_udptest, "udptest [PORT] (bind+echo loop, 10s)"),
     CMD("exec",    cmd_exec,    "exec /bin/PROG [args] [&]"),
     CMD("kill",    cmd_kill,    "kill PID"),
     CMD("neof",    cmd_neof,    "neof"),
@@ -2042,6 +2045,84 @@ static void cmd_ping(const char *args) {
     os_strlcat(line, num, sizeof(line));
     os_strlcat(line, " ms\n", sizeof(line));
     shell_send_console(line);
+    prompt();
+}
+
+static void cmd_udptest(const char *args) {
+    while (*args == ' ' || *args == '\t') args++;
+
+    uint16_t port = 1234;
+    if (*args) {
+        uint32_t v = 0;
+        const char *p = args;
+        while (*p >= '0' && *p <= '9') { v = v * 10 + (uint32_t)(*p - '0'); p++; }
+        if (v == 0 || v > 65535) {
+            shell_send_console_color("\nusage: udptest [PORT]\n", 0xff5555);
+            prompt();
+            return;
+        }
+        port = (uint16_t)v;
+    }
+
+    int sd = sock_create(OSNOS_SOCK_DGRAM);
+    if (sd < 0) {
+        shell_send_console_color("\nsock_create failed\n", 0xff5555);
+        prompt();
+        return;
+    }
+    if (sock_bind(sd, 0, port) != 0) {
+        shell_send_console_color("\nbind failed\n", 0xff5555);
+        sock_close(sd);
+        prompt();
+        return;
+    }
+
+    char line[128];
+    line[0] = 0;
+    os_strlcat(line, "\nlistening UDP port ", sizeof(line));
+    char num[8];
+    os_format_u64(port, num, sizeof(num));
+    os_strlcat(line, num, sizeof(line));
+    os_strlcat(line, ", 10s, echo back to sender\n", sizeof(line));
+    shell_send_console(line);
+
+    uint64_t deadline = timer_ms() + 10000;
+    while (timer_ms() < deadline) {
+        uint8_t  buf[256];
+        uint32_t src_ip = 0;
+        uint16_t src_port = 0;
+        int n = sock_recvfrom(sd, buf, sizeof(buf) - 1,
+                                &src_ip, &src_port,
+                                /*timeout_ms=*/200);
+        if (n <= 0) continue;
+
+        buf[n] = 0;
+        line[0] = 0;
+        os_strlcat(line, "rx ", sizeof(line));
+        for (int i = 3; i >= 0; i--) {
+            os_format_u64((src_ip >> (i * 8)) & 0xFF, num, sizeof(num));
+            os_strlcat(line, num, sizeof(line));
+            if (i > 0) os_strlcat(line, ".", sizeof(line));
+        }
+        os_strlcat(line, ":", sizeof(line));
+        os_format_u64(src_port, num, sizeof(num));
+        os_strlcat(line, num, sizeof(line));
+        os_strlcat(line, "  [", sizeof(line));
+        size_t avail = sizeof(line) - os_strlen(line) - 4;
+        for (int i = 0; i < n && (size_t)i < avail; i++) {
+            char c = (buf[i] >= 0x20 && buf[i] < 0x7F) ? (char)buf[i] : '.';
+            char two[2] = { c, 0 };
+            os_strlcat(line, two, sizeof(line));
+        }
+        os_strlcat(line, "]\n", sizeof(line));
+        shell_send_console(line);
+
+        /* Echo back. */
+        sock_sendto(sd, buf, (size_t)n, src_ip, src_port);
+    }
+
+    sock_close(sd);
+    shell_send_console("udptest done\n");
     prompt();
 }
 

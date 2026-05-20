@@ -190,7 +190,7 @@ run: run-bios
 run-bios: $(ISO) $(SD_IMG)
 	$(QEMU) -M pc -cdrom $(ISO) -boot d \
 	    -drive file=$(SD_IMG),format=raw,if=ide,index=0,media=disk \
-	    -netdev user,id=net0,hostfwd=tcp::8080-:80 \
+	    -netdev user,id=net0,hostfwd=tcp::8080-:80,hostfwd=udp::1234-:1234 \
 	    -device rtl8139,netdev=net0 \
 	    $(QEMUFLAGS)
 

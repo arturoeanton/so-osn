@@ -110,6 +110,7 @@ static inline uint32_t inl(uint16_t port) {
 __asm__ (
     ".global rtl8139_irq_entry\n"
     "rtl8139_irq_entry:\n"
+    /* Save caller-saved regs + r12 (we use it as rsp scratch below). */
     "    pushq %rax\n"
     "    pushq %rcx\n"
     "    pushq %rdx\n"
@@ -119,10 +120,12 @@ __asm__ (
     "    pushq %r9\n"
     "    pushq %r10\n"
     "    pushq %r11\n"
+    "    pushq %r12\n"
     "    movq %rsp, %r12\n"
     "    andq $-16, %rsp\n"
     "    call rtl8139_irq_handle\n"
     "    movq %r12, %rsp\n"
+    "    popq %r12\n"
     "    popq %r11\n"
     "    popq %r10\n"
     "    popq %r9\n"

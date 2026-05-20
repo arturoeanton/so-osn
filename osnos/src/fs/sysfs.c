@@ -8,6 +8,7 @@
 #include "../net/arp.h"
 #include "../net/icmp.h"
 #include "../net/ip.h"
+#include "../net/udp.h"
 #include "../micro/idt.h"
 #include "../micro/ipc.h"
 #include "../micro/kmalloc.h"
@@ -404,6 +405,15 @@ static void gen_net(char *out, size_t out_size) {
     os_strlcat(out, num, out_size);
     os_strlcat(out, " / ", out_size);
     os_format_u64(icmp_tx_packets(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\nudp rx/tx/drop: ", out_size);
+    os_format_u64(udp_rx_packets(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, " / ", out_size);
+    os_format_u64(udp_tx_packets(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, " / ", out_size);
+    os_format_u64(udp_rx_drops(), num, sizeof(num));
     os_strlcat(out, num, out_size);
     os_strlcat(out, "\n", out_size);
 }
