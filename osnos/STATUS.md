@@ -963,7 +963,44 @@ OK 8.5.4b Linux socket syscalls + libc + udptest ELF — VERIFICADO en QEMU
      correcto. Linux ABI invariant preservado: los números de syscall
      y la struct sockaddr_in son idénticos a Linux x86_64.
 
-TODO 8.5.5 TCP state machine — siguiente
+OK 8.5.5a TCP handshake (passive) — VERIFICADO en QEMU
+   - src/net/tcp.{c,h}: header 20 bytes + flags FIN/SYN/RST/PSH/ACK/URG,
+     tcp_state_t enum con los 11 estados de RFC 793.
+   - tcp_compute_checksum: pseudo-header (src/dst IP + 0 + proto=6 +
+     tcp length) + segmento; reusa ip_checksum.
+   - tcp_send(dst_ip, dst_port, src_port, seq, ack, flags, window,
+     payload, len): arma header fijo (data offset 5) + payload,
+     calcula checksum, manda vía ip_send (que hace ARP + eth).
+   - tcp_handle: valida checksum + data offset, delega state machine
+     a sock_tcp_handle_segment.
+   - sock_t extendido con tcp_state, remote_ip/port, snd_nxt/snd_una/
+     rcv_nxt. sock_create acepta SOCK_STREAM (1).
+   - sock_listen(sd): pasa el socket a TCP_LISTEN (requiere bind previo).
+   - sock_tcp_handle_segment: state machine pasiva.
+     - LISTEN + SYN → SYN_RCVD, snd_una/snd_nxt = ISN (timer_ms+i*1000,
+       cheap pero suficiente sin SYN-flood defense), rcv_nxt = peer_seq+1,
+       envía SYN-ACK, snd_nxt++.
+     - SYN_RCVD + ACK válido → ESTABLISHED.
+     - ESTABLISHED + FIN/PSH → RST de vuelta (8.5.5a no hace data
+       transfer ni close gracioso, esos llegan en 8.5.5b).
+     - RST en cualquier estado → vuelve a LISTEN.
+     - Segmento sin socket bindeado → respondemos con RST+ACK.
+   - sock_tcp_get_peer(sd, &ip, &port): poll para ver si está
+     ESTABLISHED. sock_tcp_reset(sd): manda RST y vuelve a LISTEN.
+   - /sys/net: tcp rx/tx/drop counters.
+   - Shell nuevo: tcptest [PORT] (default 80; matches el hostfwd
+     existente tcp::8080-:80). Bind+listen, espera 15s, imprime peer,
+     RST, close.
+   - Verificado: desde Mac `nc -v -w1 127.0.0.1 8080` se conecta
+     correctamente ("Connection succeeded!"), OSnOS muestra
+     "connection from 10.0.2.2:NNNNN — handshake OK, sending RST"
+     y nc ve el RST inmediato.
+
+TODO 8.5.5b TCP data transfer + graceful close
+TODO 8.5.5c TCP listen/accept syscalls + multi-connection
+TODO 8.5.6 socket options + select()
+TODO 8.5.7 getaddrinfo (AI_PASSIVE no-DNS) + /bin/httpd
+TODO 8.5.8 compilar y correr selectserver.c de Beej end-to-end
 TODO 8.5.5 TCP state machine
 TODO 8.5.6 Syscalls wireados + libc
 TODO 8.5.7 /bin/httpd sirviendo /sd/index.html
