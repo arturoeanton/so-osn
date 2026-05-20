@@ -672,10 +672,9 @@ int fat_unlink_path(const char *path) {
 
     if (fat_free_chain(de.first_cluster) != 0) return FAT_EIO;
 
-    uint8_t raw[DIRENT_SIZE];
-    if (block_ata_read_sector(de.dirent_lba, raw) != 0) return FAT_EIO;
-    /* The dirent we want is inside this sector at de.dirent_offset.
-     * Patch first byte to 0xE5 (deleted marker), rewrite sector. */
+    /* Patch the first byte of the dirent to 0xE5 (deleted). RMW of the
+     * sector that contains it — block_ata_read_sector always transfers
+     * 512 B so the buffer MUST be sector-sized, never DIRENT_SIZE. */
     uint8_t sb[SECTOR_SIZE];
     if (block_ata_read_sector(de.dirent_lba, sb) != 0) return FAT_EIO;
     sb[de.dirent_offset] = 0xE5;
