@@ -651,7 +651,7 @@ TODO opcional fsck repair-mode — pendiente
      (b) trunque chains con cross-links, (c) escriba FAT[0] sobre los
      espejos divergentes sería el siguiente paso natural.
 
-OK 8.6 rename in-place — IMPLEMENTADO
+OK 8.6 rename in-place — VERIFICADO en QEMU
    - fat_rename_path(src, dst): expuesto vía fat_vfs_ops.rename, así
      que `mv` dentro de /sd ya no cae al fallback copy+unlink del VFS
      (que truncaba archivos > VFS_COPY_BUF_SIZE = 1024 B sin avisar).
