@@ -1066,7 +1066,48 @@ OK 8.5.5c TCP listen+accept + child sockets + /bin/echotcp — VERIFICADO en QEM
      127.0.0.1 8080` desde Mac → OSnOS imprime cada conexión con peer
      IP:port y el mensaje recibido; cada nc del Mac ve el echo y cierra
      limpio. accept se reusa con cada conexión, sin leaks de slots.
-TODO 8.5.6 socket options + select()
+OK 8.5.6 select() + setsockopt + cooperative yield — VERIFICADO en QEMU
+   - Status nuevo: OSNOS_EINTR=4. Para syscalls interrumpibles.
+   - Syscall numbers: SYS_SELECT=23, SYS_SETSOCKOPT=54 (Linux x86_64).
+   - sys_select (kernel) es **non-blocking single-pass**: hace un
+     polling cycle sobre cada fd en nfds, marca readable/writable/
+     except en out bitmaps, devuelve count. La libc loopea con
+     nanosleep entre polls. Sin este split, el busy-poll en CPL=0
+     monopolizaba el CPU y los servers cooperativos (keyboard, shell)
+     nunca corrían → no se podía ni Ctrl+C ni tipear nada.
+   - sys_setsockopt: stub que acepta SOL_SOCKET (level=1) + SO_REUSEADDR
+     (optname=2) como no-op success. Otros options → EINVAL.
+   - fd_readable check soporta:
+     - stdin (fd 0) via stdin_readable() — chequea ring buffer.
+     - sockets via sock_readable: UDP (rx_count>0), TCP LISTEN
+       (accept_q_count>0), TCP ESTABLISHED/CLOSE_WAIT/FIN_WAIT_*
+       (tcp_rx_count>0 OR peer_fin).
+     - regular fds: always readable.
+   - sock_readable usa `volatile sock_t *` para que clang -O2 no
+     cachee las cuentas mutadas por el NIC IRQ.
+   - libc: sys/select.h (fd_set 1024 bits = uint64_t[16], FD_ZERO/SET/
+     CLR/ISSET macros), sys/time.h (struct timeval Linux x86_64 layout).
+   - libc inet.c: select wrapper hace busy-loop con nanosleep(20ms)
+     entre polls. NULL timeout = forever (loop infinito); timeout
+     {0,0} = single poll; sino respeta deadline.
+   - kill_pending check en busy-polls de sock_recv/recvfrom/accept
+     (devuelve -1) para que un Ctrl+C entregado por el shell corte.
+   - Bugfix stdin pre-buffer: keyboard_server pushea CADA keystroke a
+     stdin_buf, incluyendo los chars que tipean el comando exec. Sin
+     limpiar el buffer al exec, un select() sobre stdin disparaba
+     inmediatamente con el '\n' del Enter ya bufereado. Fix:
+     stdin_clear() llamado al inicio de proc_exec.
+   - Bugfix port_in_use: las conexiones TCP en estados de cierre
+     (FIN_WAIT_*, CLOSE_WAIT, LAST_ACK, etc.) ya no bloquean un
+     re-bind a su mismo puerto. Estilo SO_REUSEADDR de Linux para
+     TIME_WAIT. Sin esto, re-correr selecttest tras una conexión
+     daba EADDRINUSE (errno 98).
+   - tests/selecttest.c: ELF user-mode demo. Bind+listen TCP, select
+     sobre srv + stdin. Cada SYN procesa la conexión via accept/recv/
+     send; cualquier keystroke termina. Re-ejecutable sin problemas.
+   - Verificado: nc desde Mac llega, OSnOS imprime el peer y echoea;
+     tipear una tecla en QEMU termina selecttest limpio; re-correr
+     `exec /bin/selecttest` rebindea sin EADDRINUSE.
 TODO 8.5.7 getaddrinfo (AI_PASSIVE no-DNS) + /bin/httpd
 TODO 8.5.8 compilar y correr selectserver.c de Beej end-to-end
 TODO 8.5.5 TCP state machine
