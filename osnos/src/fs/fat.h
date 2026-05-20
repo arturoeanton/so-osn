@@ -24,18 +24,29 @@
  *   - All names are case-insensitive on the way in, uppercase on disk.
  */
 
+/* Largest name returnable from FAT (long names from LFN). 63 chars +
+ * NUL fits in OSNOS_NAME_MAX = 64 so the VFS layer can copy it
+ * verbatim without truncating. */
+#define FAT_NAME_MAX 64
+
 typedef struct {
-    /* Display name. For root the string is "/". Otherwise 8.3 form
-     * with a single '.' separator if there's an extension. */
-    char     name[13];
+    /* Display name. For root the string is "/". For regular entries
+     * either an LFN-decoded long name or the 8.3 form when no LFN
+     * sequence precedes the 8.3 dirent. NUL-terminated. */
+    char     name[FAT_NAME_MAX];
+
+    /* The 8.3 short alias as it lives on disk ("MYLONG~1.TXT" etc.).
+     * Always populated, even for pure 8.3 entries where it duplicates
+     * `name`. Path lookup falls back to this when matching by alias. */
+    char     short_name[13];
 
     bool     is_dir;
     uint32_t size;             /* 0 for directories */
     uint16_t first_cluster;    /* 0 means "the root directory" sentinel */
 
-    /* Location of the 32-byte raw dirent on disk. Required by fat_write
-     * (FASE 8.4) for size/cluster updates and by fat_unlink for
-     * marking the entry deleted. Zero for the root sentinel. */
+    /* Location of the 32-byte raw 8.3 dirent on disk. Required by
+     * fat_write for size/cluster updates and by fat_unlink for marking
+     * the entry deleted. Zero for the root sentinel. */
     uint32_t dirent_lba;
     uint32_t dirent_offset;
 } fat_dirent_t;

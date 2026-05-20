@@ -148,14 +148,20 @@ static bool name_to_83(const char *in, char *out11) {
     int i = 0;
     while (*in && *in != '.') {
         if (i >= 8) return false;
-        out11[i++] = upcase(*in++);
+        char c = *in++;
+        /* Spaces are invalid in 8.3 names — caller falls back to LFN. */
+        if (c == ' ') return false;
+        out11[i++] = upcase(c);
     }
     if (*in == '.') {
         in++;
         int j = 0;
         while (*in) {
+            char c = *in++;
+            /* A second '.' or trailing space rules out plain 8.3. */
+            if (c == '.' || c == ' ') return false;
             if (j >= 3) return false;
-            out11[8 + j++] = upcase(*in++);
+            out11[8 + j++] = upcase(c);
         }
     }
     return true;
@@ -180,16 +186,14 @@ static void name_from_83(const uint8_t *raw, char *out) {
     out[o] = 0;
 }
 
-static bool name_eq_11(const uint8_t *raw, const char *name11) {
-    for (int i = 0; i < 11; i++) {
-        if ((char)raw[i] != name11[i]) return false;
-    }
-    return true;
-}
-
 static void parse_dirent(const uint8_t *raw, uint32_t lba, uint32_t off,
                           fat_dirent_t *out) {
     name_from_83(raw, out->name);
+    /* Always keep the 8.3 alias too. fat_readdir will overwrite `name`
+     * with the LFN long form when a valid LFN sequence preceded; the
+     * short_name field stays as the on-disk 8.3 so path lookup can
+     * match against either spelling. */
+    name_from_83(raw, out->short_name);
     out->is_dir        = (raw[11] & ATTR_DIR) != 0;
     out->first_cluster = rd16(raw + 26);
     out->size          = rd32(raw + 28);
@@ -202,6 +206,153 @@ static bool dirent_is_valid(const uint8_t *e) {
     if ((e[11] & ATTR_LFN) == ATTR_LFN) return false;        /* LFN slot */
     if (e[11] & ATTR_VOL) return false;                      /* volume label */
     return true;
+}
+
+/* ================================================================ */
+/* LFN (Long File Name) support — Microsoft extension to FAT        */
+/* ================================================================ */
+/*
+ * Each LFN slot holds 13 UCS-2 chars distributed across non-contiguous
+ * byte offsets (1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30). Slots
+ * appear in REVERSE order on disk: the first slot encountered when
+ * scanning the dir forward has the highest sequence number, ORed with
+ * 0x40 to mark "last-in-chain". Slots count down to seq=1, which sits
+ * immediately before the 8.3 dirent the LFN names. Every slot carries
+ * an 8-bit checksum derived from the 8.3 short name; legacy OSs that
+ * don't understand LFN see only the 8.3 alias.
+ */
+
+#define LFN_SEQ_LAST          0x40
+#define LFN_SEQ_MASK          0x1F
+#define LFN_CHARS_PER_SLOT    13
+/* (FAT_NAME_MAX-1)/13 rounded up = 5; gives us 65 char headroom for a
+ * 63-char name (+ NUL). LFN actually allows up to 20 slots / 260 chars
+ * but we truncate at the VFS layer cap anyway. */
+#define LFN_MAX_SEQ           5
+
+/* Byte offsets inside a 32-byte LFN slot where the 13 UCS-2 chars
+ * live. Each occupies two bytes (LE). */
+static const uint8_t lfn_char_byte_offsets[LFN_CHARS_PER_SLOT] = {
+    1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30
+};
+
+/* The "rotate-right-add" checksum every LFN slot carries at byte 13.
+ * Recomputed from the 11-byte 8.3 name; mismatch invalidates the LFN
+ * sequence and the reader falls back to the short name. */
+static uint8_t lfn_checksum_11(const uint8_t name11[11]) {
+    uint8_t sum = 0;
+    for (int i = 0; i < 11; i++) {
+        sum = (uint8_t)(((sum & 1) << 7) | (sum >> 1)) + name11[i];
+    }
+    return sum;
+}
+
+/* Pull up to 13 ASCII chars out of an LFN slot. Stops at 0x0000 (NUL)
+ * or 0xFFFF (padding). UCS-2 with high byte != 0 degrades to '?' so
+ * the name is still printable. Returns the number of chars written. */
+static int lfn_extract_chars(const uint8_t slot[DIRENT_SIZE], char out[LFN_CHARS_PER_SLOT]) {
+    int count = 0;
+    for (int i = 0; i < LFN_CHARS_PER_SLOT; i++) {
+        uint8_t lo = slot[lfn_char_byte_offsets[i]];
+        uint8_t hi = slot[lfn_char_byte_offsets[i] + 1];
+        if (lo == 0x00 && hi == 0x00) break;
+        if (lo == 0xFF && hi == 0xFF) break;
+        out[count++] = (hi != 0) ? '?' : (char)lo;
+    }
+    return count;
+}
+
+/*
+ * LFN accumulator. fat_readdir keeps one of these on the stack; it
+ * collects partial slots as the dir is walked forward and is finalised
+ * against the trailing 8.3 entry's checksum.
+ */
+typedef struct {
+    bool     active;            /* set after seeing a slot with 0x40 */
+    uint8_t  total_slots;
+    uint8_t  next_seq;          /* next sequence number we expect to see */
+    uint8_t  checksum;
+    char     name[FAT_NAME_MAX];
+} lfn_accum_t;
+
+static void lfn_accum_reset(lfn_accum_t *a) {
+    a->active = false;
+    a->total_slots = 0;
+    a->next_seq = 0;
+    a->checksum = 0;
+    a->name[0] = 0;
+}
+
+/* Feed one LFN slot into the accumulator. Returns true on a clean
+ * merge, false if the slot is orphan / corrupted (accumulator is reset
+ * in that case so the caller can keep scanning). */
+static bool lfn_accum_consume(lfn_accum_t *a, const uint8_t slot[DIRENT_SIZE]) {
+    uint8_t seq_byte = slot[0];
+    uint8_t seq      = seq_byte & LFN_SEQ_MASK;
+    bool    is_last  = (seq_byte & LFN_SEQ_LAST) != 0;
+    uint8_t cksum    = slot[13];
+
+    if (is_last) {
+        lfn_accum_reset(a);
+        if (seq == 0 || seq > LFN_MAX_SEQ) return false;
+        a->active      = true;
+        a->total_slots = seq;
+        a->next_seq    = seq;
+        a->checksum    = cksum;
+    } else {
+        if (!a->active) return false;                         /* orphan */
+        if (cksum != a->checksum) { lfn_accum_reset(a); return false; }
+        if (seq   != a->next_seq) { lfn_accum_reset(a); return false; }
+    }
+
+    char chunk[LFN_CHARS_PER_SLOT];
+    int  n = lfn_extract_chars(slot, chunk);
+
+    size_t base = (size_t)(seq - 1) * LFN_CHARS_PER_SLOT;
+    for (int i = 0; i < n; i++) {
+        if (base + (size_t)i < FAT_NAME_MAX - 1) {
+            a->name[base + (size_t)i] = chunk[i];
+        }
+    }
+
+    /* The 0x40-tagged slot is where the name ENDS. Place a NUL right
+     * after the chars we extracted from it. */
+    if (is_last) {
+        size_t end = base + (size_t)n;
+        if (end > FAT_NAME_MAX - 1) end = FAT_NAME_MAX - 1;
+        a->name[end] = 0;
+    }
+
+    a->next_seq--;
+    return true;
+}
+
+/* After an 8.3 dirent is seen, decide whether the preceding LFN
+ * sequence is well-formed AND checksum-matches the 8.3 name. Returns
+ * true and copies the long name into out_name; false otherwise. */
+static bool lfn_accum_finalize(const lfn_accum_t *a,
+                                const uint8_t name11[11],
+                                char *out_name) {
+    if (!a->active)                                 return false;
+    if (a->next_seq != 0)                           return false;
+    if (a->checksum != lfn_checksum_11(name11))     return false;
+
+    for (size_t i = 0; i < FAT_NAME_MAX; i++) {
+        out_name[i] = a->name[i];
+        if (a->name[i] == 0) break;
+    }
+    return true;
+}
+
+/* Case-insensitive ASCII compare. Used by fat_lookup so users can type
+ * "myFile.txt" and match a stored "MYFILE.TXT" (8.3) or a stored
+ * "MyFile.TXT" (LFN). */
+static bool name_iequal(const char *a, const char *b) {
+    while (*a && *b) {
+        if (upcase(*a) != upcase(*b)) return false;
+        a++; b++;
+    }
+    return *a == 0 && *b == 0;
 }
 
 /* ---------------------------------------------------------------- */
@@ -291,16 +442,45 @@ int fat_readdir(const fat_dirent_t *dir, uint32_t cursor,
     if (!fs_ready) return -1;
     if (!dir->is_dir) return -1;
 
+    lfn_accum_t accum;
+    lfn_accum_reset(&accum);
+
     uint32_t idx = cursor;
     for (;;) {
         uint8_t slot[DIRENT_SIZE];
         uint32_t lba, off;
         int rc = read_dir_slot(dir, idx, slot, &lba, &off);
-        if (rc == 1)  return -1;  /* end of directory */
-        if (rc < 0)   return -1;
+        if (rc == 1) return -1;          /* end of directory */
+        if (rc < 0)  return -1;
         idx++;
-        if (!dirent_is_valid(slot)) continue;
+
+        if (slot[0] == 0xE5) {            /* deleted; reset any in-flight LFN */
+            lfn_accum_reset(&accum);
+            continue;
+        }
+        if ((slot[11] & ATTR_LFN) == ATTR_LFN) {
+            /* Accumulator handles orphan / restart internally. */
+            lfn_accum_consume(&accum, slot);
+            continue;
+        }
+        if (slot[11] & ATTR_VOL) {        /* volume label */
+            lfn_accum_reset(&accum);
+            continue;
+        }
+
+        /* Regular 8.3 dirent. parse_dirent fills out->name with the
+         * short name; if a valid LFN sequence with matching checksum
+         * preceded, overwrite with the decoded long name. */
         parse_dirent(slot, lba, off, out);
+
+        char long_name[FAT_NAME_MAX];
+        if (lfn_accum_finalize(&accum, slot, long_name)) {
+            size_t i;
+            for (i = 0; i + 1 < FAT_NAME_MAX && long_name[i]; i++) {
+                out->name[i] = long_name[i];
+            }
+            out->name[i] = 0;
+        }
         *next_cursor = idx;
         return 0;
     }
@@ -310,21 +490,25 @@ int fat_readdir(const fat_dirent_t *dir, uint32_t cursor,
 /* Path lookup                                                      */
 /* ---------------------------------------------------------------- */
 
-static int dir_find_by_83(const fat_dirent_t *dir, const char *name11,
-                          fat_dirent_t *out) {
-    uint32_t idx = 0;
-    for (;;) {
-        uint8_t slot[DIRENT_SIZE];
-        uint32_t lba, off;
-        int rc = read_dir_slot(dir, idx, slot, &lba, &off);
-        if (rc == 1) return -1;
-        if (rc < 0)  return -1;
-        idx++;
-        if (!dirent_is_valid(slot)) continue;
-        if (!name_eq_11(slot, name11)) continue;
-        parse_dirent(slot, lba, off, out);
-        return 0;
+/*
+ * Match path components against both the LFN long name and the 8.3
+ * alias (case-insensitive). Walks via fat_readdir so LFN sequences are
+ * already collapsed into a single entry with its display name set.
+ */
+static int dir_find_by_name(const fat_dirent_t *dir, const char *want,
+                             fat_dirent_t *out) {
+    uint32_t cursor = 0;
+    fat_dirent_t ent;
+    uint32_t next;
+    while (fat_readdir(dir, cursor, &ent, &next) == 0) {
+        cursor = next;
+        /* Match against the LFN long name OR the 8.3 alias. Windows
+         * and POSIX-on-FAT both allow either form, and our fsck/test
+         * paths rely on the alias being reachable. */
+        if (name_iequal(ent.name, want))       { *out = ent; return 0; }
+        if (name_iequal(ent.short_name, want)) { *out = ent; return 0; }
     }
+    return -1;
 }
 
 static void root_sentinel(fat_dirent_t *out) {
@@ -351,9 +535,9 @@ int fat_lookup(const char *path, fat_dirent_t *out) {
     root_sentinel(&cur);
 
     while (*path) {
-        char comp[64];
+        char comp[FAT_NAME_MAX];
         size_t n = 0;
-        while (*path && *path != '/' && n < sizeof(comp) - 1) {
+        while (*path && *path != '/' && n + 1 < sizeof(comp)) {
             comp[n++] = *path++;
         }
         comp[n] = 0;
@@ -362,11 +546,11 @@ int fat_lookup(const char *path, fat_dirent_t *out) {
 
         if (!cur.is_dir) return -1;
 
-        char name11[11];
-        if (!name_to_83(comp, name11)) return -1;
-
+        /* dir_find_by_name matches case-insensitively against either
+         * the LFN long name (if present) or the 8.3 alias, so users
+         * can `cat` files by their original capitalised name. */
         fat_dirent_t next;
-        if (dir_find_by_83(&cur, name11, &next) != 0) return -1;
+        if (dir_find_by_name(&cur, comp, &next) != 0) return -1;
         cur = next;
     }
 
@@ -597,28 +781,6 @@ static void build_dirent_raw(uint8_t raw[DIRENT_SIZE],
     raw[31] = (uint8_t)(size >> 24);
 }
 
-/* Locate a slot for a new entry in `dir`. Reuses the first 0xE5
- * (deleted) slot, else claims the first 0x00 slot encountered (and
- * the post-mformat-zero invariant keeps the next slot as 0x00 so the
- * end-of-dir marker is preserved). Returns FAT_ENOSPC if exhausted. */
-static int find_free_dir_slot(const fat_dirent_t *dir,
-                               uint32_t *lba_out, uint32_t *off_out) {
-    uint32_t idx = 0;
-    for (;;) {
-        uint8_t slot[DIRENT_SIZE];
-        uint32_t lba, off;
-        int rc = dir_slot_locate(dir, idx, slot, &lba, &off);
-        if (rc < 0) return FAT_EIO;
-        if (rc == 1) return FAT_ENOSPC;     /* dir would need extending */
-        if (slot[0] == 0xE5 || slot[0] == 0x00) {
-            *lba_out = lba;
-            *off_out = off;
-            return 0;
-        }
-        idx++;
-    }
-}
-
 /* Resolve `parent_path` (which may end with '/') and split out the
  * last component as `base_out`. Examples:
  *   "/foo/bar"  → parent dir from path "/foo", base "bar"
@@ -661,6 +823,342 @@ static int split_parent_base(const char *path,
     return base_out[0] ? 0 : FAT_EINVAL;
 }
 
+/* ----- LFN write helpers ----- */
+
+/* Mark the dirent at `idx` (linear slot index) within `dir` as deleted
+ * (0xE5 first byte). */
+static int delete_slot_by_idx(const fat_dirent_t *dir, uint32_t idx) {
+    uint8_t slot[DIRENT_SIZE];
+    uint32_t lba, off;
+    if (dir_slot_locate(dir, idx, slot, &lba, &off) != 0) return -1;
+
+    uint8_t sb[SECTOR_SIZE];
+    if (block_ata_read_sector(lba, sb) != 0) return -1;
+    sb[off] = 0xE5;
+    if (block_ata_write_sector(lba, sb) != 0) return -1;
+    return 0;
+}
+
+/*
+ * Walk `parent` forward looking for the 8.3 dirent that physically
+ * lives at (target_lba, target_off). On success returns its linear
+ * slot index plus the count of immediately-preceding LFN slots that
+ * carry the matching checksum. Stops at end-of-directory storage
+ * (rc=1 from dir_slot_locate) — a missing target is an FS-level
+ * inconsistency.
+ */
+static int locate_target_and_lfn(const fat_dirent_t *parent,
+                                   uint32_t target_lba, uint32_t target_off,
+                                   uint32_t *target_idx_out,
+                                   uint32_t *lfn_count_out) {
+    uint32_t idx = 0;
+    uint32_t lfn_count = 0;
+    bool     lfn_active = false;
+    uint8_t  lfn_cksum  = 0;
+
+    for (;;) {
+        uint8_t slot[DIRENT_SIZE];
+        uint32_t lba, off;
+        int rc = dir_slot_locate(parent, idx, slot, &lba, &off);
+        if (rc < 0)  return -1;
+        if (rc == 1) return -1;
+
+        if (lba == target_lba && off == target_off) {
+            *target_idx_out = idx;
+            if (lfn_active && lfn_cksum == lfn_checksum_11(slot)) {
+                *lfn_count_out = lfn_count;
+            } else {
+                *lfn_count_out = 0;
+            }
+            return 0;
+        }
+
+        idx++;
+
+        if (slot[0] == 0xE5) {
+            lfn_active = false;
+            lfn_count = 0;
+            continue;
+        }
+        if ((slot[11] & ATTR_LFN) == ATTR_LFN) {
+            uint8_t sb0 = slot[0];
+            bool is_last = (sb0 & LFN_SEQ_LAST) != 0;
+            uint8_t cs = slot[13];
+            if (is_last) {
+                lfn_active = true;
+                lfn_count = 1;
+                lfn_cksum = cs;
+            } else if (lfn_active && cs == lfn_cksum) {
+                lfn_count++;
+            } else {
+                lfn_active = false;
+                lfn_count = 0;
+            }
+            continue;
+        }
+        if (slot[11] & ATTR_VOL) {
+            lfn_active = false;
+            lfn_count = 0;
+            continue;
+        }
+        /* Some other valid 8.3, not our target. */
+        lfn_active = false;
+        lfn_count = 0;
+    }
+}
+
+/* Find `count` consecutive free slots (0xE5 or 0x00) in `dir`. Returns
+ * 0 on success with lba_arr / off_arr filled in slot order. FAT_ENOSPC
+ * if the directory has no run that long before its storage ends. */
+static int find_free_dir_slots_run(const fat_dirent_t *dir,
+                                     uint32_t count,
+                                     uint32_t *lba_arr,
+                                     uint32_t *off_arr) {
+    uint32_t idx = 0;
+    uint32_t run = 0;
+
+    for (;;) {
+        uint8_t slot[DIRENT_SIZE];
+        uint32_t lba, off;
+        int rc = dir_slot_locate(dir, idx, slot, &lba, &off);
+        if (rc < 0)  return FAT_EIO;
+        if (rc == 1) return FAT_ENOSPC;
+
+        if (slot[0] == 0xE5 || slot[0] == 0x00) {
+            lba_arr[run] = lba;
+            off_arr[run] = off;
+            run++;
+            if (run == count) return 0;
+        } else {
+            run = 0;
+        }
+        idx++;
+    }
+}
+
+/* Check if an exact 8.3 name already exists in `dir`. Used during 8.3
+ * alias generation to detect ~N collisions. */
+static bool dir_has_8_3(const fat_dirent_t *dir, const char alias11[11]) {
+    uint32_t idx = 0;
+    for (;;) {
+        uint8_t slot[DIRENT_SIZE];
+        uint32_t lba, off;
+        int rc = read_dir_slot(dir, idx, slot, &lba, &off);
+        if (rc != 0) return false;
+        idx++;
+        if (!dirent_is_valid(slot)) continue;
+        bool match = true;
+        for (int i = 0; i < 11; i++) {
+            if (slot[i] != (uint8_t)alias11[i]) { match = false; break; }
+        }
+        if (match) return true;
+    }
+}
+
+/* Generate an 8.3 alias for `long_name`, packed into `alias11` (no NUL,
+ * space-padded). Walks N=1..99 picking the first BASE~N.EXT that
+ * doesn't collide in `parent`. Returns FAT_ENOSPC if 99 attempts fail. */
+static int gen_short_alias(const fat_dirent_t *parent,
+                             const char *long_name,
+                             char alias11[11]) {
+    size_t total = 0;
+    while (long_name[total]) total++;
+
+    /* Find LAST '.' for ext split. */
+    const char *ext = 0;
+    for (size_t i = total; i > 0; i--) {
+        if (long_name[i - 1] == '.') { ext = long_name + i; break; }
+    }
+    size_t base_len = ext ? (size_t)((ext - 1) - long_name) : total;
+    size_t ext_len  = ext ? total - (size_t)(ext - long_name) : 0;
+
+    /* Filter into uppercase alphanumeric. Non-alphanumerics other than
+     * spaces / dots become '_'. Spaces and dots are dropped entirely. */
+    char base_filtered[6];
+    int  base_pos = 0;
+    for (size_t i = 0; i < base_len && base_pos < 6; i++) {
+        char c = long_name[i];
+        if (c == ' ' || c == '.') continue;
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) c = '_';
+        base_filtered[base_pos++] = c;
+    }
+    if (base_pos == 0) {
+        base_filtered[0] = 'F';
+        base_pos = 1;
+    }
+
+    char ext_filtered[3];
+    int  ext_pos = 0;
+    if (ext) {
+        for (size_t i = 0; i < ext_len && ext_pos < 3; i++) {
+            char c = ext[i];
+            if (c == ' ') continue;
+            if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+            if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) c = '_';
+            ext_filtered[ext_pos++] = c;
+        }
+    }
+
+    for (int n = 1; n <= 99; n++) {
+        int suffix_digits = (n < 10) ? 1 : 2;
+        int base_keep = 6 - suffix_digits;       /* room for '~' + digits */
+        if (base_keep > base_pos) base_keep = base_pos;
+
+        for (int i = 0; i < 11; i++) alias11[i] = ' ';
+        int pos = 0;
+        for (int i = 0; i < base_keep; i++) alias11[pos++] = base_filtered[i];
+        alias11[pos++] = '~';
+        if (suffix_digits == 2) alias11[pos++] = (char)('0' + (n / 10));
+        alias11[pos++] = (char)('0' + (n % 10));
+        for (int i = 0; i < ext_pos; i++) alias11[8 + i] = ext_filtered[i];
+
+        if (!dir_has_8_3(parent, alias11)) return 0;
+    }
+    return FAT_ENOSPC;
+}
+
+/* Pack one LFN slot. `name_total_len` is the strlen of the full long
+ * name; `seq` is 1-based and identifies which 13-char chunk this slot
+ * carries. `is_last` (the highest-seq slot) gets the 0x40 marker and
+ * sees its chars NUL-terminated + 0xFFFF padded as needed. */
+static void build_lfn_slot(uint8_t out[DIRENT_SIZE],
+                             const char *long_name,
+                             size_t name_total_len,
+                             uint8_t seq,
+                             bool is_last,
+                             uint8_t cksum) {
+    for (int i = 0; i < DIRENT_SIZE; i++) out[i] = 0;
+    out[0]  = (uint8_t)(seq | (is_last ? LFN_SEQ_LAST : 0));
+    out[11] = ATTR_LFN;
+    out[12] = 0;
+    out[13] = cksum;
+    out[26] = 0;
+    out[27] = 0;
+
+    size_t base = (size_t)(seq - 1) * LFN_CHARS_PER_SLOT;
+    bool   past_nul = false;
+    for (int i = 0; i < LFN_CHARS_PER_SLOT; i++) {
+        uint8_t bo = lfn_char_byte_offsets[i];
+        size_t  name_idx = base + (size_t)i;
+        uint16_t ch;
+        if (past_nul) {
+            ch = 0xFFFF;
+        } else if (name_idx < name_total_len) {
+            ch = (uint8_t)long_name[name_idx];
+        } else if (name_idx == name_total_len) {
+            ch = 0x0000;
+            past_nul = true;
+        } else {
+            ch = 0xFFFF;
+            past_nul = true;
+        }
+        out[bo]     = (uint8_t)ch;
+        out[bo + 1] = (uint8_t)(ch >> 8);
+    }
+}
+
+/*
+ * Naming / layout info for a new entry. Built by compute_entry_naming
+ * from the long name + parent dir. write_entry_with_naming consumes it
+ * along with a prebuilt 32-byte 8.3 dirent (with first_cluster, size,
+ * attr already set) to do the actual on-disk install.
+ */
+typedef struct {
+    char     alias11[11];      /* on-disk 8.3 name bytes */
+    bool     needs_lfn;
+    char     long_name[FAT_NAME_MAX];
+    uint32_t n_lfn_slots;      /* zero when needs_lfn==false */
+} entry_naming_t;
+
+static int compute_entry_naming(const fat_dirent_t *parent,
+                                  const char *base,
+                                  entry_naming_t *out) {
+    out->needs_lfn = false;
+    out->n_lfn_slots = 0;
+    out->long_name[0] = 0;
+
+    if (name_to_83(base, out->alias11)) return 0;
+
+    /* Falls back to LFN + generated alias. */
+    size_t base_len = 0;
+    while (base[base_len]) base_len++;
+    if (base_len == 0 || base_len > FAT_NAME_MAX - 1) return FAT_EINVAL;
+    for (size_t i = 0; i < base_len; i++) out->long_name[i] = base[i];
+    out->long_name[base_len] = 0;
+
+    int rc = gen_short_alias(parent, out->long_name, out->alias11);
+    if (rc != 0) return rc;
+
+    out->needs_lfn = true;
+    out->n_lfn_slots = (uint32_t)((base_len + LFN_CHARS_PER_SLOT - 1)
+                                    / LFN_CHARS_PER_SLOT);
+    if (out->n_lfn_slots > LFN_MAX_SEQ) return FAT_EINVAL;
+    return 0;
+}
+
+/*
+ * Install a new entry described by `naming` (with the 32-byte 8.3
+ * payload already built by the caller — typically via build_dirent_raw)
+ * into `parent`. Reserves N+1 consecutive slots; writes LFN slots (in
+ * reverse seq order on disk so the 0x40-marked highest-seq slot lands
+ * first) then the 8.3 payload. Cleans up any partial state on failure.
+ */
+static int write_entry_with_naming(const fat_dirent_t *parent,
+                                     const entry_naming_t *naming,
+                                     const uint8_t dirent_raw[DIRENT_SIZE]) {
+    uint32_t total_slots = naming->needs_lfn ? (naming->n_lfn_slots + 1) : 1;
+    uint32_t slot_lbas[LFN_MAX_SEQ + 1];
+    uint32_t slot_offs[LFN_MAX_SEQ + 1];
+
+    int rc = find_free_dir_slots_run(parent, total_slots, slot_lbas, slot_offs);
+    if (rc != 0) return rc;
+
+    if (naming->needs_lfn) {
+        uint8_t cksum = lfn_checksum_11((const uint8_t *)naming->alias11);
+        size_t  name_len = 0;
+        while (naming->long_name[name_len]) name_len++;
+
+        for (uint32_t i = 0; i < naming->n_lfn_slots; i++) {
+            /* slot at index i takes seq = (n - i): the FIRST slot on
+             * disk has the highest seq with 0x40 set. */
+            uint8_t seq = (uint8_t)(naming->n_lfn_slots - i);
+            bool    is_last = (i == 0);
+            uint8_t raw[DIRENT_SIZE];
+            build_lfn_slot(raw, naming->long_name, name_len, seq, is_last, cksum);
+
+            if (read_modify_write_dirent(slot_lbas[i], slot_offs[i], raw) != 0) {
+                /* Roll back partial LFN writes. */
+                for (uint32_t j = 0; j < i; j++) {
+                    uint8_t sb[SECTOR_SIZE];
+                    if (block_ata_read_sector(slot_lbas[j], sb) == 0) {
+                        sb[slot_offs[j]] = 0xE5;
+                        block_ata_write_sector(slot_lbas[j], sb);
+                    }
+                }
+                return FAT_EIO;
+            }
+        }
+    }
+
+    uint32_t last_lba = slot_lbas[total_slots - 1];
+    uint32_t last_off = slot_offs[total_slots - 1];
+    if (read_modify_write_dirent(last_lba, last_off, dirent_raw) != 0) {
+        /* 8.3 write failed — undo any LFN slots. */
+        if (naming->needs_lfn) {
+            for (uint32_t j = 0; j < naming->n_lfn_slots; j++) {
+                uint8_t sb[SECTOR_SIZE];
+                if (block_ata_read_sector(slot_lbas[j], sb) == 0) {
+                    sb[slot_offs[j]] = 0xE5;
+                    block_ata_write_sector(slot_lbas[j], sb);
+                }
+            }
+        }
+        return FAT_EIO;
+    }
+    return 0;
+}
+
 /* ----- public write API ----- */
 
 int fat_unlink_path(const char *path) {
@@ -671,15 +1169,29 @@ int fat_unlink_path(const char *path) {
     if (de.is_dir) return FAT_EISDIR;
     if (de.dirent_lba == 0) return FAT_EINVAL;       /* root sentinel */
 
+    /* Locate the entry inside its parent so we know which (if any) LFN
+     * slots precede it and need to be deleted together. */
+    char parent_path[64];
+    char base[64];
+    if (split_parent_base(path, parent_path, base) != 0) return FAT_EINVAL;
+    fat_dirent_t parent;
+    if (fat_lookup(parent_path, &parent) != 0) return FAT_EIO;
+
+    uint32_t target_idx = 0, lfn_count = 0;
+    if (locate_target_and_lfn(&parent, de.dirent_lba, de.dirent_offset,
+                                &target_idx, &lfn_count) != 0) {
+        return FAT_EIO;
+    }
+
     if (fat_free_chain(de.first_cluster) != 0) return FAT_EIO;
 
-    /* Patch the first byte of the dirent to 0xE5 (deleted). RMW of the
-     * sector that contains it — block_ata_read_sector always transfers
-     * 512 B so the buffer MUST be sector-sized, never DIRENT_SIZE. */
-    uint8_t sb[SECTOR_SIZE];
-    if (block_ata_read_sector(de.dirent_lba, sb) != 0) return FAT_EIO;
-    sb[de.dirent_offset] = 0xE5;
-    if (block_ata_write_sector(de.dirent_lba, sb) != 0) return FAT_EIO;
+    /* Delete 8.3 first (file disappears from listing). A crash before
+     * the LFN slots are cleared leaves only cosmetic orphan LFN slots
+     * that fsck reports. */
+    if (delete_slot_by_idx(&parent, target_idx) != 0) return FAT_EIO;
+    for (uint32_t i = 0; i < lfn_count; i++) {
+        delete_slot_by_idx(&parent, target_idx - lfn_count + i);
+    }
     return 0;
 }
 
@@ -690,10 +1202,10 @@ int fat_unlink_path(const char *path) {
  * the parent_dir/name11 fields populated for create.
  */
 typedef struct {
-    bool          exists;
-    fat_dirent_t  de;            /* valid only when exists==true */
-    fat_dirent_t  parent_dir;    /* valid in both cases */
-    char          name11[11];    /* 8.3 form of last component */
+    bool             exists;
+    fat_dirent_t     de;            /* valid only when exists==true */
+    fat_dirent_t     parent_dir;    /* valid in both cases */
+    entry_naming_t   naming;        /* valid when exists==false */
 } write_target_t;
 
 static int resolve_write_target(const char *path, write_target_t *out) {
@@ -705,7 +1217,6 @@ static int resolve_write_target(const char *path, write_target_t *out) {
         out->de         = de;
         out->parent_dir.is_dir = true;
         out->parent_dir.first_cluster = 0;   /* unused on overwrite */
-        for (int i = 0; i < 11; i++) out->name11[i] = ' ';
         return 0;
     }
 
@@ -717,7 +1228,9 @@ static int resolve_write_target(const char *path, write_target_t *out) {
     if (fat_lookup(parent_path, &out->parent_dir) != 0) return FAT_ENOENT;
     if (!out->parent_dir.is_dir) return FAT_ENOTDIR;
 
-    if (!name_to_83(base, out->name11)) return FAT_EINVAL;
+    /* Compute naming: 8.3-only if name_to_83 succeeds, else LFN + alias. */
+    rc = compute_entry_naming(&out->parent_dir, base, &out->naming);
+    if (rc != 0) return rc;
     out->exists = false;
     return 0;
 }
@@ -780,17 +1293,11 @@ int fat_write_path(const char *path, const char *buf, uint32_t len) {
         return 0;
     }
 
-    /* Create a fresh dirent in parent. */
-    uint32_t slot_lba, slot_off;
-    rc = find_free_dir_slot(&t.parent_dir, &slot_lba, &slot_off);
-    if (rc != 0) {
-        fat_free_chain(new_chain);
-        return rc;
-    }
-
+    /* Create a fresh dirent — LFN + 8.3 if the name didn't fit 8.3,
+     * just 8.3 otherwise. write_entry_with_naming handles both. */
     uint8_t raw[DIRENT_SIZE];
-    build_dirent_raw(raw, t.name11, ATTR_ARCH, new_chain, len);
-    rc = read_modify_write_dirent(slot_lba, slot_off, raw);
+    build_dirent_raw(raw, t.naming.alias11, ATTR_ARCH, new_chain, len);
+    rc = write_entry_with_naming(&t.parent_dir, &t.naming, raw);
     if (rc != 0) {
         fat_free_chain(new_chain);
         return rc;
@@ -843,8 +1350,9 @@ int fat_mkdir_path(const char *path) {
     if (fat_lookup(parent_path, &parent) != 0) return FAT_ENOENT;
     if (!parent.is_dir) return FAT_ENOTDIR;
 
-    char name11[11];
-    if (!name_to_83(base, name11)) return FAT_EINVAL;
+    entry_naming_t naming;
+    rc = compute_entry_naming(&parent, base, &naming);
+    if (rc != 0) return rc;
 
     uint16_t dir_cluster = fat_alloc_cluster();
     if (dir_cluster == 0) return FAT_ENOSPC;
@@ -880,16 +1388,11 @@ int fat_mkdir_path(const char *path) {
         }
     }
 
-    /* Add dirent to parent. */
-    uint32_t slot_lba, slot_off;
-    rc = find_free_dir_slot(&parent, &slot_lba, &slot_off);
-    if (rc != 0) {
-        fat_free_chain(dir_cluster);
-        return rc;
-    }
+    /* Install the dirent in the parent. write_entry_with_naming handles
+     * both plain-8.3 and LFN+8.3 cases. */
     uint8_t raw[DIRENT_SIZE];
-    build_dirent_raw(raw, name11, ATTR_DIR, dir_cluster, 0);
-    rc = read_modify_write_dirent(slot_lba, slot_off, raw);
+    build_dirent_raw(raw, naming.alias11, ATTR_DIR, dir_cluster, 0);
+    rc = write_entry_with_naming(&parent, &naming, raw);
     if (rc != 0) {
         fat_free_chain(dir_cluster);
         return rc;
@@ -921,12 +1424,25 @@ int fat_rmdir_path(const char *path) {
         return FAT_ENOTEMPTY;
     }
 
+    /* Locate inside parent to find preceding LFN slots, same as unlink. */
+    char rparent_path[64];
+    char rbase[64];
+    if (split_parent_base(path, rparent_path, rbase) != 0) return FAT_EINVAL;
+    fat_dirent_t rparent;
+    if (fat_lookup(rparent_path, &rparent) != 0) return FAT_EIO;
+
+    uint32_t r_target_idx = 0, r_lfn_count = 0;
+    if (locate_target_and_lfn(&rparent, de.dirent_lba, de.dirent_offset,
+                                &r_target_idx, &r_lfn_count) != 0) {
+        return FAT_EIO;
+    }
+
     if (fat_free_chain(de.first_cluster) != 0) return FAT_EIO;
 
-    uint8_t sb[SECTOR_SIZE];
-    if (block_ata_read_sector(de.dirent_lba, sb) != 0) return FAT_EIO;
-    sb[de.dirent_offset] = 0xE5;
-    if (block_ata_write_sector(de.dirent_lba, sb) != 0) return FAT_EIO;
+    if (delete_slot_by_idx(&rparent, r_target_idx) != 0) return FAT_EIO;
+    for (uint32_t i = 0; i < r_lfn_count; i++) {
+        delete_slot_by_idx(&rparent, r_target_idx - r_lfn_count + i);
+    }
     return 0;
 }
 
@@ -956,7 +1472,7 @@ int fat_rename_path(const char *src, const char *dst) {
     if (src_de.dirent_lba == 0) return FAT_EINVAL;   /* root */
 
     /* If dst resolves to the SAME on-disk dirent as src (different
-     * spellings of the same 8.3 name, or trailing slashes), no-op. */
+     * spellings, casing, trailing slashes), no-op. */
     fat_dirent_t dst_de;
     if (fat_lookup(dst, &dst_de) == 0) {
         if (dst_de.dirent_lba == src_de.dirent_lba &&
@@ -966,9 +1482,7 @@ int fat_rename_path(const char *src, const char *dst) {
         return FAT_EEXIST;
     }
 
-    /* Resolve dst into parent dir + new 8.3 name. */
-    char dst_parent_path[64];
-    char dst_base[64];
+    char dst_parent_path[64], dst_base[64];
     int rc = split_parent_base(dst, dst_parent_path, dst_base);
     if (rc != 0) return rc;
 
@@ -976,52 +1490,67 @@ int fat_rename_path(const char *src, const char *dst) {
     if (fat_lookup(dst_parent_path, &dst_parent) != 0) return FAT_ENOENT;
     if (!dst_parent.is_dir) return FAT_ENOTDIR;
 
-    char dst_name11[11];
-    if (!name_to_83(dst_base, dst_name11)) return FAT_EINVAL;
-
-    /* Read src's dirent sector once; we'll need its 32 raw bytes
-     * either way (fast path patches in place; cross-dir uses them
-     * as the template for the new entry). */
-    uint8_t sb_src[SECTOR_SIZE];
-    if (block_ata_read_sector(src_de.dirent_lba, sb_src) != 0) return FAT_EIO;
-
-    /* Discover src's parent so we can compare against dst_parent. */
-    char src_parent_path[64];
-    char src_base[64];
+    char src_parent_path[64], src_base[64];
     rc = split_parent_base(src, src_parent_path, src_base);
     if (rc != 0) return rc;
     fat_dirent_t src_parent;
     if (fat_lookup(src_parent_path, &src_parent) != 0) return FAT_EIO;
 
-    /* Fast path: same parent. Both first_cluster fields agree (root
-     * sentinel is 0, identical across both). One sector RMW. */
-    if (src_parent.first_cluster == dst_parent.first_cluster) {
+    /* Locate the src 8.3 entry inside its parent so we know about
+     * preceding LFN slots (deleted at the end, regardless of path). */
+    uint32_t src_target_idx = 0, src_lfn_count = 0;
+    if (locate_target_and_lfn(&src_parent,
+                                src_de.dirent_lba, src_de.dirent_offset,
+                                &src_target_idx, &src_lfn_count) != 0) {
+        return FAT_EIO;
+    }
+
+    entry_naming_t naming;
+    rc = compute_entry_naming(&dst_parent, dst_base, &naming);
+    if (rc != 0) return rc;
+
+    bool same_parent = (src_parent.first_cluster == dst_parent.first_cluster);
+
+    /* Fast path: same parent + new fits 8.3 + src had no LFN slots.
+     * Just rewrite the 11 name bytes in place — one sector RMW. */
+    if (same_parent && !naming.needs_lfn && src_lfn_count == 0) {
+        uint8_t sb[SECTOR_SIZE];
+        if (block_ata_read_sector(src_de.dirent_lba, sb) != 0) return FAT_EIO;
         for (int i = 0; i < 11; i++) {
-            sb_src[src_de.dirent_offset + i] = (uint8_t)dst_name11[i];
+            sb[src_de.dirent_offset + i] = (uint8_t)naming.alias11[i];
         }
-        if (block_ata_write_sector(src_de.dirent_lba, sb_src) != 0) {
-            return FAT_EIO;
-        }
+        if (block_ata_write_sector(src_de.dirent_lba, sb) != 0) return FAT_EIO;
         return 0;
     }
 
-    /* Cross-directory: reserve dst slot, mark src deleted, write dst. */
-    uint32_t dst_slot_lba, dst_slot_off;
-    rc = find_free_dir_slot(&dst_parent, &dst_slot_lba, &dst_slot_off);
-    if (rc != 0) return rc;
+    /*
+     * General path: build the new 8.3 from src's bytes (preserving
+     * first_cluster / size / attr), drop the new alias into it, then
+     * insert a fresh LFN+8.3 group in dst_parent. Once that lands,
+     * delete the old src group.
+     *
+     * Order: write-new FIRST → brief cross-link window where both src
+     * and dst point at the same chain. Then delete src 8.3 (cross-link
+     * resolves) and finally any src LFN slots (cosmetic orphan if a
+     * crash hits between). fsck recovers cleanly from both states.
+     */
+    uint8_t sb_src[SECTOR_SIZE];
+    if (block_ata_read_sector(src_de.dirent_lba, sb_src) != 0) return FAT_EIO;
 
     uint8_t new_raw[DIRENT_SIZE];
     for (int i = 0; i < DIRENT_SIZE; i++) {
         new_raw[i] = sb_src[src_de.dirent_offset + i];
     }
-    for (int i = 0; i < 11; i++) new_raw[i] = (uint8_t)dst_name11[i];
+    for (int i = 0; i < 11; i++) new_raw[i] = (uint8_t)naming.alias11[i];
 
-    /* Mark src deleted FIRST. Bounded leak window beats cross-link. */
-    sb_src[src_de.dirent_offset] = 0xE5;
-    if (block_ata_write_sector(src_de.dirent_lba, sb_src) != 0) return FAT_EIO;
+    rc = write_entry_with_naming(&dst_parent, &naming, new_raw);
+    if (rc != 0) return rc;
 
-    if (read_modify_write_dirent(dst_slot_lba, dst_slot_off, new_raw) != 0) {
-        return FAT_EIO;
+    /* Delete old 8.3 first (file disappears from src's directory),
+     * then preceding LFN slots. */
+    if (delete_slot_by_idx(&src_parent, src_target_idx) != 0) return FAT_EIO;
+    for (uint32_t i = 0; i < src_lfn_count; i++) {
+        delete_slot_by_idx(&src_parent, src_target_idx - src_lfn_count + i);
     }
     return 0;
 }

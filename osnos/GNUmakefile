@@ -146,6 +146,7 @@ SD_SIZE_MB   ?= 16
 SD_TMP       := $(BUILD)/sd_seed
 SD_README_TXT = hola desde el disco
 SD_HELLO_TXT  = fat works!
+SD_LONG_TXT   = hola con nombre largo
 
 $(SD_IMG):
 	@command -v mformat >/dev/null 2>&1 || { echo "error: mtools (mformat/mcopy) not found. Install: brew install mtools / sudo apt install mtools" >&2; exit 1; }
@@ -155,8 +156,10 @@ $(SD_IMG):
 	mkdir -p $(SD_TMP)
 	printf '%s\n' '$(SD_README_TXT)' > $(SD_TMP)/README.TXT
 	printf '%s\n' '$(SD_HELLO_TXT)'  > $(SD_TMP)/HELLO.TXT
+	printf '%s\n' '$(SD_LONG_TXT)'   > $(SD_TMP)/long.txt
 	mcopy -i $@ $(SD_TMP)/README.TXT ::README.TXT
 	mcopy -i $@ $(SD_TMP)/HELLO.TXT  ::HELLO.TXT
+	mcopy -i $@ $(SD_TMP)/long.txt   "::My Long Filename.txt"
 	rm -rf $(SD_TMP)
 
 iso: $(ISO)

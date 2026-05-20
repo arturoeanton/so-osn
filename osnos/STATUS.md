@@ -668,9 +668,108 @@ OK 8.6 rename in-place — VERIFICADO en QEMU
    - Comparación same-parent vía src_parent.first_cluster ==
      dst_parent.first_cluster (root sentinel = 0 ambos lados).
 
-TODO opcional LFN (Long File Names) — pendiente
-   - Hoy nombres > 8 chars o con minúsculas se rechazan en name_to_83.
-     LFN agrega series de dirent slots con attr 0x0F antes del 8.3 entry.
+OK 8.7 LFN read-side — VERIFICADO en QEMU
+   - LFN constants (LFN_SEQ_LAST=0x40, LFN_SEQ_MASK=0x1F,
+     LFN_CHARS_PER_SLOT=13, LFN_MAX_SEQ=5) y helpers nuevos:
+     lfn_checksum_11 (rotate-right-add sobre el 8.3), lfn_extract_chars
+     (UCS-2 → ASCII, '?' para chars no-ASCII, stop en 0x0000/0xFFFF).
+   - lfn_accum_t: state machine para acumular slots LFN mientras se
+     scanea el dir hacia adelante. Maneja restart al ver otro 0x40,
+     reseteo en cksum/seq mismatch, orphan tail.
+   - fat_readdir rewriten: en cada slot decide entre LFN slot
+     (accumulate), volume label (reset), deleted (reset), 8.3 dirent
+     (parse + finalize LFN si está completo y checksum matchea, else
+     fallback al short name). Cursor sigue siendo lineal sobre slots
+     raw, así que múltiples readdir calls retoman después del grupo.
+   - dir_find_by_83 reemplazada por dir_find_by_name: itera con
+     fat_readdir (que ya colapsa LFN+8.3) y compara case-insensitive
+     contra el nombre devuelto. Match contra long name OR 8.3 alias.
+   - fat_lookup component buffer crecido a FAT_NAME_MAX (64), name_to_83
+     ya no se llama en lookup. Permite paths con espacios.
+   - fat_dirent_t.name: 13 → FAT_NAME_MAX (64 bytes) en fat.h.
+   - Seed sd.img incluye archivo "My Long Filename.txt" (alias on-disk
+     "MYLONG~1.TXT" + LFN slots) para validación inmediata.
+   - Verificado: `ls /sd` muestra "My Long Filename.txt", `cat` con
+     ese nombre (case-insensitive) andó, y `cat /sd/MYLONG~1.TXT`
+     también (8.3 alias sigue funcionando).
+
+OK 8.7.1 bugfix shell: strip de outer quotes en make_absolute_path
+   - Hoy `cat "/sd/file with spaces"` fallaba porque cmd_cat (y todos
+     los handlers que toman un path) pasan args literal a
+     make_absolute_path. Las comillas se trataban como prefijo no-/,
+     resultando en /home/"... relativo a cwd.
+   - Fix: make_absolute_path ahora strippea un par de outer quotes
+     matched (single o double) + trailing whitespace antes del check
+     absoluto/relativo. Comillas internas y sin match pasan tal cual.
+   - Beneficia: cat, rm, touch, mkdir, rmdir, tree, ls, cd y cualquier
+     comando que usa make_absolute_path. cmd_echo ya tenía su propio
+     strip_outer_quotes para el filename de redirección, sin conflicto.
+
+OK 8.8 LFN write-side — VERIFICADO en QEMU (258 PASS / 0 FAIL en cmd_test)
+   - name_to_83 ahora rechaza explícitamente espacios y un segundo '.'
+     en el componente, así que esos nombres caen automáticamente al
+     path LFN en vez de generar dirent inválidos. Mayúsculas se
+     normalizan sin LFN (case loss aceptado).
+   - gen_short_alias(parent, long_name, alias11): genera BASE~N.EXT
+     con collision check vía dir_has_8_3, hasta N=99. Filtra a
+     uppercase alfanumérico + '_' para chars no soportados en 8.3.
+   - build_lfn_slot(out, name, total_len, seq, is_last, cksum):
+     empaqueta los 13 UCS-2 chars en los offsets 1/3/5/7/9, 14/16/.../24,
+     28/30; NUL después del último char del long name, 0xFFFF padding,
+     attr 0x0F, cksum compartido en todos los slots de la secuencia.
+   - find_free_dir_slots_run(dir, count, lba_arr, off_arr): scan
+     lineal aceptando 0xE5 (deleted) o 0x00 (end-of-storage zone); el
+     run se reinicia si ve un slot ocupado. ENOSPC si no encuentra
+     ventana del tamaño pedido antes del fin del dir storage.
+   - entry_naming_t + compute_entry_naming + write_entry_with_naming:
+     trío de helpers que unifica el path "instalar entrada nueva" para
+     fat_write_path y fat_mkdir_path. Detecta automáticamente 8.3 vs
+     LFN, reserva los slots, escribe LFN slots en reverse seq (highest
+     con 0x40 va primero on-disk) y el 8.3 al final. Rollback automático
+     en cualquier fallo intermedio.
+   - locate_target_and_lfn(parent, target_lba, target_off,
+     &target_idx, &lfn_count): walk del parent dir contando slots LFN
+     consecutivos con checksum matching antes del 8.3 target. Usado
+     por unlink/rmdir/rename para borrar la secuencia completa.
+   - delete_slot_by_idx(dir, idx): RMW para marcar slot 0xE5 sin
+     romper la sector entera.
+   - fat_unlink_path / fat_rmdir_path: ahora borran 8.3 + todos los
+     LFN slots precedentes. Orden: free chain → delete 8.3 → delete LFN
+     slots. Crash entre el 8.3 y los LFN deja orphan slots (cosmético,
+     fsck-recoverable), nunca cross-link.
+   - fat_rename_path:
+     * Fast path (same-parent + new name fits 8.3 + src sin LFN): un
+       sector RMW reescribiendo los 11 bytes del name. O(1).
+     * Path general (cualquier otro caso, incluyendo cross-dir,
+       LFN→8.3, 8.3→LFN, LFN→LFN): write_entry_with_naming en dst
+       parent → delete src 8.3 → delete src LFN slots. Ventana de
+       cross-link breve y fsck-recoverable.
+   - fat_dirent_t agrandado con campo short_name[13] que siempre
+     guarda el 8.3 alias on-disk (incluso cuando name contiene el long
+     LFN). dir_find_by_name compara case-insensitive contra los dos,
+     así que `cat /sd/MYLONG~1.TXT` funciona tanto como
+     `cat "/sd/My Long Filename.txt"`.
+
+OK 8.8 shell quote stripping
+   - make_absolute_path strippea pair de outer quotes (single o double)
+     + trailing whitespace antes del check absoluto/relativo. Permite
+     `cat "/sd/My Long Filename.txt"` desde el shell. Beneficia todos
+     los handlers que pasan args a make_absolute_path (cat/rm/touch/
+     mkdir/rmdir/tree/ls/cd).
+
+OK 8.9 self-test extendido — VERIFICADO en QEMU
+   - cmd_test extendido con ~38 asserts FAT en su propio sandbox
+     /sd/__fattest. Pre-clean + post-clean para re-ejecución limpia.
+   - Cubre: read seed 8.3, read seed LFN (case-insensitive + alias),
+     create 8.3, create LFN (write-side), append, overwrite truncate,
+     rename 8.3↔8.3 (fast path), LFN→8.3 (borra slots), 8.3→LFN
+     (escribe slots), cross-dir LFN→LFN, EEXIST en collision, ENOTEMPTY
+     en rmdir no-vacío, empty file (size=0), unlink + rmdir nested,
+     y fsck audit final: leaks/cross-links/size mismatch/bad refs
+     todos none, mirror OK.
+   - Total con la suite anterior + FAT: 258 PASS / 0 FAIL.
+   - SKIP automático del bloque FAT si /sd no está montado (boot sin
+     sd.img).
 
 ### FASE 8.5 — Networking (post-FAT)
 La libc ya tiene la superficie POSIX preparada (arpa/inet.h, netinet/in.h,

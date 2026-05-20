@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "../drivers/framebuffer.h"
+#include "../fs/fat.h"
 #include "../fs/vfs.h"
 #include "../include/osnos_dirent.h"
 #include "../include/osnos_fcntl.h"
@@ -67,6 +68,27 @@ static bool make_absolute_path(const char *path, char *out, size_t out_size) {
     if (path == 0 || path[0] == 0) {
         size_t want = os_strlcpy(out, current_path, out_size);
         return want + 1 <= out_size;
+    }
+
+    /* Strip a matched pair of outer quotes (plus trailing whitespace)
+     * so `cat "foo bar"` and `cat 'foo bar'` reach the FS as
+     * `foo bar`. Internal quotes and unbalanced ones pass through. */
+    char unquoted[OSNOS_PATH_MAX];
+    const char *s = path;
+    const char *e = path + os_strlen(path);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
+    if (e - s >= 2 && (*s == '"' || *s == '\'') && e[-1] == *s) {
+        s++;
+        e--;
+        size_t n = (size_t)(e - s);
+        if (n + 1 > sizeof(unquoted)) return false;
+        for (size_t i = 0; i < n; i++) unquoted[i] = s[i];
+        unquoted[n] = 0;
+        path = unquoted;
+        if (path[0] == 0) {
+            size_t want = os_strlcpy(out, current_path, out_size);
+            return want + 1 <= out_size;
+        }
     }
 
     if (is_absolute_path(path)) {
@@ -1676,6 +1698,173 @@ static void cmd_test(const char *args) {
     CHECK(builtin_find("mv")    != 0, "builtin /bin/mv registered");
     CHECK(builtin_find("cp")    != 0, "builtin /bin/cp registered");
     CHECK(builtin_find("ls")    != 0, "builtin /bin/ls registered");
+
+    /*
+     * ===== FAT16 + LFN tests (FASE 8) =====
+     *
+     * Run inside /sd/__fattest as a sandbox so a flaky earlier section
+     * never clobbers the seed files. Skipped entirely if /sd isn't
+     * mounted (e.g. kernel booted without the sd.img drive attached).
+     */
+    vfs_stat_t fat_st;
+    if (vfs_stat("/sd", &fat_st) == OSNOS_OK) {
+        /* Pre-clean: tolerate leftovers from a crashed previous run. */
+        vfs_unlink("/sd/__fattest/short.txt");
+        vfs_unlink("/sd/__fattest/RENAMED.TXT");
+        vfs_unlink("/sd/__fattest/with long name.txt");
+        vfs_unlink("/sd/__fattest/dropped here.txt");
+        vfs_unlink("/sd/__fattest/sub/inside.txt");
+        vfs_unlink("/sd/__fattest/sub/moved here.txt");
+        vfs_rmdir("/sd/__fattest/sub");
+        vfs_rmdir("/sd/__fattest");
+
+        char fbuf[64];
+        size_t got = 0;
+
+        /* (a) Seed file lookup — pure 8.3. */
+        s = vfs_read("/sd/README.TXT", fbuf, sizeof(fbuf), &got);
+        CHECK(s == OSNOS_OK, "FAT: read seed README.TXT");
+
+        /* (b) Seed file lookup — LFN, original case. */
+        s = vfs_read("/sd/My Long Filename.txt", fbuf, sizeof(fbuf), &got);
+        CHECK(s == OSNOS_OK, "FAT: read LFN seed by long name");
+
+        /* (c) LFN lookup is case-insensitive. */
+        s = vfs_read("/sd/MY LONG FILENAME.TXT", fbuf, sizeof(fbuf), &got);
+        CHECK(s == OSNOS_OK, "FAT: LFN lookup case-insensitive");
+
+        /* (d) 8.3 alias of an LFN entry resolves too. */
+        s = vfs_read("/sd/MYLONG~1.TXT", fbuf, sizeof(fbuf), &got);
+        CHECK(s == OSNOS_OK, "FAT: 8.3 alias of LFN resolves");
+
+        /* (e) mkdir sandbox + write 8.3 file. */
+        s = vfs_mkdir("/sd/__fattest");
+        CHECK(s == OSNOS_OK, "FAT: mkdir sandbox");
+
+        s = vfs_write("/sd/__fattest/short.txt", "abc", 3);
+        CHECK(s == OSNOS_OK, "FAT: write 8.3 file");
+        s = vfs_read("/sd/__fattest/short.txt", fbuf, sizeof(fbuf), &got);
+        CHECK(s == OSNOS_OK && got == 3 &&
+              fbuf[0] == 'a' && fbuf[1] == 'b' && fbuf[2] == 'c',
+              "FAT: read back 8.3 file");
+
+        /* (f) write a long-name file → must allocate LFN slots. */
+        s = vfs_write("/sd/__fattest/with long name.txt", "long-content", 12);
+        CHECK(s == OSNOS_OK, "FAT: write LFN file (create with long name)");
+        s = vfs_read("/sd/__fattest/with long name.txt", fbuf, sizeof(fbuf), &got);
+        CHECK(s == OSNOS_OK && got == 12, "FAT: read back LFN file");
+
+        /* (g) append — file grows. */
+        s = vfs_append("/sd/__fattest/short.txt", "DEF", 3);
+        CHECK(s == OSNOS_OK, "FAT: append");
+        s = vfs_read("/sd/__fattest/short.txt", fbuf, sizeof(fbuf), &got);
+        CHECK(s == OSNOS_OK && got == 6 && fbuf[3] == 'D',
+              "FAT: append content correct");
+
+        /* (h) overwrite — file shrinks (truncate). */
+        s = vfs_write("/sd/__fattest/short.txt", "xy", 2);
+        CHECK(s == OSNOS_OK, "FAT: overwrite truncates");
+        s = vfs_read("/sd/__fattest/short.txt", fbuf, sizeof(fbuf), &got);
+        CHECK(s == OSNOS_OK && got == 2, "FAT: post-overwrite size correct");
+
+        /* (i) rename same-parent, 8.3 → 8.3 (fast path: one sector RMW). */
+        s = vfs_move("/sd/__fattest/short.txt", "/sd/__fattest/RENAMED.TXT");
+        CHECK(s == OSNOS_OK, "FAT: rename 8.3 same-parent fast path");
+        s = vfs_stat("/sd/__fattest/short.txt", &fat_st);
+        CHECK(s == OSNOS_ENOENT, "FAT: old 8.3 name gone after rename");
+        s = vfs_stat("/sd/__fattest/RENAMED.TXT", &fat_st);
+        CHECK(s == OSNOS_OK, "FAT: new 8.3 name present after rename");
+
+        /* (j) rename LFN → 8.3 (must delete preceding LFN slots). */
+        s = vfs_move("/sd/__fattest/with long name.txt",
+                     "/sd/__fattest/short.txt");
+        CHECK(s == OSNOS_OK, "FAT: rename LFN to 8.3");
+        s = vfs_read("/sd/__fattest/short.txt", fbuf, sizeof(fbuf), &got);
+        CHECK(s == OSNOS_OK && got == 12, "FAT: rename preserved content");
+
+        /* (k) rename 8.3 → LFN (must write LFN slots). */
+        s = vfs_move("/sd/__fattest/short.txt",
+                     "/sd/__fattest/dropped here.txt");
+        CHECK(s == OSNOS_OK, "FAT: rename 8.3 to LFN");
+        s = vfs_read("/sd/__fattest/dropped here.txt", fbuf, sizeof(fbuf), &got);
+        CHECK(s == OSNOS_OK && got == 12, "FAT: LFN rename preserved content");
+
+        /* (l) Subdirectory + nested file. */
+        s = vfs_mkdir("/sd/__fattest/sub");
+        CHECK(s == OSNOS_OK, "FAT: mkdir nested");
+        s = vfs_write("/sd/__fattest/sub/inside.txt", "in", 2);
+        CHECK(s == OSNOS_OK, "FAT: write inside subdir");
+
+        /* (m) cross-directory rename (LFN → LFN). */
+        s = vfs_move("/sd/__fattest/dropped here.txt",
+                     "/sd/__fattest/sub/moved here.txt");
+        CHECK(s == OSNOS_OK, "FAT: cross-dir rename LFN");
+        s = vfs_read("/sd/__fattest/sub/moved here.txt", fbuf, sizeof(fbuf), &got);
+        CHECK(s == OSNOS_OK && got == 12, "FAT: cross-dir rename preserved");
+
+        /* (n) rename rejects when dst exists (different entry). */
+        s = vfs_write("/sd/__fattest/RENAMED.TXT", "x", 1);  /* re-create */
+        CHECK(s == OSNOS_OK, "FAT: re-create file for collision test");
+        s = vfs_move("/sd/__fattest/sub/moved here.txt",
+                     "/sd/__fattest/RENAMED.TXT");
+        CHECK(s == OSNOS_EEXIST, "FAT: rename onto existing → EEXIST");
+
+        /* (o) rmdir on non-empty rejected. */
+        s = vfs_rmdir("/sd/__fattest/sub");
+        CHECK(s == OSNOS_ENOTEMPTY, "FAT: rmdir non-empty rejected");
+
+        /* (p) Empty-file create (size==0, first_cluster==0). */
+        s = vfs_write("/sd/__fattest/empty.txt", "", 0);
+        CHECK(s == OSNOS_OK, "FAT: empty file create");
+        s = vfs_stat("/sd/__fattest/empty.txt", &fat_st);
+        CHECK(s == OSNOS_OK && fat_st.size == 0, "FAT: empty file size==0");
+
+        /* Teardown: unlink all + rmdir. */
+        s = vfs_unlink("/sd/__fattest/empty.txt");
+        CHECK(s == OSNOS_OK, "FAT: unlink empty.txt");
+        s = vfs_unlink("/sd/__fattest/RENAMED.TXT");
+        CHECK(s == OSNOS_OK, "FAT: unlink RENAMED.TXT");
+        s = vfs_unlink("/sd/__fattest/sub/inside.txt");
+        CHECK(s == OSNOS_OK, "FAT: unlink sub/inside.txt");
+        s = vfs_unlink("/sd/__fattest/sub/moved here.txt");
+        CHECK(s == OSNOS_OK, "FAT: unlink sub/moved here.txt (LFN)");
+        s = vfs_rmdir("/sd/__fattest/sub");
+        CHECK(s == OSNOS_OK, "FAT: rmdir empty subdir");
+        s = vfs_rmdir("/sd/__fattest");
+        CHECK(s == OSNOS_OK, "FAT: rmdir sandbox");
+
+        s = vfs_stat("/sd/__fattest", &fat_st);
+        CHECK(s == OSNOS_ENOENT, "FAT: sandbox gone after rmdir");
+
+        /* (q) fsck audit must come back clean after the whole churn. */
+        {
+            char rep[1024];
+            fat_fsck_report(rep, sizeof(rep));
+            /* Inline substring check — keep helper local to avoid
+             * leaking a generic string utility from a test path. */
+            const char *needles[] = {
+                "leaks:         none",
+                "cross-links:   none",
+                "size mismatch: none",
+                "bad refs:      none",
+                "mirror:        OK"
+            };
+            for (int i = 0; i < 5; i++) {
+                const char *n = needles[i];
+                size_t nlen = os_strlen(n);
+                bool found = false;
+                for (size_t k = 0; rep[k] && k + nlen <= sizeof(rep); k++) {
+                    if (os_strncmp(rep + k, n, nlen) == 0) {
+                        found = true; break;
+                    }
+                }
+                CHECK(found, n);
+            }
+        }
+    } else {
+        os_strlcat(buf, "  SKIP FAT tests (no /sd mount)\n", sizeof(buf));
+        test_flush(buf, sizeof(buf), false, 0xaaaaaa);
+    }
 
     /* cleanup */
     vfs_unlink("/test/syscall.txt");
