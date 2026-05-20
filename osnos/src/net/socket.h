@@ -47,7 +47,21 @@ int  sock_recvfrom(int sd, void *buf, size_t buf_len,
 int  sock_sendto(int sd, const void *buf, size_t len,
                   uint32_t dst_ip, uint16_t dst_port);
 
-/* ----- internal (called from UDP RX path) ----- */
+/* ----- TCP (8.5.5a: passive handshake only) ----- */
+
+/* Mark a SOCK_STREAM socket as LISTEN. Backlog is accepted but ignored
+ * (there is at most one in-flight handshake per socket today). */
+int  sock_listen(int sd, int backlog);
+
+/* Poll: returns true and fills ip_out / port_out when an established
+ * connection is sitting on the socket. */
+bool sock_tcp_get_peer(int sd, uint32_t *ip_out, uint16_t *port_out);
+
+/* Tear down whatever connection we have (RST on the peer) and return
+ * the socket to LISTEN. */
+void sock_tcp_reset(int sd);
+
+/* ----- internal (called from UDP / TCP RX path) ----- */
 
 /* Find the socket bound to local_port (and local_ip matching ANY or
  * our IP) and enqueue an incoming datagram. Returns true if delivered.
@@ -55,6 +69,12 @@ int  sock_sendto(int sd, const void *buf, size_t len,
 bool sock_deliver_udp(uint32_t src_ip, uint16_t src_port,
                        uint32_t dst_ip, uint16_t dst_port,
                        const uint8_t *data, size_t len);
+
+/* IRQ-context entry from tcp_handle. Drives the per-socket state
+ * machine in response to flags. */
+void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
+                               uint32_t dst_ip, uint16_t dst_port,
+                               uint32_t seq, uint32_t ack, uint8_t flags);
 
 /* Local port → 0 if sd is invalid. Used by udp_send to fill src_port. */
 uint16_t sock_local_port(int sd);

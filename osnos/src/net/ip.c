@@ -3,6 +3,7 @@
 #include "arp.h"
 #include "eth.h"
 #include "icmp.h"
+#include "tcp.h"
 #include "udp.h"
 
 #include <stdbool.h>
@@ -118,7 +119,9 @@ void ip_handle(const uint8_t *data, size_t len) {
     case IP_PROTO_UDP:
         udp_handle(payload, payload_len, src_ip, dst_ip);
         break;
-    /* IP_PROTO_TCP lands in 8.5.5. */
+    case IP_PROTO_TCP:
+        tcp_handle(payload, payload_len, src_ip, dst_ip);
+        break;
     default:
         break;
     }

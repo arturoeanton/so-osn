@@ -922,7 +922,48 @@ OK 8.5.4a UDP layer + kernel socket API — VERIFICADO en QEMU
      OSnOS muestra "rx 10.0.2.2:NNNNN [hola.]" — 3 datagrams seguidos
      con source ports random vía slirp NAT.
 
-TODO 8.5.4b syscall wiring + libc — siguiente
+OK 8.5.4b Linux socket syscalls + libc + udptest ELF — VERIFICADO en QEMU
+   - osnos_status_t extendido con códigos Linux errno de networking:
+     ENOTSOCK=88, EPROTONOSUPPORT=93, EAFNOSUPPORT=97, EADDRINUSE=98,
+     EADDRNOTAVAIL=99, ENETDOWN=100, ECONNRESET=104, ETIMEDOUT=110,
+     ECONNREFUSED=111. Idénticos a Linux x86_64.
+   - osnos_fd_t (src/micro/fd.{c,h}) crece con is_socket + sock_idx.
+     fd_alloc y fd_free los inicializan / limpian. sys_close ahora
+     llama sock_close cuando el fd es socket.
+   - OSNOS_SOCK_* renumerado para matchear Linux exacto: SOCK_STREAM=1,
+     SOCK_DGRAM=2. (Antes tenía el orden invertido.)
+   - 4 syscall numbers nuevos (Linux x86_64): SYS_SOCKET=41, SYS_BIND=49,
+     SYS_SENDTO=44, SYS_RECVFROM=45. Declarados en src/micro/syscall.h
+     y src/lib/libc/syscall.h en lockstep.
+   - lib/libc/syscall.h: osnos_syscall5 + osnos_syscall6 nuevos
+     (sendto/recvfrom toman 6 args). System V x86_64 convention con
+     r10/r8/r9 como 4°/5°/6° argument.
+   - Handlers en src/micro/syscall.c:
+     - unpack_sockaddr_in / pack_sockaddr_in: parsean los 16 bytes
+       de la struct Linux (family LE en bytes 0..1, port BE en 2..3,
+       IP BE en 4..7, sin_zero en 8..15) byte-por-byte para no
+       depender de alineación user-side.
+     - sys_socket: solo AF_INET + SOCK_DGRAM por ahora; reserva slot
+       en sock_create + fd_alloc, conecta ambos. EAFNOSUPPORT para
+       SOCK_STREAM hasta 8.5.5.
+     - sys_bind / sys_sendto: validan family, delegan a sock_*.
+     - sys_recvfrom: busy-wait 0x7FFFFFFF ms (~25 días, "infinito")
+       hasta que llegue. Devuelve el src en el sockaddr_in opcional,
+       actualiza addrlen a 16.
+   - lib/libc/inet.c: stubs ENOSYS reemplazados por osnos_syscall*
+     reales para socket/bind/sendto/recvfrom. -errno → errno + return
+     -1 al estilo Linux.
+   - tests/udptest.c: ELF user-mode con socket(AF_INET, SOCK_DGRAM, 0)
+     + bind(htons(port), htonl(INADDR_ANY)) + recvfrom/sendto loop
+     de 5 datagrams. Demostración end-to-end del path:
+     ring-3 ELF → libc → SYSCALL ABI → sys_* → sock_* → UDP → IP →
+     ARP → eth → RTL8139. Registrado en builtin.c.
+   - Verificado: `exec /bin/udptest` + `echo hola | nc -u -w1
+     127.0.0.1 1234` desde Mac → llega + echo back con caller IP/port
+     correcto. Linux ABI invariant preservado: los números de syscall
+     y la struct sockaddr_in son idénticos a Linux x86_64.
+
+TODO 8.5.5 TCP state machine — siguiente
 TODO 8.5.5 TCP state machine
 TODO 8.5.6 Syscalls wireados + libc
 TODO 8.5.7 /bin/httpd sirviendo /sd/index.html

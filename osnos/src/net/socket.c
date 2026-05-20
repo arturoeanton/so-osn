@@ -2,6 +2,7 @@
 
 #include "../micro/timer.h"
 #include "eth.h"
+#include "tcp.h"
 #include "udp.h"
 
 #include <stdbool.h>
@@ -25,6 +26,14 @@ typedef struct {
     uint8_t          rx_head;     /* next slot to enqueue into */
     uint8_t          rx_tail;     /* next slot to dequeue from */
     uint8_t          rx_count;
+
+    /* TCP-only fields (valid when type == SOCK_STREAM). */
+    tcp_state_t      tcp_state;
+    uint32_t         remote_ip;
+    uint16_t         remote_port;
+    uint32_t         snd_nxt;     /* next byte we'll send (1 byte for SYN/FIN) */
+    uint32_t         snd_una;     /* oldest unacked byte */
+    uint32_t         rcv_nxt;     /* next byte we expect to receive */
 } sock_t;
 
 static sock_t socks[SOCK_MAX];
@@ -40,7 +49,7 @@ static sock_t *sock_at(int sd) {
 }
 
 int sock_create(int type) {
-    if (type != OSNOS_SOCK_DGRAM) return -1;   /* SOCK_STREAM: 8.5.5 */
+    if (type != OSNOS_SOCK_DGRAM && type != OSNOS_SOCK_STREAM) return -1;
 
     for (int i = 0; i < SOCK_MAX; i++) {
         if (socks[i].used) continue;
@@ -52,6 +61,12 @@ int sock_create(int type) {
         s->rx_head    = 0;
         s->rx_tail    = 0;
         s->rx_count   = 0;
+        s->tcp_state  = TCP_CLOSED;
+        s->remote_ip  = 0;
+        s->remote_port = 0;
+        s->snd_nxt    = 0;
+        s->snd_una    = 0;
+        s->rcv_nxt    = 0;
         for (int k = 0; k < SOCK_RX_QUEUE_DEPTH; k++) s->rx[k].valid = false;
         return i;
     }
@@ -178,4 +193,151 @@ bool sock_deliver_udp(uint32_t src_ip, uint16_t src_port,
         return true;
     }
     return false;                       /* no listener */
+}
+
+/* ================================================================ */
+/* TCP (8.5.5a: passive handshake)                                  */
+/* ================================================================ */
+
+int sock_listen(int sd, int backlog) {
+    (void)backlog;
+    sock_t *s = sock_at(sd);
+    if (!s) return -1;
+    if (s->type != OSNOS_SOCK_STREAM) return -1;
+    if (s->local_port == 0) return -1;          /* must bind first */
+    s->tcp_state = TCP_LISTEN;
+    return 0;
+}
+
+bool sock_tcp_get_peer(int sd, uint32_t *ip_out, uint16_t *port_out) {
+    sock_t *s = sock_at(sd);
+    if (!s) return false;
+    if (s->type != OSNOS_SOCK_STREAM) return false;
+    if (s->tcp_state != TCP_ESTABLISHED) return false;
+    if (ip_out)   *ip_out   = s->remote_ip;
+    if (port_out) *port_out = s->remote_port;
+    return true;
+}
+
+void sock_tcp_reset(int sd) {
+    sock_t *s = sock_at(sd);
+    if (!s) return;
+    if (s->type != OSNOS_SOCK_STREAM) return;
+
+    /* If we know a peer, slap a RST on it. snd_nxt holds the next
+     * unsent seq, which is exactly what the peer expects in their
+     * receive window for an immediate teardown. */
+    if (s->remote_ip != 0 && s->local_port != 0) {
+        tcp_send(s->remote_ip, s->remote_port,
+                  s->local_port, s->snd_nxt, s->rcv_nxt,
+                  TCP_FLAG_RST | TCP_FLAG_ACK, 0, NULL, 0);
+    }
+
+    cli();
+    s->tcp_state   = TCP_LISTEN;
+    s->remote_ip   = 0;
+    s->remote_port = 0;
+    s->snd_nxt = s->snd_una = s->rcv_nxt = 0;
+    sti();
+}
+
+/*
+ * Single-connection-per-socket simplification: a LISTEN socket
+ * transitions through SYN_RCVD → ESTABLISHED in-place when its first
+ * SYN arrives. accept() (8.5.5c) will introduce real child sockets
+ * pulled from a backlog queue.
+ */
+void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
+                               uint32_t dst_ip, uint16_t dst_port,
+                               uint32_t seq, uint32_t ack, uint8_t flags) {
+    (void)dst_ip;
+
+    for (int i = 0; i < SOCK_MAX; i++) {
+        sock_t *s = &socks[i];
+        if (!s->used) continue;
+        if (s->type != OSNOS_SOCK_STREAM) continue;
+        if (s->local_port != dst_port) continue;
+
+        /* For non-LISTEN states the connection 4-tuple must match. */
+        if (s->tcp_state != TCP_LISTEN && s->tcp_state != TCP_CLOSED) {
+            if (s->remote_ip != src_ip || s->remote_port != src_port) continue;
+        }
+
+        switch (s->tcp_state) {
+        case TCP_LISTEN:
+            if (flags & TCP_FLAG_RST) return;
+            if (flags & TCP_FLAG_SYN) {
+                cli();
+                s->remote_ip   = src_ip;
+                s->remote_port = src_port;
+                /* Cheap ISN: timer + slot index. Not security-relevant
+                 * yet (no SYN-flood defense). */
+                s->snd_una = s->snd_nxt = (uint32_t)timer_ms() + (uint32_t)i * 1000;
+                s->rcv_nxt = seq + 1;                /* SYN consumes 1 seq */
+                s->tcp_state = TCP_SYN_RCVD;
+                sti();
+
+                tcp_send(src_ip, src_port, dst_port,
+                          s->snd_nxt, s->rcv_nxt,
+                          TCP_FLAG_SYN | TCP_FLAG_ACK, 8192,
+                          NULL, 0);
+                s->snd_nxt++;                         /* our SYN consumes 1 */
+            }
+            return;
+
+        case TCP_SYN_RCVD:
+            if (flags & TCP_FLAG_RST) {
+                cli();
+                s->tcp_state = TCP_LISTEN;
+                s->remote_ip = 0;
+                s->remote_port = 0;
+                sti();
+                return;
+            }
+            if ((flags & TCP_FLAG_ACK) && ack == s->snd_nxt) {
+                cli();
+                s->snd_una = ack;
+                s->tcp_state = TCP_ESTABLISHED;
+                sti();
+            }
+            return;
+
+        case TCP_ESTABLISHED:
+            /* 8.5.5a: no data transfer. RST anything that isn't a
+             * keep-alive ACK so the peer doesn't hang. */
+            if (flags & TCP_FLAG_RST) {
+                cli();
+                s->tcp_state = TCP_LISTEN;
+                s->remote_ip = 0;
+                s->remote_port = 0;
+                sti();
+                return;
+            }
+            if (flags & (TCP_FLAG_FIN | TCP_FLAG_PSH)) {
+                tcp_send(src_ip, src_port, dst_port,
+                          s->snd_nxt, seq + 1,
+                          TCP_FLAG_RST, 0, NULL, 0);
+                cli();
+                s->tcp_state = TCP_LISTEN;
+                s->remote_ip = 0;
+                s->remote_port = 0;
+                sti();
+            }
+            return;
+
+        default:
+            return;
+        }
+    }
+
+    /*
+     * No socket bound to dst_port — bounce an RST so the peer doesn't
+     * stay in SYN_SENT until its retransmission timer expires.
+     */
+    if (!(flags & TCP_FLAG_RST)) {
+        uint32_t reply_ack = seq + ((flags & TCP_FLAG_SYN) ? 1 : 0);
+        tcp_send(src_ip, src_port, dst_port,
+                  ack, reply_ack,
+                  TCP_FLAG_RST | TCP_FLAG_ACK, 0, NULL, 0);
+    }
 }

@@ -334,6 +334,7 @@ static void cmd_mount(const char *args);
 static void cmd_arp(const char *args);
 static void cmd_ping(const char *args);
 static void cmd_udptest(const char *args);
+static void cmd_tcptest(const char *args);
 static void cmd_exec(const char *args);
 static void cmd_kill(const char *args);
 static void cmd_neof(const char *args);
@@ -378,6 +379,7 @@ static const shell_command_t commands[] = {
     CMD("arp",     cmd_arp,     "arp [IP] (default: gateway)"),
     CMD("ping",    cmd_ping,    "ping IP (one ICMP echo, 1s timeout)"),
     CMD("udptest", cmd_udptest, "udptest [PORT] (bind+echo loop, 10s)"),
+    CMD("tcptest", cmd_tcptest, "tcptest [PORT] (listen, accept 1 conn, RST)"),
     CMD("exec",    cmd_exec,    "exec /bin/PROG [args] [&]"),
     CMD("kill",    cmd_kill,    "kill PID"),
     CMD("neof",    cmd_neof,    "neof"),
@@ -2123,6 +2125,82 @@ static void cmd_udptest(const char *args) {
 
     sock_close(sd);
     shell_send_console("udptest done\n");
+    prompt();
+}
+
+static void cmd_tcptest(const char *args) {
+    while (*args == ' ' || *args == '\t') args++;
+
+    uint16_t port = 80;
+    if (*args) {
+        uint32_t v = 0;
+        const char *p = args;
+        while (*p >= '0' && *p <= '9') { v = v * 10 + (uint32_t)(*p - '0'); p++; }
+        if (v == 0 || v > 65535) {
+            shell_send_console_color("\nusage: tcptest [PORT]\n", 0xff5555);
+            prompt();
+            return;
+        }
+        port = (uint16_t)v;
+    }
+
+    int sd = sock_create(OSNOS_SOCK_STREAM);
+    if (sd < 0) {
+        shell_send_console_color("\nsock_create failed\n", 0xff5555);
+        prompt();
+        return;
+    }
+    if (sock_bind(sd, 0, port) != 0) {
+        shell_send_console_color("\nbind failed\n", 0xff5555);
+        sock_close(sd);
+        prompt();
+        return;
+    }
+    if (sock_listen(sd, 1) != 0) {
+        shell_send_console_color("\nlisten failed\n", 0xff5555);
+        sock_close(sd);
+        prompt();
+        return;
+    }
+
+    char line[128];
+    line[0] = 0;
+    os_strlcat(line, "\nlisten TCP ", sizeof(line));
+    char num[8];
+    os_format_u64(port, num, sizeof(num));
+    os_strlcat(line, num, sizeof(line));
+    os_strlcat(line, ", 15s wait for handshake...\n", sizeof(line));
+    shell_send_console(line);
+
+    uint64_t deadline = timer_ms() + 15000;
+    uint32_t peer_ip = 0;
+    uint16_t peer_port = 0;
+    bool got = false;
+
+    while (timer_ms() < deadline) {
+        if (sock_tcp_get_peer(sd, &peer_ip, &peer_port)) { got = true; break; }
+    }
+
+    if (got) {
+        line[0] = 0;
+        os_strlcat(line, "connection from ", sizeof(line));
+        for (int i = 3; i >= 0; i--) {
+            os_format_u64((peer_ip >> (i * 8)) & 0xFF, num, sizeof(num));
+            os_strlcat(line, num, sizeof(line));
+            if (i > 0) os_strlcat(line, ".", sizeof(line));
+        }
+        os_strlcat(line, ":", sizeof(line));
+        os_format_u64(peer_port, num, sizeof(num));
+        os_strlcat(line, num, sizeof(line));
+        os_strlcat(line, " — handshake OK, sending RST\n", sizeof(line));
+        shell_send_console(line);
+        sock_tcp_reset(sd);
+    } else {
+        shell_send_console("no connection within 15s\n");
+    }
+
+    sock_close(sd);
+    shell_send_console("tcptest done\n");
     prompt();
 }
 
