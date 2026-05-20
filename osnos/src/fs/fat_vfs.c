@@ -134,13 +134,16 @@ static osnos_status_t fat_vfs_unlink(void *priv, const char *path) {
     return fat_rc_to_status(fat_unlink_path(rel));
 }
 
-/*
- * No fast-path rename: vfs_move falls back to copy + unlink, which is
- * correct (just not atomic). Implementing a true in-place rename would
- * mean rewriting the dirent under a new 8.3 name without touching the
- * data chain — a worthwhile FASE 8.5 nice-to-have, not a correctness
- * blocker today.
- */
+static osnos_status_t fat_vfs_rename(void *priv, const char *src,
+                                      const char *dst) {
+    (void)priv;
+    const char *rel_src = strip_mount(src);
+    const char *rel_dst = strip_mount(dst);
+    /* vfs_move only invokes .rename when src and dst share a mount,
+     * so both strip_mount calls must succeed. */
+    if (!rel_src || !rel_dst) return OSNOS_EINVAL;
+    return fat_rc_to_status(fat_rename_path(rel_src, rel_dst));
+}
 
 const vfs_ops_t fat_vfs_ops = {
     .stat    = fat_vfs_stat,
@@ -151,5 +154,5 @@ const vfs_ops_t fat_vfs_ops = {
     .mkdir   = fat_vfs_mkdir,
     .rmdir   = fat_vfs_rmdir,
     .unlink  = fat_vfs_unlink,
-    .rename  = 0
+    .rename  = fat_vfs_rename
 };

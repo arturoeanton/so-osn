@@ -531,7 +531,7 @@ OK FASE 7.7 — libc Tier 1 (pre-networking) — VERIFICADO en QEMU
    - socket(AF_INET, SOCK_STREAM, 0) → -1 + errno=ENOSYS
    42 PASS / 0 FAIL en QEMU.
 
-### FASE 8 — Disco real — CERRADA (excepto fsck)
+### FASE 8 — Disco real — CERRADA
 
 OK 8.1 ATA PIO block driver — VERIFICADO en QEMU
    - src/drivers/block_ata.{c,h}: driver PIO @ Primary IDE (0x1F0/0x3F6),
@@ -617,17 +617,56 @@ OK 8.4 FAT write support — VERIFICADO en QEMU (round-trip + reboot persistence
    - fat_vfs_ops migrado: write/append/mkdir/rmdir/unlink ya no son
      EROFS. .rename = NULL.
 
-TODO 8.5 fsck minimal — pendiente
-   - cluster leak audit (huérfanos = en FAT pero no referenciados desde
-     ningún dirent)
-   - cross-link detection (mismo cluster en 2 chains)
-   - FAT mirror divergence check
-   - dirent size vs chain length consistency
+OK 8.5 fsck minimal — VERIFICADO en QEMU (read-only audit)
+   - src/fs/fat.c: fat_fsck_report(out, out_size). Audit pasivo, nunca
+     escribe a disco.
+   - Cluster leak detection: bitmap estático de 8 KiB en BSS
+     (FSCK_BITMAP_BYTES = 65525/8 + 1). Walk DFS iterativo del directory
+     tree (stack explícito FSCK_MAX_DEPTH=16, sin recursión); cada
+     dirent.first_cluster dispara fsck_walk_chain que marca cada
+     cluster visitado. Después se recorre el FAT entero; cualquier
+     entry no-zero / no-bad sin bit set es leak.
+   - Cross-link / cycle detection: la misma fsck_walk_chain detecta
+     revisitas (cluster ya marcado) → crosslinks++ + break, lo que
+     también blinda contra FATs corruptos con ciclos auto-referentes.
+     Hop cap FSCK_MAX_CHAIN_HOPS = 65525 como belt-and-suspenders.
+   - FAT mirror divergence: fsck_check_mirror lee FAT[0] sector a
+     sector y compara contra FAT[1..N-1]; suma de sectores que
+     difieren se reporta.
+   - Size consistency: para cada file regular, walk del chain devuelve
+     `len`. Se valida (a) size==0 ⇒ first_cluster==0, (b) size>0 ⇒
+     len>=1, (c) size <= len*cluster_size, (d) size > (len-1)*cluster_size
+     (no clusters trailing inutilizados).
+   - Diagnósticos extra: bad refs (chain → cluster fuera de rango / EIO
+     leyendo FAT) y deep_skip (subdirs descartados por exceder MAX_DEPTH).
+   - Skip explícito de "." y ".." en el walk para no contar las
+     auto-referencias como crosslinks.
+   - Expuesto vía /sys/fat_fsck (sysfs synthetic). `cat /sys/fat_fsck`
+     corre el audit completo (~250 PIO reads en 16MB / FAT mirror
+     incluido) e imprime: files / dirs / clusters free|used|bad /
+     mirror / cross-links / leaks / size mismatches / bad refs.
 
-TODO opcional rename in-place — pendiente
-   - Hoy vfs_move usa copy+unlink (O(file size)). Para mismo-directorio
-     basta con sobrescribir los primeros 11 bytes del dirent con un nuevo
-     8.3 name — O(1).
+TODO opcional fsck repair-mode — pendiente
+   - Hoy es read-only audit. Una pasada que (a) libere clusters leaked,
+     (b) trunque chains con cross-links, (c) escriba FAT[0] sobre los
+     espejos divergentes sería el siguiente paso natural.
+
+OK 8.6 rename in-place — IMPLEMENTADO
+   - fat_rename_path(src, dst): expuesto vía fat_vfs_ops.rename, así
+     que `mv` dentro de /sd ya no cae al fallback copy+unlink del VFS
+     (que truncaba archivos > VFS_COPY_BUF_SIZE = 1024 B sin avisar).
+   - Fast path (mismo parent dir): una sola RMW del sector del dirent
+     existente — sobrescribe bytes 0..10 (8.3 name). O(1) en bytes
+     escritos, independiente del tamaño del archivo.
+   - Cross-directory: reserva slot libre en dst-parent (find_free_dir_slot,
+     falla rápido con ENOSPC), marca src dirent 0xE5, escribe el nuevo
+     dirent (32 bytes copiados del src + name reemplazado) en el dst slot.
+   - Orden crash-safe deliberado: src-deleted FIRST, dst-write segundo.
+     Crash entre ambos = orphan chain (fsck-recoverable), NUNCA cross-link.
+   - Rechaza overwrite de dst existente (EEXIST). Rename a sí mismo
+     (mismo dirent_lba+offset resuelto desde dst path) es no-op.
+   - Comparación same-parent vía src_parent.first_cluster ==
+     dst_parent.first_cluster (root sentinel = 0 ambos lados).
 
 TODO opcional LFN (Long File Names) — pendiente
    - Hoy nombres > 8 chars o con minúsculas se rechazan en name_to_83.

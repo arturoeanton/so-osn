@@ -1,6 +1,7 @@
 #include "fat.h"
 
 #include "../drivers/block_ata.h"
+#include "../lib/string.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -927,4 +928,410 @@ int fat_rmdir_path(const char *path) {
     sb[de.dirent_offset] = 0xE5;
     if (block_ata_write_sector(de.dirent_lba, sb) != 0) return FAT_EIO;
     return 0;
+}
+
+/*
+ * Rename / move within the FAT volume.
+ *   - Same parent → O(1): overwrite the 11 name bytes in src's dirent.
+ *   - Cross-directory → reuse the existing FAT chain by copying src's
+ *     dirent (with the new name) into a free slot in dst's parent,
+ *     then marking src's dirent 0xE5.
+ *
+ * The cross-dir order is deliberate: src-deleted FIRST, then dst
+ * written. A crash mid-rename leaks the file (visible to fsck) rather
+ * than cross-linking it (both directories pointing at the same chain).
+ * We pre-reserve the dst slot before deleting src so ENOSPC fails
+ * fast without losing data.
+ *
+ * Overwrite of an existing dst is rejected (EEXIST). The caller is
+ * expected to unlink dst first if it wants Unix-style overwrite.
+ * Renaming a path to itself (case-insensitive, same on-disk dirent)
+ * is a no-op success.
+ */
+int fat_rename_path(const char *src, const char *dst) {
+    if (!fs_ready) return FAT_EIO;
+
+    fat_dirent_t src_de;
+    if (fat_lookup(src, &src_de) != 0) return FAT_ENOENT;
+    if (src_de.dirent_lba == 0) return FAT_EINVAL;   /* root */
+
+    /* If dst resolves to the SAME on-disk dirent as src (different
+     * spellings of the same 8.3 name, or trailing slashes), no-op. */
+    fat_dirent_t dst_de;
+    if (fat_lookup(dst, &dst_de) == 0) {
+        if (dst_de.dirent_lba == src_de.dirent_lba &&
+            dst_de.dirent_offset == src_de.dirent_offset) {
+            return 0;
+        }
+        return FAT_EEXIST;
+    }
+
+    /* Resolve dst into parent dir + new 8.3 name. */
+    char dst_parent_path[64];
+    char dst_base[64];
+    int rc = split_parent_base(dst, dst_parent_path, dst_base);
+    if (rc != 0) return rc;
+
+    fat_dirent_t dst_parent;
+    if (fat_lookup(dst_parent_path, &dst_parent) != 0) return FAT_ENOENT;
+    if (!dst_parent.is_dir) return FAT_ENOTDIR;
+
+    char dst_name11[11];
+    if (!name_to_83(dst_base, dst_name11)) return FAT_EINVAL;
+
+    /* Read src's dirent sector once; we'll need its 32 raw bytes
+     * either way (fast path patches in place; cross-dir uses them
+     * as the template for the new entry). */
+    uint8_t sb_src[SECTOR_SIZE];
+    if (block_ata_read_sector(src_de.dirent_lba, sb_src) != 0) return FAT_EIO;
+
+    /* Discover src's parent so we can compare against dst_parent. */
+    char src_parent_path[64];
+    char src_base[64];
+    rc = split_parent_base(src, src_parent_path, src_base);
+    if (rc != 0) return rc;
+    fat_dirent_t src_parent;
+    if (fat_lookup(src_parent_path, &src_parent) != 0) return FAT_EIO;
+
+    /* Fast path: same parent. Both first_cluster fields agree (root
+     * sentinel is 0, identical across both). One sector RMW. */
+    if (src_parent.first_cluster == dst_parent.first_cluster) {
+        for (int i = 0; i < 11; i++) {
+            sb_src[src_de.dirent_offset + i] = (uint8_t)dst_name11[i];
+        }
+        if (block_ata_write_sector(src_de.dirent_lba, sb_src) != 0) {
+            return FAT_EIO;
+        }
+        return 0;
+    }
+
+    /* Cross-directory: reserve dst slot, mark src deleted, write dst. */
+    uint32_t dst_slot_lba, dst_slot_off;
+    rc = find_free_dir_slot(&dst_parent, &dst_slot_lba, &dst_slot_off);
+    if (rc != 0) return rc;
+
+    uint8_t new_raw[DIRENT_SIZE];
+    for (int i = 0; i < DIRENT_SIZE; i++) {
+        new_raw[i] = sb_src[src_de.dirent_offset + i];
+    }
+    for (int i = 0; i < 11; i++) new_raw[i] = (uint8_t)dst_name11[i];
+
+    /* Mark src deleted FIRST. Bounded leak window beats cross-link. */
+    sb_src[src_de.dirent_offset] = 0xE5;
+    if (block_ata_write_sector(src_de.dirent_lba, sb_src) != 0) return FAT_EIO;
+
+    if (read_modify_write_dirent(dst_slot_lba, dst_slot_off, new_raw) != 0) {
+        return FAT_EIO;
+    }
+    return 0;
+}
+
+/* ================================================================ */
+/* fsck (FASE 8.5) — read-only audit                                */
+/* ================================================================ */
+
+#define FSCK_MAX_DEPTH       16
+#define FSCK_MAX_CHAIN_HOPS  65525  /* upper bound on FAT16 cluster count */
+
+/*
+ * Cluster reachability bitmap. One bit per FAT entry index; bit set ⇔
+ * cluster was visited while walking a dirent chain. After the dir
+ * tree walk, any FAT entry whose value is non-zero and non-bad but
+ * whose bit stayed clear is a leak.
+ *
+ * 65525 bits ≈ 8 KiB BSS — small enough to keep static and large enough
+ * to cover the full FAT16 cluster space.
+ */
+#define FSCK_BITMAP_BYTES    ((65525 + 7) / 8)
+static uint8_t fsck_used_map[FSCK_BITMAP_BYTES];
+
+static void fsck_clear_used(void) {
+    for (uint32_t i = 0; i < FSCK_BITMAP_BYTES; i++) fsck_used_map[i] = 0;
+}
+
+static bool fsck_is_used(uint16_t cluster) {
+    return (fsck_used_map[cluster / 8] >> (cluster % 8)) & 1u;
+}
+
+static void fsck_set_used(uint16_t cluster) {
+    fsck_used_map[cluster / 8] |= (uint8_t)(1u << (cluster % 8));
+}
+
+/*
+ * Walk `first`'s cluster chain. Marks every visited cluster in the
+ * bitmap and counts the chain length. A revisit (cross-link OR cycle)
+ * bumps `*crosslinks` and stops — the fsck_is_used check is what makes
+ * the walk safe against corrupted FATs that loop back on themselves.
+ * Bad / out-of-range references bump `*bad_refs`.
+ */
+static uint32_t fsck_walk_chain(uint16_t first,
+                                  uint32_t *crosslinks,
+                                  uint32_t *bad_refs) {
+    uint32_t len = 0;
+    uint16_t cur = first;
+
+    for (uint32_t hops = 0; hops < FSCK_MAX_CHAIN_HOPS; hops++) {
+        if (cur < 2 || cur >= FAT16_EOF_MIN) break;
+        if (cur == FAT16_BAD) { (*bad_refs)++; break; }
+        if (fsck_is_used(cur)) { (*crosslinks)++; break; }
+
+        fsck_set_used(cur);
+        len++;
+
+        uint16_t next;
+        if (fat_get_entry(cur, &next) != 0) { (*bad_refs)++; break; }
+        cur = next;
+    }
+    return len;
+}
+
+typedef struct {
+    fat_dirent_t  dir;
+    uint32_t      cursor;
+} fsck_frame_t;
+
+typedef struct {
+    uint32_t file_count;
+    uint32_t dir_count;
+    uint32_t crosslinks;
+    uint32_t bad_refs;
+    uint32_t size_errors;
+    uint32_t deep_skip;
+} fsck_walk_t;
+
+/*
+ * Iterative DFS over the directory tree. The fsck_frame_t × MAX_DEPTH
+ * stack lives in whichever task calls fsck (≈ 1.3 KiB; safe on the
+ * 16 KiB kernel kstack). Subdirectories beyond MAX_DEPTH are skipped
+ * and counted in `deep_skip` so the report can mention it.
+ */
+static void fsck_walk_tree(fsck_walk_t *w) {
+    fsck_frame_t stack[FSCK_MAX_DEPTH];
+    int top = 0;
+    stack[0].cursor = 0;
+    stack[0].dir.is_dir = true;
+    stack[0].dir.first_cluster = 0;   /* root sentinel */
+
+    uint32_t cluster_size = (uint32_t)fs.sectors_per_cluster * SECTOR_SIZE;
+
+    while (top >= 0) {
+        fat_dirent_t ent;
+        uint32_t next;
+        int rc = fat_readdir(&stack[top].dir, stack[top].cursor, &ent, &next);
+        if (rc != 0) { top--; continue; }
+        stack[top].cursor = next;
+
+        /* Skip "." and ".." — they'd re-mark already-used clusters and
+         * trigger phantom cross-links. */
+        if (ent.name[0] == '.' &&
+            (ent.name[1] == 0 ||
+             (ent.name[1] == '.' && ent.name[2] == 0))) {
+            continue;
+        }
+
+        if (ent.is_dir) {
+            w->dir_count++;
+            if (ent.first_cluster >= 2) {
+                fsck_walk_chain(ent.first_cluster,
+                                  &w->crosslinks, &w->bad_refs);
+            }
+            if (top + 1 < FSCK_MAX_DEPTH) {
+                top++;
+                stack[top].dir    = ent;
+                stack[top].cursor = 0;
+            } else {
+                w->deep_skip++;
+            }
+        } else {
+            w->file_count++;
+            uint32_t len = 0;
+            if (ent.size > 0 && ent.first_cluster >= 2) {
+                len = fsck_walk_chain(ent.first_cluster,
+                                        &w->crosslinks, &w->bad_refs);
+            }
+            /* size==0 should have first_cluster==0. size>0 needs a
+             * chain that covers it without leaving an unused trailing
+             * cluster (i.e. size > (len-1) * cluster_size). */
+            if (ent.size == 0 && ent.first_cluster != 0) {
+                w->size_errors++;
+            } else if (ent.size > 0 && len == 0) {
+                w->size_errors++;
+            } else if (ent.size > len * cluster_size) {
+                w->size_errors++;
+            } else if (len > 0 &&
+                       ent.size <= (len - 1) * cluster_size) {
+                w->size_errors++;
+            }
+        }
+    }
+}
+
+static int fsck_cluster_counts(uint32_t *free_c, uint32_t *used_c,
+                                 uint32_t *bad_c) {
+    *free_c = 0;
+    *used_c = 0;
+    *bad_c  = 0;
+
+    uint32_t max_entries = (uint32_t)fs.fat_size_sectors * SECTOR_SIZE / 2;
+    if (max_entries > 65525) max_entries = 65525;
+
+    uint8_t buf[SECTOR_SIZE];
+    uint32_t cached_sec = (uint32_t)-1;
+
+    for (uint32_t c = 2; c < max_entries; c++) {
+        uint32_t byte_off = c * 2;
+        uint32_t sec      = fs.fat_lba + byte_off / SECTOR_SIZE;
+        uint32_t in_sec   = byte_off % SECTOR_SIZE;
+
+        if (sec != cached_sec) {
+            if (block_ata_read_sector(sec, buf) != 0) return -1;
+            cached_sec = sec;
+        }
+        uint16_t v = (uint16_t)buf[in_sec] | ((uint16_t)buf[in_sec + 1] << 8);
+        if (v == 0)              (*free_c)++;
+        else if (v == FAT16_BAD) (*bad_c)++;
+        else                     (*used_c)++;
+    }
+    return 0;
+}
+
+static uint32_t fsck_count_leaks(void) {
+    uint32_t leaks = 0;
+    uint32_t max_entries = (uint32_t)fs.fat_size_sectors * SECTOR_SIZE / 2;
+    if (max_entries > 65525) max_entries = 65525;
+
+    uint8_t buf[SECTOR_SIZE];
+    uint32_t cached_sec = (uint32_t)-1;
+
+    for (uint32_t c = 2; c < max_entries; c++) {
+        uint32_t byte_off = c * 2;
+        uint32_t sec      = fs.fat_lba + byte_off / SECTOR_SIZE;
+        uint32_t in_sec   = byte_off % SECTOR_SIZE;
+
+        if (sec != cached_sec) {
+            if (block_ata_read_sector(sec, buf) != 0) return leaks;
+            cached_sec = sec;
+        }
+        uint16_t v = (uint16_t)buf[in_sec] | ((uint16_t)buf[in_sec + 1] << 8);
+        if (v == 0 || v == FAT16_BAD) continue;
+        if (!fsck_is_used((uint16_t)c)) leaks++;
+    }
+    return leaks;
+}
+
+/*
+ * Compare FAT[0] sector-by-sector against every other FAT copy.
+ * `*divergent_sectors` is summed across all mirrors — e.g. with
+ * num_fats=2 and 3 differing sectors, the result is 3.
+ */
+static int fsck_check_mirror(uint32_t *divergent_sectors) {
+    *divergent_sectors = 0;
+    if (fs.num_fats < 2) return 0;
+
+    uint8_t buf_a[SECTOR_SIZE], buf_b[SECTOR_SIZE];
+    for (uint32_t s = 0; s < fs.fat_size_sectors; s++) {
+        uint32_t lba_a = fs.fat_lba + s;
+        if (block_ata_read_sector(lba_a, buf_a) != 0) return -1;
+        for (uint8_t k = 1; k < fs.num_fats; k++) {
+            uint32_t lba_b = fs.fat_lba +
+                             (uint32_t)k * fs.fat_size_sectors + s;
+            if (block_ata_read_sector(lba_b, buf_b) != 0) return -1;
+            for (uint32_t i = 0; i < SECTOR_SIZE; i++) {
+                if (buf_a[i] != buf_b[i]) { (*divergent_sectors)++; break; }
+            }
+        }
+    }
+    return 0;
+}
+
+/* ----- public entry point ----- */
+
+static void emit_label_num(char *out, size_t out_size,
+                            const char *label, uint64_t n) {
+    char num[24];
+    os_strlcat(out, label, out_size);
+    os_format_u64(n, num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\n", out_size);
+}
+
+static void emit_count_or_none(char *out, size_t out_size,
+                                const char *label, uint32_t n) {
+    char num[24];
+    os_strlcat(out, label, out_size);
+    if (n == 0) {
+        os_strlcat(out, "none\n", out_size);
+    } else {
+        os_format_u64(n, num, sizeof(num));
+        os_strlcat(out, num, out_size);
+        os_strlcat(out, "\n", out_size);
+    }
+}
+
+void fat_fsck_report(char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    out[0] = 0;
+
+    if (!fs_ready) {
+        os_strlcpy(out, "fsck: FAT not mounted\n", out_size);
+        return;
+    }
+
+    uint32_t free_c = 0, used_c = 0, bad_c = 0;
+    if (fsck_cluster_counts(&free_c, &used_c, &bad_c) != 0) {
+        os_strlcpy(out, "fsck: FAT read failed\n", out_size);
+        return;
+    }
+
+    fsck_clear_used();
+
+    fsck_walk_t w = { 0, 0, 0, 0, 0, 0 };
+    fsck_walk_tree(&w);
+
+    uint32_t leaks = fsck_count_leaks();
+
+    uint32_t divergent = 0;
+    int mirror_rc = fsck_check_mirror(&divergent);
+
+    os_strlcat(out, "fsck /sd (FAT16)\n", out_size);
+    os_strlcat(out, "================\n", out_size);
+
+    emit_label_num(out, out_size, "files:         ", w.file_count);
+    emit_label_num(out, out_size, "dirs:          ", w.dir_count);
+    emit_label_num(out, out_size, "clusters free: ", free_c);
+    emit_label_num(out, out_size, "clusters used: ", used_c);
+    emit_label_num(out, out_size, "clusters bad:  ", bad_c);
+
+    os_strlcat(out, "\nmirror:        ", out_size);
+    if (fs.num_fats < 2) {
+        os_strlcat(out, "n/a (single FAT)\n", out_size);
+    } else if (mirror_rc != 0) {
+        os_strlcat(out, "read error\n", out_size);
+    } else if (divergent == 0) {
+        os_strlcat(out, "OK\n", out_size);
+    } else {
+        char num[24];
+        os_strlcat(out, "DIVERGENT (sectors=", out_size);
+        os_format_u64(divergent, num, sizeof(num));
+        os_strlcat(out, num, out_size);
+        os_strlcat(out, ")\n", out_size);
+    }
+
+    emit_count_or_none(out, out_size, "cross-links:   ",  w.crosslinks);
+    emit_count_or_none(out, out_size, "leaks:         ",  leaks);
+    emit_count_or_none(out, out_size, "size mismatch: ",  w.size_errors);
+    emit_count_or_none(out, out_size, "bad refs:      ",  w.bad_refs);
+
+    if (w.deep_skip) {
+        char num[24];
+        os_strlcat(out, "\nNOTE: ", out_size);
+        os_format_u64(w.deep_skip, num, sizeof(num));
+        os_strlcat(out, num, out_size);
+        os_strlcat(out, " subdir(s) past depth ", out_size);
+        os_format_u64(FSCK_MAX_DEPTH, num, sizeof(num));
+        os_strlcat(out, num, out_size);
+        os_strlcat(out, " skipped\n", out_size);
+    }
+
+    os_strlcat(out, "\n(read-only audit)\n", out_size);
 }

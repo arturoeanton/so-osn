@@ -93,3 +93,21 @@ int  fat_append_path (const char *path, const char *buf, uint32_t len);
 int  fat_unlink_path (const char *path);
 int  fat_mkdir_path  (const char *path);
 int  fat_rmdir_path  (const char *path);
+int  fat_rename_path (const char *src, const char *dst);
+
+/* ----- fsck (read-only audit) ----- */
+/*
+ * Walks every dirent + FAT entry on the mounted volume and writes a
+ * plain-text report into `out`. Detects:
+ *   - cluster leaks (FAT entry != 0 but no dirent points to it)
+ *   - cross-links (a cluster appearing in two different chains, or a
+ *     chain that loops back on itself)
+ *   - FAT mirror divergence (FAT[1..N-1] differ from FAT[0])
+ *   - size / chain length mismatch (`size > chain_len * cluster_size`,
+ *     or `size > 0` with `chain_len == 0`)
+ *
+ * Pure read-only — never writes to disk. Output truncated cleanly to
+ * `out_size`.
+ */
+#include <stddef.h>
+void fat_fsck_report(char *out, size_t out_size);

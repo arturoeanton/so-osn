@@ -1,6 +1,7 @@
 #include "sysfs.h"
 
 #include "../drivers/block_ata.h"
+#include "../fs/fat.h"
 #include "../fs/ramfs.h"
 #include "../lib/string.h"
 #include "../micro/idt.h"
@@ -316,6 +317,10 @@ static void gen_disks(char *out, size_t out_size) {
     os_strlcat(out, "\n", out_size);
 }
 
+static void gen_fat_fsck(char *out, size_t out_size) {
+    fat_fsck_report(out, out_size);
+}
+
 static void gen_build(char *out, size_t out_size) {
     out[0] = 0;
     os_strlcat(out, "compiled: " __DATE__ " " __TIME__ "\n", out_size);
@@ -339,7 +344,8 @@ static const sysfs_entry_t entries[] = {
     { "mounts",   gen_mounts   },
     { "meminfo",  gen_meminfo  },
     { "timer",    gen_timer    },
-    { "disks",    gen_disks    }
+    { "disks",    gen_disks    },
+    { "fat_fsck", gen_fat_fsck }
 };
 
 #define SYSFS_ENTRY_COUNT (sizeof(entries) / sizeof(entries[0]))
