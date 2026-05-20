@@ -1034,7 +1034,38 @@ OK 8.5.5b TCP data transfer + graceful close — VERIFICADO en QEMU
    Gotcha documentado: nc BSD (macOS) no tiene `-N`; usar `-w2` para
    que cierre por timeout o `( ... ; sleep 1 ) | nc ...` para EOF
    programado.
-TODO 8.5.5c TCP listen/accept syscalls + multi-connection
+OK 8.5.5c TCP listen+accept + child sockets + /bin/echotcp — VERIFICADO en QEMU
+   - sock_t extiende con parent_sd (-1 normal, índice al LISTEN si es
+     child), accept_q[4] (ring de child sds en ESTABLISHED pendientes
+     de accept), backlog cap.
+   - sock_tcp_handle_segment ahora hace 2-pass lookup: primero match
+     4-tuple en sockets no-LISTEN; si no encuentra, busca LISTEN. Sin
+     esto la LISTEN se comía los paquetes de sus propias conexiones.
+   - LISTEN + SYN → alloc_child_for_syn(): nuevo slot inicializado en
+     SYN_RCVD con remote pin, parent_sd = listen idx. SYN-ACK desde la
+     ISN del child. La LISTEN sigue intacta esperando más SYNs. Si
+     accept_q lleno → drop del SYN (peer retransmite).
+   - SYN_RCVD + ACK válido en child → ESTABLISHED + push al accept_q
+     del parent (idx del child al ring tail).
+   - sock_listen(sd, backlog) clamp a SOCK_ACCEPT_QUEUE_DEPTH.
+   - sock_accept(sd, &peer_ip, &peer_port, timeout_ms): busy-poll
+     cli/sti contra accept_q_count. Dequeue → devuelve child sd.
+   - Linux syscalls nuevos: SYS_LISTEN=50, SYS_ACCEPT=43. sys_accept
+     hace fd_alloc + asocia con el child sd recibido + pack del peer
+     en sockaddr_in.
+   - sys_sendto / sys_recvfrom ahora dispatchean al path TCP cuando el
+     socket es STREAM. send(fd,buf,n,flags) en libc se traduce a
+     sendto(...,NULL,0); recv idem. Linux convention.
+   - libc inet.c: listen / accept / send / recv real (no más stubs
+     ENOSYS).
+   - Bugfix: sys_socket aceptaba sólo SOCK_DGRAM, rechazaba SOCK_STREAM
+     con errno=97 (EAFNOSUPPORT). Agregado el check para ambos types.
+   - tests/echotcp.c: bind→listen(4)→accept loop x5→recv+send+close.
+     Registrado en builtin.c como /bin/echotcp.
+   - Verificado: `exec /bin/echotcp` + 5x `echo X | nc -v -w2
+     127.0.0.1 8080` desde Mac → OSnOS imprime cada conexión con peer
+     IP:port y el mensaje recibido; cada nc del Mac ve el echo y cierra
+     limpio. accept se reusa con cada conexión, sin leaks de slots.
 TODO 8.5.6 socket options + select()
 TODO 8.5.7 getaddrinfo (AI_PASSIVE no-DNS) + /bin/httpd
 TODO 8.5.8 compilar y correr selectserver.c de Beej end-to-end

@@ -1,5 +1,6 @@
 #include "socket.h"
 
+#include "../micro/task.h"
 #include "../micro/timer.h"
 #include "eth.h"
 #include "tcp.h"
@@ -66,6 +67,13 @@ static uint16_t ephemeral_next = 40000;
 
 static inline void cli(void) { __asm__ volatile ("cli"); }
 static inline void sti(void) { __asm__ volatile ("sti"); }
+
+/* True when the current task has a pending kill (e.g. Ctrl+C) and the
+ * busy-poll loop should bail out so the syscall can return early. */
+static bool poll_interrupted(void) {
+    task_t *t = task_current();
+    return t && t->kill_pending;
+}
 
 static sock_t *sock_at(int sd) {
     if (sd < 0 || sd >= SOCK_MAX) return 0;
@@ -159,6 +167,32 @@ uint16_t sock_local_port(int sd) {
     return s ? s->local_port : 0;
 }
 
+bool sock_readable(int sd) {
+    /* Volatile reads — this is called in tight busy-poll loops where
+     * the watched counters are mutated from the NIC IRQ. Without the
+     * volatile coerce, clang -O2 cached the read and select() never
+     * saw the IRQ's update. */
+    volatile sock_t *s = (volatile sock_t *)sock_at(sd);
+    if (!s) return false;
+
+    if (s->type == OSNOS_SOCK_DGRAM) {
+        return s->rx_count > 0;
+    }
+    if (s->type == OSNOS_SOCK_STREAM) {
+        tcp_state_t st = s->tcp_state;
+        if (st == TCP_LISTEN) {
+            return s->accept_q_count > 0;
+        }
+        if (st == TCP_ESTABLISHED ||
+            st == TCP_CLOSE_WAIT  ||
+            st == TCP_FIN_WAIT_1  ||
+            st == TCP_FIN_WAIT_2) {
+            return s->tcp_rx_count > 0 || s->peer_fin;
+        }
+    }
+    return false;
+}
+
 int sock_recvfrom(int sd, void *buf, size_t buf_len,
                    uint32_t *src_ip, uint16_t *src_port,
                    uint32_t timeout_ms) {
@@ -168,6 +202,7 @@ int sock_recvfrom(int sd, void *buf, size_t buf_len,
 
     uint64_t deadline = timer_ms() + timeout_ms;
     for (;;) {
+        if (poll_interrupted()) return -1;
         cli();
         if (s->rx_count > 0) {
             sock_rx_slot_t *slot = &s->rx[s->rx_tail];
@@ -261,6 +296,7 @@ int sock_accept(int listen_sd,
 
     uint64_t deadline = timer_ms() + timeout_ms;
     for (;;) {
+        if (poll_interrupted()) return -1;
         cli();
         if (s->accept_q_count > 0) {
             int child = s->accept_q[s->accept_q_head];
@@ -598,6 +634,7 @@ int sock_recv(int sd, void *buf, size_t buf_len, uint32_t timeout_ms) {
 
     uint64_t deadline = timer_ms() + timeout_ms;
     for (;;) {
+        if (poll_interrupted()) return -1;
         cli();
         if (s->tcp_rx_count > 0) {
             size_t n = s->tcp_rx_count;

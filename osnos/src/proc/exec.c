@@ -2,6 +2,7 @@
 
 #include "../include/osnos_status.h"
 #include "../lib/string.h"
+#include "../micro/fd.h"
 #include "../micro/gdt.h"
 #include "../micro/ipc.h"
 #include "elf.h"
@@ -475,6 +476,12 @@ int64_t proc_exec(const char *path, const char *args) {
     const char *name = path + 5;
     const builtin_t *b = builtin_find(name);
     if (!b) return -(int64_t)OSNOS_ENOENT;
+
+    /* Drop any keystrokes that were typed while the shell was line-
+     * editing (including the Enter that fired this exec). Otherwise a
+     * select()-driven child sees stdin "readable" before the user
+     * actually means to send it any input. */
+    stdin_clear();
 
     /* User ELF — parse PT_LOADs, build argv block, spawn ring-3 task. */
     if (b->elf_start) {

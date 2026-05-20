@@ -31,12 +31,14 @@
 #define SYS_UNLINK    87
 #define SYS_ISATTY   201   /* osnos-specific */
 #define SYS_GETDENTS 217
-#define SYS_SOCKET    41
-#define SYS_ACCEPT    43
-#define SYS_SENDTO    44
-#define SYS_RECVFROM  45
-#define SYS_BIND      49
-#define SYS_LISTEN    50
+#define SYS_SELECT     23
+#define SYS_SOCKET     41
+#define SYS_ACCEPT     43
+#define SYS_SENDTO     44
+#define SYS_RECVFROM   45
+#define SYS_BIND       49
+#define SYS_LISTEN     50
+#define SYS_SETSOCKOPT 54
 
 static inline long osnos_syscall0(long n) {
     long r;

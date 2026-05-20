@@ -4,7 +4,10 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <time.h>
 
 #include "syscall.h"
 
@@ -193,6 +196,73 @@ int shutdown(int sockfd, int how) {
     return nosys_int();
 }
 
+int setsockopt(int sockfd, int level, int optname,
+               const void *optval, socklen_t optlen) {
+    long r = osnos_syscall5(SYS_SETSOCKOPT, sockfd, level, optname,
+                              (long)optval, (long)optlen);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return 0;
+}
+
+int select(int nfds,
+           fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+           struct timeval *timeout) {
+    /*
+     * The kernel select() is non-blocking — one pass, returns 0 if
+     * nothing is ready. We loop in user space and call nanosleep()
+     * between polls so the cooperative scheduler can dispatch other
+     * tasks (servers, shell) in the gaps. Without this, a select that
+     * blocks forever would also starve the keyboard server and the
+     * user couldn't even Ctrl+C.
+     */
+
+    /* Snapshot input sets so we can reset before each kernel call —
+     * the kernel mutates them in place. */
+    fd_set r_in, w_in, e_in;
+    if (readfds)   r_in = *readfds;
+    if (writefds)  w_in = *writefds;
+    if (exceptfds) e_in = *exceptfds;
+
+    int      has_deadline = (timeout != NULL);
+    uint64_t remaining_ms = 0;
+    if (has_deadline) {
+        remaining_ms = (uint64_t)timeout->tv_sec * 1000 +
+                        (uint64_t)timeout->tv_usec / 1000;
+    }
+    const uint64_t step_ms = 20;
+
+    for (;;) {
+        if (readfds)   *readfds   = r_in;
+        if (writefds)  *writefds  = w_in;
+        if (exceptfds) *exceptfds = e_in;
+
+        long r = osnos_syscall5(SYS_SELECT,
+                                  nfds,
+                                  (long)readfds, (long)writefds, (long)exceptfds,
+                                  0);
+        if (r < 0) { errno = (int)(-r); return -1; }
+        if (r > 0) return (int)r;
+
+        /* Nothing ready. Bail on deadline. */
+        if (has_deadline && remaining_ms == 0) {
+            if (readfds)   FD_ZERO(readfds);
+            if (writefds)  FD_ZERO(writefds);
+            if (exceptfds) FD_ZERO(exceptfds);
+            return 0;
+        }
+
+        uint64_t sleep_ms = step_ms;
+        if (has_deadline && remaining_ms < step_ms) sleep_ms = remaining_ms;
+
+        struct timespec req;
+        req.tv_sec  = (long)(sleep_ms / 1000);
+        req.tv_nsec = (long)((sleep_ms % 1000) * 1000000);
+        nanosleep(&req, NULL);
+
+        if (has_deadline) remaining_ms -= sleep_ms;
+    }
+}
+
 int getsockname(int sockfd, struct sockaddr *addr, socklen_t *len) {
     (void)sockfd; (void)addr; (void)len;
     return nosys_int();
@@ -209,8 +279,4 @@ int getsockopt(int sockfd, int level, int optname, void *optval,
     return nosys_int();
 }
 
-int setsockopt(int sockfd, int level, int optname, const void *optval,
-               socklen_t optlen) {
-    (void)sockfd; (void)level; (void)optname; (void)optval; (void)optlen;
-    return nosys_int();
-}
+/* setsockopt is defined earlier with a real syscall wrapper. */

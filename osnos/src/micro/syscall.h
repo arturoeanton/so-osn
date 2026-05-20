@@ -26,12 +26,14 @@
 #define SYS_RMDIR    84
 #define SYS_UNLINK   87
 #define SYS_GETDENTS 217   /* getdents64 in Linux x86_64 */
-#define SYS_SOCKET   41
-#define SYS_ACCEPT   43
-#define SYS_SENDTO   44
-#define SYS_RECVFROM 45
-#define SYS_BIND     49
-#define SYS_LISTEN   50
+#define SYS_SELECT     23
+#define SYS_SOCKET     41
+#define SYS_ACCEPT     43
+#define SYS_SENDTO     44
+#define SYS_RECVFROM   45
+#define SYS_BIND       49
+#define SYS_LISTEN     50
+#define SYS_SETSOCKOPT 54
 
 /* osnos-specific (above 200 by convention). */
 #define SYS_ISATTY  201
@@ -148,11 +150,26 @@ int64_t sys_getdents(int fd, void *buf, size_t buf_size);
  *   4..7  sin_addr     (BE)
  *   8..15 sin_zero     (must be 0)
  */
-int64_t sys_socket  (int domain, int type, int protocol);
-int64_t sys_bind    (int fd, const void *addr, uint32_t addrlen);
-int64_t sys_listen  (int fd, int backlog);
-int64_t sys_accept  (int fd, void *addr, void *addrlen_ptr);
-int64_t sys_sendto  (int fd, const void *buf, size_t len, int flags,
-                      const void *dst_addr, uint32_t addrlen);
-int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
-                      void *src_addr, void *addrlen_ptr);
+int64_t sys_socket    (int domain, int type, int protocol);
+int64_t sys_bind      (int fd, const void *addr, uint32_t addrlen);
+int64_t sys_listen    (int fd, int backlog);
+int64_t sys_accept    (int fd, void *addr, void *addrlen_ptr);
+int64_t sys_sendto    (int fd, const void *buf, size_t len, int flags,
+                        const void *dst_addr, uint32_t addrlen);
+int64_t sys_recvfrom  (int fd, void *buf, size_t len, int flags,
+                        void *src_addr, void *addrlen_ptr);
+int64_t sys_setsockopt(int fd, int level, int optname,
+                        const void *optval, uint32_t optlen);
+
+/*
+ * Linux select(2). fd_set is a 1024-bit bitmap (16 uint64_t). nfds is
+ * highest fd to consider + 1. timeout points to a struct timeval
+ * { sec, usec } or NULL for "block until something is ready".
+ * timeval { 0, 0 } means "poll once".
+ *
+ * Bitmaps are modified in-place: only fds that are ready stay set.
+ * Return value is the total count across all three sets.
+ */
+int64_t sys_select    (int nfds,
+                        void *readfds, void *writefds, void *exceptfds,
+                        const void *timeout);

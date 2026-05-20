@@ -100,3 +100,13 @@ size_t stdin_pop(char *out, size_t max) {
     }
     return n;
 }
+
+bool stdin_readable(void) {
+    return stdin_count > 0;
+}
+
+void stdin_clear(void) {
+    stdin_head = 0;
+    stdin_tail = 0;
+    stdin_count = 0;
+}

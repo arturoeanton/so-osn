@@ -99,7 +99,8 @@ USER_ELF_LIBC_SRCS := tests/hello_libc.c \
                       tests/top.c \
                       tests/libctest.c \
                       tests/udptest.c \
-                      tests/echotcp.c
+                      tests/echotcp.c \
+                      tests/selecttest.c
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS))

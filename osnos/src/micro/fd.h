@@ -50,3 +50,11 @@ osnos_fd_t *fd_get(int fd);
  */
 void   stdin_push(char c);
 size_t stdin_pop (char *out, size_t max);
+
+/* True when stdin has bytes buffered ready for sys_read to drain. */
+bool   stdin_readable(void);
+
+/* Drop everything queued in the ring buffer. Called on exec so a child
+ * task starts with a clean stdin instead of inheriting the keystrokes
+ * that typed its own command line. */
+void   stdin_clear(void);

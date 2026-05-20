@@ -671,6 +671,132 @@ int64_t sys_listen(int fd, int backlog) {
     return 0;
 }
 
+/*
+ * setsockopt: only SO_REUSEADDR (level=SOL_SOCKET=1, optname=2) is a
+ * no-op success — enough to let Beej-style servers run. Other options
+ * report ENOSYS so the caller knows they're not implemented yet.
+ */
+int64_t sys_setsockopt(int fd, int level, int optname,
+                        const void *optval, uint32_t optlen) {
+    (void)optval; (void)optlen;
+    osnos_fd_t *f = fd_get(fd);
+    if (!f || !f->is_socket) return err(OSNOS_EBADF);
+    /* SOL_SOCKET = 1, SO_REUSEADDR = 2 (Linux numbers, see libc). */
+    if (level == 1 && optname == 2) return 0;
+    return err(OSNOS_EINVAL);
+}
+
+/* ----- select(2) ----- */
+
+#define FDSET_NWORDS  16          /* 1024 bits = 16 * uint64_t */
+
+static bool fd_readable(int fd) {
+    osnos_fd_t *f = fd_get(fd);
+    if (!f) return false;
+    if (f->is_special) {
+        return (fd == OSNOS_FD_STDIN) ? stdin_readable() : false;
+    }
+    if (f->is_socket) return sock_readable(f->sock_idx);
+    /* Regular files / dirs are always readable up to EOF. */
+    return true;
+}
+
+int64_t sys_select(int nfds,
+                    void *readfds, void *writefds, void *exceptfds,
+                    const void *timeout) {
+    if (nfds < 0) return err(OSNOS_EINVAL);
+    if (nfds > OSNOS_MAX_FDS) nfds = OSNOS_MAX_FDS;
+
+    /*
+     * Compute deadline. NULL timeout = wait forever (cap at INT_MAX
+     * via a long-but-finite poll). { 0, 0 } = single poll (deadline =
+     * now, loop runs once).
+     */
+    uint64_t now = timer_ms();
+    uint64_t deadline;
+    bool     wait_forever = false;
+    if (!timeout) {
+        wait_forever = true;
+        deadline = now;
+    } else {
+        const uint8_t *tv = (const uint8_t *)timeout;
+        uint64_t sec  = *(const uint64_t *)(tv + 0);
+        uint64_t usec = *(const uint64_t *)(tv + 8);
+        uint64_t ms = sec * 1000 + usec / 1000;
+        deadline = now + ms;
+    }
+
+    /* Snapshot the input bitmaps so we can re-evaluate each iteration. */
+    uint64_t in_read[FDSET_NWORDS]  = {0};
+    uint64_t in_write[FDSET_NWORDS] = {0};
+    uint64_t in_except[FDSET_NWORDS]= {0};
+    if (readfds) {
+        const uint64_t *p = (const uint64_t *)readfds;
+        for (int i = 0; i < FDSET_NWORDS; i++) in_read[i] = p[i];
+    }
+    if (writefds) {
+        const uint64_t *p = (const uint64_t *)writefds;
+        for (int i = 0; i < FDSET_NWORDS; i++) in_write[i] = p[i];
+    }
+    if (exceptfds) {
+        const uint64_t *p = (const uint64_t *)exceptfds;
+        for (int i = 0; i < FDSET_NWORDS; i++) in_except[i] = p[i];
+    }
+
+    uint64_t out_read[FDSET_NWORDS];
+    uint64_t out_write[FDSET_NWORDS];
+    uint64_t out_except[FDSET_NWORDS];
+
+    /*
+     * Non-blocking single-pass. The libc wrapper is the one that loops
+     * with nanosleep between polls — that way cooperative servers
+     * (keyboard, shell) get to run and a user Ctrl+C can actually
+     * reach the foreground task.
+     *
+     * The `timeout` arg is mostly informational here; we always do one
+     * poll regardless. The wrapper enforces deadline.
+     */
+    (void)wait_forever;
+    (void)deadline;
+    (void)now;
+
+    for (int i = 0; i < FDSET_NWORDS; i++) {
+        out_read[i] = 0;
+        out_write[i] = 0;
+        out_except[i] = 0;
+    }
+
+    int count = 0;
+    for (int fd = 0; fd < nfds; fd++) {
+        int word = fd >> 6;
+        uint64_t bit = 1ULL << (fd & 63);
+
+        if ((in_read[word] & bit) && fd_readable(fd)) {
+            out_read[word] |= bit;
+            count++;
+        }
+        if (in_write[word] & bit) {
+            osnos_fd_t *f = fd_get(fd);
+            if (f) { out_write[word] |= bit; count++; }
+        }
+        (void)in_except;
+    }
+
+    if (readfds) {
+        uint64_t *p = (uint64_t *)readfds;
+        for (int i = 0; i < FDSET_NWORDS; i++) p[i] = out_read[i];
+    }
+    if (writefds) {
+        uint64_t *p = (uint64_t *)writefds;
+        for (int i = 0; i < FDSET_NWORDS; i++) p[i] = out_write[i];
+    }
+    if (exceptfds) {
+        uint64_t *p = (uint64_t *)exceptfds;
+        for (int i = 0; i < FDSET_NWORDS; i++) p[i] = out_except[i];
+    }
+    return (int64_t)count;
+}
+
 int64_t sys_accept(int fd, void *addr, void *addrlen_ptr) {
     osnos_fd_t *f = fd_get(fd);
     if (!f || !f->is_socket) return err(OSNOS_EBADF);
@@ -834,6 +960,20 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
             return pack(sys_listen(
                 (int)frame->rdi,
                 (int)frame->rsi));
+        case SYS_SETSOCKOPT:
+            return pack(sys_setsockopt(
+                (int)frame->rdi,
+                (int)frame->rsi,
+                (int)frame->rdx,
+                (const void *)frame->r10,
+                (uint32_t)frame->r8));
+        case SYS_SELECT:
+            return pack(sys_select(
+                (int)frame->rdi,
+                (void *)frame->rsi,
+                (void *)frame->rdx,
+                (void *)frame->r10,
+                (const void *)frame->r8));
         case SYS_ACCEPT:
             return pack(sys_accept(
                 (int)frame->rdi,

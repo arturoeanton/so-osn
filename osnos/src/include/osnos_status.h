@@ -17,6 +17,7 @@ typedef enum {
     OSNOS_EPERM          = 1,   /* operation not permitted */
     OSNOS_ENOENT         = 2,   /* no such file or directory */
     OSNOS_ESRCH          = 3,   /* no such process / target */
+    OSNOS_EINTR          = 4,   /* interrupted system call */
     OSNOS_EIO            = 5,   /* i/o error */
     OSNOS_E2BIG          = 7,   /* argument list too long */
     OSNOS_EBADF          = 9,   /* bad file descriptor */

@@ -115,3 +115,14 @@ void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
 
 /* Local port → 0 if sd is invalid. Used by udp_send to fill src_port. */
 uint16_t sock_local_port(int sd);
+
+/*
+ * Readability poll used by sys_select. Returns true when a non-blocking
+ * recv on this socket would make progress:
+ *   - DGRAM: a datagram is queued.
+ *   - STREAM LISTEN: an accept-ready child sits in the backlog.
+ *   - STREAM ESTABLISHED / CLOSE_WAIT / FIN_WAIT_*: rx buffer has bytes
+ *     OR the peer has already sent FIN (recv would return 0 = EOF).
+ *   - Other: false.
+ */
+bool sock_readable(int sd);
