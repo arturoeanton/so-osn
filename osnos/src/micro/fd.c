@@ -19,6 +19,8 @@ void fd_init(void) {
         fds[i].used       = false;
         fds[i].is_special = false;
         fds[i].is_dir     = false;
+        fds[i].is_socket  = false;
+        fds[i].sock_idx   = -1;
         fds[i].flags      = 0;
         fds[i].offset     = 0;
         fds[i].path[0]    = 0;
@@ -45,6 +47,9 @@ int fd_alloc(void) {
         if (!fds[i].used) {
             fds[i].used       = true;
             fds[i].is_special = false;
+            fds[i].is_dir     = false;
+            fds[i].is_socket  = false;
+            fds[i].sock_idx   = -1;
             fds[i].flags      = 0;
             fds[i].offset     = 0;
             fds[i].path[0]    = 0;
@@ -60,6 +65,8 @@ void fd_free(int fd) {
     fds[fd].used       = false;
     fds[fd].is_special = false;
     fds[fd].is_dir     = false;
+    fds[fd].is_socket  = false;
+    fds[fd].sock_idx   = -1;
     fds[fd].flags      = 0;
     fds[fd].offset     = 0;
     fds[fd].path[0]    = 0;

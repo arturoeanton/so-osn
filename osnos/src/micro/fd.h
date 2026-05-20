@@ -26,6 +26,8 @@ typedef struct {
     bool     used;
     bool     is_special;             /* stdin/stdout/stderr */
     bool     is_dir;                 /* opened a directory (for getdents) */
+    bool     is_socket;              /* opened via sys_socket */
+    int      sock_idx;               /* index into net/socket table, when is_socket */
     int      flags;                  /* O_RDONLY etc. */
     uint64_t offset;                 /* file position OR readdir cursor */
     char     path[OSNOS_PATH_MAX];

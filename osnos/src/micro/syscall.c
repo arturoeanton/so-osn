@@ -8,6 +8,7 @@
 #include "../include/osnos_fcntl.h"
 #include "../include/osnos_status.h"
 #include "../lib/string.h"
+#include "../net/socket.h"
 #include "../proc/exec.h"
 #include "fd.h"
 #include "ipc.h"
@@ -84,6 +85,9 @@ int64_t sys_close(int fd) {
     osnos_fd_t *f = fd_get(fd);
     if (!f) return err(OSNOS_EBADF);
     if (f->is_special) return err(OSNOS_EBADF);
+    if (f->is_socket && f->sock_idx >= 0) {
+        sock_close(f->sock_idx);
+    }
     fd_free(fd);
     return 0;
 }
@@ -590,6 +594,118 @@ int64_t sys_getdents(int fd, void *buf, size_t buf_size) {
 /* Frame dispatcher (ring3 entry point eventually)                    */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* Linux socket syscalls (8.5.4b)                                     */
+/* ------------------------------------------------------------------ */
+
+#define AF_INET_LX  2
+
+/*
+ * sockaddr_in helpers — fixed Linux layout. The user buffer is read
+ * byte-by-byte to keep us neutral about alignment / strict aliasing.
+ */
+static bool unpack_sockaddr_in(const void *addr, uint32_t addrlen,
+                                 uint32_t *ip_out, uint16_t *port_out,
+                                 int64_t *err_out) {
+    if (!addr || addrlen < 16) { *err_out = err(OSNOS_EINVAL); return false; }
+    const uint8_t *p = (const uint8_t *)addr;
+    uint16_t fam = (uint16_t)(p[0] | (p[1] << 8));
+    if (fam != AF_INET_LX) { *err_out = err(OSNOS_EAFNOSUPPORT); return false; }
+    *port_out = (uint16_t)((p[2] << 8) | p[3]);
+    *ip_out   = ((uint32_t)p[4] << 24) | ((uint32_t)p[5] << 16) |
+                ((uint32_t)p[6] << 8)  | (uint32_t)p[7];
+    return true;
+}
+
+static void pack_sockaddr_in(void *addr, uint32_t ip, uint16_t port) {
+    uint8_t *p = (uint8_t *)addr;
+    p[0] = AF_INET_LX; p[1] = 0;
+    p[2] = (uint8_t)(port >> 8);
+    p[3] = (uint8_t)port;
+    p[4] = (uint8_t)(ip >> 24);
+    p[5] = (uint8_t)(ip >> 16);
+    p[6] = (uint8_t)(ip >> 8);
+    p[7] = (uint8_t)ip;
+    for (int i = 8; i < 16; i++) p[i] = 0;
+}
+
+int64_t sys_socket(int domain, int type, int protocol) {
+    (void)protocol;
+    if (domain != AF_INET_LX)              return err(OSNOS_EAFNOSUPPORT);
+    if (type != OSNOS_SOCK_DGRAM)          return err(OSNOS_EAFNOSUPPORT);
+
+    int sd = sock_create(type);
+    if (sd < 0) return err(OSNOS_EMFILE);
+
+    int fd = fd_alloc();
+    if (fd < 0) {
+        sock_close(sd);
+        return err(OSNOS_EMFILE);
+    }
+
+    osnos_fd_t *f = fd_get(fd);
+    f->is_socket = true;
+    f->sock_idx  = sd;
+    return (int64_t)fd;
+}
+
+int64_t sys_bind(int fd, const void *addr, uint32_t addrlen) {
+    osnos_fd_t *f = fd_get(fd);
+    if (!f || !f->is_socket) return err(OSNOS_EBADF);
+
+    uint32_t ip = 0;
+    uint16_t port = 0;
+    int64_t e;
+    if (!unpack_sockaddr_in(addr, addrlen, &ip, &port, &e)) return e;
+
+    if (sock_bind(f->sock_idx, ip, port) != 0) return err(OSNOS_EADDRINUSE);
+    return 0;
+}
+
+int64_t sys_sendto(int fd, const void *buf, size_t len, int flags,
+                    const void *dst_addr, uint32_t addrlen) {
+    (void)flags;
+    osnos_fd_t *f = fd_get(fd);
+    if (!f || !f->is_socket) return err(OSNOS_EBADF);
+    if (!buf && len > 0)     return err(OSNOS_EFAULT);
+
+    uint32_t ip = 0;
+    uint16_t port = 0;
+    int64_t e;
+    if (!unpack_sockaddr_in(dst_addr, addrlen, &ip, &port, &e)) return e;
+
+    int n = sock_sendto(f->sock_idx, buf, len, ip, port);
+    if (n < 0) return err(OSNOS_EIO);
+    return (int64_t)n;
+}
+
+int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
+                      void *src_addr, void *addrlen_ptr) {
+    (void)flags;
+    osnos_fd_t *f = fd_get(fd);
+    if (!f || !f->is_socket) return err(OSNOS_EBADF);
+    if (!buf && len > 0)     return err(OSNOS_EFAULT);
+
+    uint32_t src_ip = 0;
+    uint16_t src_port = 0;
+    /* "Blocking" via a very long busy-wait — good enough for one-shot
+     * demos. A real blocking call needs scheduler integration; this is
+     * a 8.5.4b limitation that 8.5.6 (with proper IPC blocking) will
+     * fix. */
+    int n = sock_recvfrom(f->sock_idx, buf, len,
+                            &src_ip, &src_port, 0x7FFFFFFFu);
+    if (n < 0) return err(OSNOS_EBADF);
+
+    if (src_addr && addrlen_ptr) {
+        uint32_t *alenp = (uint32_t *)addrlen_ptr;
+        if (*alenp >= 16) {
+            pack_sockaddr_in(src_addr, src_ip, src_port);
+            *alenp = 16;
+        }
+    }
+    return (int64_t)n;
+}
+
 static uint64_t pack(int64_t r) { return (uint64_t)r; }
 
 uint64_t syscall_dispatch(syscall_frame_t *frame) {
@@ -649,6 +765,32 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
                 (int)frame->rdi,
                 (void *)frame->rsi,
                 (size_t)frame->rdx));
+        case SYS_SOCKET:
+            return pack(sys_socket(
+                (int)frame->rdi,
+                (int)frame->rsi,
+                (int)frame->rdx));
+        case SYS_BIND:
+            return pack(sys_bind(
+                (int)frame->rdi,
+                (const void *)frame->rsi,
+                (uint32_t)frame->rdx));
+        case SYS_SENDTO:
+            return pack(sys_sendto(
+                (int)frame->rdi,
+                (const void *)frame->rsi,
+                (size_t)frame->rdx,
+                (int)frame->r10,
+                (const void *)frame->r8,
+                (uint32_t)frame->r9));
+        case SYS_RECVFROM:
+            return pack(sys_recvfrom(
+                (int)frame->rdi,
+                (void *)frame->rsi,
+                (size_t)frame->rdx,
+                (int)frame->r10,
+                (void *)frame->r8,
+                (void *)frame->r9));
         default:
             return pack(-(int64_t)OSNOS_EINVAL);
     }

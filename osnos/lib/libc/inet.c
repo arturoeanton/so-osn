@@ -6,6 +6,8 @@
 #include <string.h>
 #include <sys/socket.h>
 
+#include "syscall.h"
+
 /* ---------------------------------------------------------------- */
 /* IPv4 string parsing                                               */
 /* ---------------------------------------------------------------- */
@@ -113,13 +115,15 @@ static int nosys_int(void)    { errno = ENOSYS; return -1; }
 static ssize_t nosys_ssize(void) { errno = ENOSYS; return -1; }
 
 int socket(int domain, int type, int protocol) {
-    (void)domain; (void)type; (void)protocol;
-    return nosys_int();
+    long r = osnos_syscall3(SYS_SOCKET, domain, type, protocol);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (int)r;
 }
 
 int bind(int sockfd, const struct sockaddr *addr, socklen_t len) {
-    (void)sockfd; (void)addr; (void)len;
-    return nosys_int();
+    long r = osnos_syscall3(SYS_BIND, sockfd, (long)addr, (long)len);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return 0;
 }
 
 int listen(int sockfd, int backlog) {
@@ -149,16 +153,20 @@ ssize_t recv(int sockfd, void *buf, size_t len, int flags) {
 
 ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
                const struct sockaddr *to, socklen_t tolen) {
-    (void)sockfd; (void)buf; (void)len; (void)flags;
-    (void)to; (void)tolen;
-    return nosys_ssize();
+    long r = osnos_syscall6(SYS_SENDTO,
+                              sockfd, (long)buf, (long)len, flags,
+                              (long)to, (long)tolen);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (ssize_t)r;
 }
 
 ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags,
                  struct sockaddr *from, socklen_t *fromlen) {
-    (void)sockfd; (void)buf; (void)len; (void)flags;
-    (void)from; (void)fromlen;
-    return nosys_ssize();
+    long r = osnos_syscall6(SYS_RECVFROM,
+                              sockfd, (long)buf, (long)len, flags,
+                              (long)from, (long)fromlen);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (ssize_t)r;
 }
 
 ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {

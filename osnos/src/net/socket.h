@@ -18,8 +18,10 @@
 #define SOCK_RX_QUEUE_DEPTH 8
 #define SOCK_RX_MAX_DGRAM   1024
 
-#define OSNOS_SOCK_DGRAM    1   /* UDP */
-#define OSNOS_SOCK_STREAM   2   /* TCP — 8.5.5 */
+/* Match Linux x86_64 SOCK_* numbering so user-mode `socket(2)` calls
+ * pass these through verbatim. */
+#define OSNOS_SOCK_STREAM   1   /* TCP — 8.5.5 */
+#define OSNOS_SOCK_DGRAM    2   /* UDP */
 
 /* Returns >=0 socket descriptor, -1 on full. */
 int  sock_create(int type);

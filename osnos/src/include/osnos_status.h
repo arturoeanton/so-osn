@@ -34,5 +34,15 @@ typedef enum {
     OSNOS_ENOSPC         = 28,  /* no space left on device */
     OSNOS_EROFS          = 30,  /* read-only file system */
     OSNOS_ENAMETOOLONG   = 36,  /* file name too long */
-    OSNOS_ENOTEMPTY      = 39   /* directory not empty */
+    OSNOS_ENOTEMPTY      = 39,  /* directory not empty */
+    /* Networking (Linux errno-base) — used by the socket syscalls. */
+    OSNOS_ENOTSOCK       = 88,  /* not a socket */
+    OSNOS_EPROTONOSUPPORT= 93,  /* protocol not supported */
+    OSNOS_EAFNOSUPPORT   = 97,  /* address family not supported */
+    OSNOS_EADDRINUSE     = 98,  /* address already in use */
+    OSNOS_EADDRNOTAVAIL  = 99,
+    OSNOS_ENETDOWN       = 100,
+    OSNOS_ECONNRESET     = 104,
+    OSNOS_ETIMEDOUT      = 110,
+    OSNOS_ECONNREFUSED   = 111
 } osnos_status_t;

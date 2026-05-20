@@ -128,6 +128,7 @@ DECLARE_ELF(sleep);
 DECLARE_ELF(kill);
 DECLARE_ELF(top);
 DECLARE_ELF(libctest);
+DECLARE_ELF(udptest);
 
 #undef DECLARE_ELF
 
@@ -177,6 +178,7 @@ static const builtin_t builtins[] = {
     ELF(kill,  "kill PID (sets task kill_pending; delivers at next return)"),
     ELF(top,   "live task viewer (Ctrl+C to exit)"),
     ELF(libctest, "libc smoke test (FILE*, qsort, setjmp, inet_pton, etc.)"),
+    ELF(udptest,  "UDP echo on port 1234 via socket/bind/recvfrom/sendto"),
 };
 
 #undef USER

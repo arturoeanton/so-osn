@@ -31,6 +31,10 @@
 #define SYS_UNLINK    87
 #define SYS_ISATTY   201   /* osnos-specific */
 #define SYS_GETDENTS 217
+#define SYS_SOCKET    41
+#define SYS_SENDTO    44
+#define SYS_RECVFROM  45
+#define SYS_BIND      49
 
 static inline long osnos_syscall0(long n) {
     long r;
@@ -64,6 +68,27 @@ static inline long osnos_syscall4(long n, long a, long b, long c, long d) {
     long r;
     __asm__ volatile ("syscall"
         : "=a"(r) : "0"(n), "D"(a), "S"(b), "d"(c), "r"(r10)
+        : "rcx", "r11", "memory");
+    return r;
+}
+
+static inline long osnos_syscall5(long n, long a, long b, long c, long d, long e) {
+    register long r10 __asm__("r10") = d;
+    register long r8  __asm__("r8")  = e;
+    long r;
+    __asm__ volatile ("syscall"
+        : "=a"(r) : "0"(n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8)
+        : "rcx", "r11", "memory");
+    return r;
+}
+
+static inline long osnos_syscall6(long n, long a, long b, long c, long d, long e, long f) {
+    register long r10 __asm__("r10") = d;
+    register long r8  __asm__("r8")  = e;
+    register long r9  __asm__("r9")  = f;
+    long r;
+    __asm__ volatile ("syscall"
+        : "=a"(r) : "0"(n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
         : "rcx", "r11", "memory");
     return r;
 }

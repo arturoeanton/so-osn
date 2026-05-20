@@ -26,6 +26,10 @@
 #define SYS_RMDIR    84
 #define SYS_UNLINK   87
 #define SYS_GETDENTS 217   /* getdents64 in Linux x86_64 */
+#define SYS_SOCKET   41
+#define SYS_SENDTO   44
+#define SYS_RECVFROM 45
+#define SYS_BIND     49
 
 /* osnos-specific (above 200 by convention). */
 #define SYS_ISATTY  201
@@ -131,3 +135,20 @@ int64_t sys_rmdir   (const char *path);
 int64_t sys_unlink  (const char *path);
 int64_t sys_rename  (const char *oldpath, const char *newpath);
 int64_t sys_getdents(int fd, void *buf, size_t buf_size);
+
+/*
+ * Linux socket layer. Only AF_INET (2) + SOCK_DGRAM (2) lit up for now;
+ * SOCK_STREAM (1) returns EAFNOSUPPORT until TCP lands in 8.5.5.
+ *
+ * sockaddr_in layout (16 bytes, Linux-compatible):
+ *   0..1  sin_family   (LE,  AF_INET = 2)
+ *   2..3  sin_port     (BE)
+ *   4..7  sin_addr     (BE)
+ *   8..15 sin_zero     (must be 0)
+ */
+int64_t sys_socket  (int domain, int type, int protocol);
+int64_t sys_bind    (int fd, const void *addr, uint32_t addrlen);
+int64_t sys_sendto  (int fd, const void *buf, size_t len, int flags,
+                      const void *dst_addr, uint32_t addrlen);
+int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
+                      void *src_addr, void *addrlen_ptr);
