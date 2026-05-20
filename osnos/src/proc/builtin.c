@@ -131,6 +131,7 @@ DECLARE_ELF(libctest);
 DECLARE_ELF(udptest);
 DECLARE_ELF(echotcp);
 DECLARE_ELF(selecttest);
+DECLARE_ELF(selectserver);
 
 #undef DECLARE_ELF
 
@@ -183,6 +184,7 @@ static const builtin_t builtins[] = {
     ELF(udptest,  "UDP echo on port 1234 via socket/bind/recvfrom/sendto"),
     ELF(echotcp,  "TCP echo on port 80 via socket/bind/listen/accept/recv/send"),
     ELF(selecttest, "select() demo: multiplex TCP listen + stdin"),
+    ELF(selectserver, "Beej's selectserver.c — multi-client chat on TCP 9034"),
 };
 
 #undef USER

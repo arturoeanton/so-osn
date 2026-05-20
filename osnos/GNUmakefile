@@ -100,7 +100,8 @@ USER_ELF_LIBC_SRCS := tests/hello_libc.c \
                       tests/libctest.c \
                       tests/udptest.c \
                       tests/echotcp.c \
-                      tests/selecttest.c
+                      tests/selecttest.c \
+                      tests/selectserver.c
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS))
@@ -193,7 +194,7 @@ run: run-bios
 run-bios: $(ISO) $(SD_IMG)
 	$(QEMU) -M pc -cdrom $(ISO) -boot d \
 	    -drive file=$(SD_IMG),format=raw,if=ide,index=0,media=disk \
-	    -netdev user,id=net0,hostfwd=tcp::8080-:80,hostfwd=udp::1234-:1234 \
+	    -netdev user,id=net0,hostfwd=tcp::8080-:80,hostfwd=tcp::9034-:9034,hostfwd=udp::1234-:1234 \
 	    -device rtl8139,netdev=net0 \
 	    $(QEMUFLAGS)
 
