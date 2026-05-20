@@ -631,8 +631,10 @@ static void pack_sockaddr_in(void *addr, uint32_t ip, uint16_t port) {
 
 int64_t sys_socket(int domain, int type, int protocol) {
     (void)protocol;
-    if (domain != AF_INET_LX)              return err(OSNOS_EAFNOSUPPORT);
-    if (type != OSNOS_SOCK_DGRAM)          return err(OSNOS_EAFNOSUPPORT);
+    if (domain != AF_INET_LX) return err(OSNOS_EAFNOSUPPORT);
+    if (type != OSNOS_SOCK_DGRAM && type != OSNOS_SOCK_STREAM) {
+        return err(OSNOS_EAFNOSUPPORT);
+    }
 
     int sd = sock_create(type);
     if (sd < 0) return err(OSNOS_EMFILE);
@@ -662,12 +664,55 @@ int64_t sys_bind(int fd, const void *addr, uint32_t addrlen) {
     return 0;
 }
 
+int64_t sys_listen(int fd, int backlog) {
+    osnos_fd_t *f = fd_get(fd);
+    if (!f || !f->is_socket) return err(OSNOS_EBADF);
+    if (sock_listen(f->sock_idx, backlog) != 0) return err(OSNOS_EINVAL);
+    return 0;
+}
+
+int64_t sys_accept(int fd, void *addr, void *addrlen_ptr) {
+    osnos_fd_t *f = fd_get(fd);
+    if (!f || !f->is_socket) return err(OSNOS_EBADF);
+
+    uint32_t peer_ip = 0;
+    uint16_t peer_port = 0;
+    int child_sd = sock_accept(f->sock_idx, &peer_ip, &peer_port, 0x7FFFFFFFu);
+    if (child_sd < 0) return err(OSNOS_EBADF);
+
+    int new_fd = fd_alloc();
+    if (new_fd < 0) {
+        sock_close(child_sd);
+        return err(OSNOS_EMFILE);
+    }
+    osnos_fd_t *nf = fd_get(new_fd);
+    nf->is_socket = true;
+    nf->sock_idx  = child_sd;
+
+    if (addr && addrlen_ptr) {
+        uint32_t *alenp = (uint32_t *)addrlen_ptr;
+        if (*alenp >= 16) {
+            pack_sockaddr_in(addr, peer_ip, peer_port);
+            *alenp = 16;
+        }
+    }
+    return (int64_t)new_fd;
+}
+
 int64_t sys_sendto(int fd, const void *buf, size_t len, int flags,
                     const void *dst_addr, uint32_t addrlen) {
     (void)flags;
     osnos_fd_t *f = fd_get(fd);
     if (!f || !f->is_socket) return err(OSNOS_EBADF);
     if (!buf && len > 0)     return err(OSNOS_EFAULT);
+
+    /* On a stream socket dst_addr is ignored — connection is already
+     * pinned by accept/connect. Lets libc send() forward verbatim. */
+    if (dst_addr == NULL || addrlen == 0) {
+        int n = sock_send(f->sock_idx, buf, len);
+        if (n < 0) return err(OSNOS_EBADF);
+        return (int64_t)n;
+    }
 
     uint32_t ip = 0;
     uint16_t port = 0;
@@ -686,14 +731,24 @@ int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
     if (!f || !f->is_socket) return err(OSNOS_EBADF);
     if (!buf && len > 0)     return err(OSNOS_EFAULT);
 
+    /* Stream sockets ignore src_addr (use getpeername). Easiest check:
+     * try sock_recv first; if it works, the socket is TCP. If it errors
+     * with -1, fall back to sock_recvfrom (datagram path). */
+    int n = sock_recv(f->sock_idx, buf, len, 0x7FFFFFFFu);
+    if (n != -1) {
+        /* Stream path used. peer info via getpeername in the future. */
+        if (n == -2) n = 0;     /* timeout — should never happen with INT_MAX */
+        if (src_addr && addrlen_ptr) {
+            uint32_t *alenp = (uint32_t *)addrlen_ptr;
+            *alenp = 0;          /* not filled */
+        }
+        return (int64_t)n;
+    }
+
+    /* Datagram path. */
     uint32_t src_ip = 0;
     uint16_t src_port = 0;
-    /* "Blocking" via a very long busy-wait — good enough for one-shot
-     * demos. A real blocking call needs scheduler integration; this is
-     * a 8.5.4b limitation that 8.5.6 (with proper IPC blocking) will
-     * fix. */
-    int n = sock_recvfrom(f->sock_idx, buf, len,
-                            &src_ip, &src_port, 0x7FFFFFFFu);
+    n = sock_recvfrom(f->sock_idx, buf, len, &src_ip, &src_port, 0x7FFFFFFFu);
     if (n < 0) return err(OSNOS_EBADF);
 
     if (src_addr && addrlen_ptr) {
@@ -775,6 +830,15 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
                 (int)frame->rdi,
                 (const void *)frame->rsi,
                 (uint32_t)frame->rdx));
+        case SYS_LISTEN:
+            return pack(sys_listen(
+                (int)frame->rdi,
+                (int)frame->rsi));
+        case SYS_ACCEPT:
+            return pack(sys_accept(
+                (int)frame->rdi,
+                (void *)frame->rsi,
+                (void *)frame->rdx));
         case SYS_SENDTO:
             return pack(sys_sendto(
                 (int)frame->rdi,

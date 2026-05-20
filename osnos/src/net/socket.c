@@ -47,6 +47,18 @@ typedef struct {
     /* True when peer's FIN was processed → recv returns 0 when buf
      * drains. */
     bool             peer_fin;
+
+    /* Backlog parent / child wiring for LISTEN+accept.
+     *   parent_sd >= 0   on child sockets (refers to the LISTEN slot).
+     *   parent_sd == -1  on regular / LISTEN sockets.
+     * The LISTEN socket owns accept_q: a ring of child sd's that have
+     * reached ESTABLISHED but not yet been pulled by accept(). */
+    int              parent_sd;
+    int              accept_q[SOCK_ACCEPT_QUEUE_DEPTH];
+    uint8_t          accept_q_head;
+    uint8_t          accept_q_tail;
+    uint8_t          accept_q_count;
+    uint8_t          backlog;
 } sock_t;
 
 static sock_t socks[SOCK_MAX];
@@ -85,6 +97,11 @@ int sock_create(int type) {
         s->tcp_rx_count = 0;
         s->zombie     = false;
         s->peer_fin   = false;
+        s->parent_sd  = -1;
+        s->accept_q_head = 0;
+        s->accept_q_tail = 0;
+        s->accept_q_count = 0;
+        s->backlog    = 0;
         for (int k = 0; k < SOCK_RX_QUEUE_DEPTH; k++) s->rx[k].valid = false;
         return i;
     }
@@ -223,19 +240,55 @@ bool sock_deliver_udp(uint32_t src_ip, uint16_t src_port,
 /* ================================================================ */
 
 int sock_listen(int sd, int backlog) {
-    (void)backlog;
     sock_t *s = sock_at(sd);
     if (!s) return -1;
     if (s->type != OSNOS_SOCK_STREAM) return -1;
-    if (s->local_port == 0) return -1;          /* must bind first */
+    if (s->local_port == 0) return -1;
     s->tcp_state = TCP_LISTEN;
+    if (backlog < 1) backlog = 1;
+    if (backlog > SOCK_ACCEPT_QUEUE_DEPTH) backlog = SOCK_ACCEPT_QUEUE_DEPTH;
+    s->backlog = (uint8_t)backlog;
     return 0;
+}
+
+int sock_accept(int listen_sd,
+                 uint32_t *peer_ip, uint16_t *peer_port,
+                 uint32_t timeout_ms) {
+    sock_t *s = sock_at(listen_sd);
+    if (!s) return -1;
+    if (s->type != OSNOS_SOCK_STREAM) return -1;
+    if (s->tcp_state != TCP_LISTEN) return -1;
+
+    uint64_t deadline = timer_ms() + timeout_ms;
+    for (;;) {
+        cli();
+        if (s->accept_q_count > 0) {
+            int child = s->accept_q[s->accept_q_head];
+            s->accept_q_head = (uint8_t)((s->accept_q_head + 1) % SOCK_ACCEPT_QUEUE_DEPTH);
+            s->accept_q_count--;
+            sti();
+            if (peer_ip)   *peer_ip   = socks[child].remote_ip;
+            if (peer_port) *peer_port = socks[child].remote_port;
+            return child;
+        }
+        sti();
+        if (timer_ms() >= deadline) return -2;
+    }
 }
 
 bool sock_tcp_get_peer(int sd, uint32_t *ip_out, uint16_t *port_out) {
     sock_t *s = sock_at(sd);
     if (!s) return false;
     if (s->type != OSNOS_SOCK_STREAM) return false;
+
+    /* LISTEN socket: peek at the next pending child (without consuming). */
+    if (s->tcp_state == TCP_LISTEN) {
+        if (s->accept_q_count == 0) return false;
+        int child = s->accept_q[s->accept_q_head];
+        if (ip_out)   *ip_out   = socks[child].remote_ip;
+        if (port_out) *port_out = socks[child].remote_port;
+        return true;
+    }
     if (s->tcp_state != TCP_ESTABLISHED) return false;
     if (ip_out)   *ip_out   = s->remote_ip;
     if (port_out) *port_out = s->remote_port;
@@ -316,38 +369,92 @@ static void tcp_reset_socket(sock_t *s) {
     sti();
 }
 
+/* Try to allocate + initialise a child socket for an incoming SYN.
+ * Returns the child index, or -1 if the table is full or the parent's
+ * accept backlog is already saturated (caller drops the SYN). */
+static int alloc_child_for_syn(int parent_idx,
+                                 uint32_t peer_ip, uint16_t peer_port,
+                                 uint16_t local_port, uint32_t peer_seq) {
+    sock_t *p = &socks[parent_idx];
+    /* Pending children in SYN_RCVD that haven't queued yet also count
+     * against backlog — easier: cap on accept_q_count. Some SYN-floods
+     * still slip through but we're not defending today. */
+    if (p->accept_q_count >= p->backlog) return -1;
+
+    for (int i = 0; i < SOCK_MAX; i++) {
+        if (socks[i].used) continue;
+        sock_t *c = &socks[i];
+        /* Mirror sock_create's defaults so the slot is consistent. */
+        c->used        = true;
+        c->type        = OSNOS_SOCK_STREAM;
+        c->local_ip    = 0;
+        c->local_port  = local_port;
+        c->rx_head = c->rx_tail = c->rx_count = 0;
+        for (int k = 0; k < SOCK_RX_QUEUE_DEPTH; k++) c->rx[k].valid = false;
+        c->tcp_rx_head = c->tcp_rx_tail = c->tcp_rx_count = 0;
+        c->zombie = c->peer_fin = false;
+        c->parent_sd = parent_idx;
+        c->accept_q_head = c->accept_q_tail = c->accept_q_count = 0;
+        c->backlog = 0;
+
+        c->remote_ip   = peer_ip;
+        c->remote_port = peer_port;
+        c->snd_una = c->snd_nxt =
+            (uint32_t)timer_ms() + (uint32_t)i * 1000;
+        c->rcv_nxt = peer_seq + 1;
+        c->tcp_state = TCP_SYN_RCVD;
+        return i;
+    }
+    return -1;
+}
+
 void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
                                uint32_t dst_ip, uint16_t dst_port,
                                uint32_t seq, uint32_t ack, uint8_t flags,
                                const uint8_t *payload, size_t payload_len) {
     (void)dst_ip;
 
+    /*
+     * Two-pass lookup: a connected child (4-tuple match) always wins
+     * over the LISTEN parent that shares its local_port. Without this
+     * order new data packets would be eaten by the LISTEN socket.
+     */
+    int idx = -1;
     for (int i = 0; i < SOCK_MAX; i++) {
         sock_t *s = &socks[i];
         if (!s->used) continue;
         if (s->type != OSNOS_SOCK_STREAM) continue;
         if (s->local_port != dst_port) continue;
-
-        /* Non-LISTEN states require full 4-tuple match. */
-        if (s->tcp_state != TCP_LISTEN && s->tcp_state != TCP_CLOSED) {
-            if (s->remote_ip != src_ip || s->remote_port != src_port) continue;
+        if (s->tcp_state == TCP_LISTEN || s->tcp_state == TCP_CLOSED) continue;
+        if (s->remote_ip != src_ip || s->remote_port != src_port) continue;
+        idx = i; break;
+    }
+    if (idx < 0) {
+        for (int i = 0; i < SOCK_MAX; i++) {
+            sock_t *s = &socks[i];
+            if (!s->used) continue;
+            if (s->type != OSNOS_SOCK_STREAM) continue;
+            if (s->local_port != dst_port) continue;
+            if (s->tcp_state != TCP_LISTEN) continue;
+            idx = i; break;
         }
+    }
 
+    if (idx >= 0) {
+        sock_t *s = &socks[idx];
         switch (s->tcp_state) {
         case TCP_LISTEN:
             if (flags & TCP_FLAG_RST) return;
             if (flags & TCP_FLAG_SYN) {
-                s->remote_ip   = src_ip;
-                s->remote_port = src_port;
-                s->snd_una = s->snd_nxt =
-                    (uint32_t)timer_ms() + (uint32_t)i * 1000;
-                s->rcv_nxt = seq + 1;
-                s->tcp_state = TCP_SYN_RCVD;
+                int child = alloc_child_for_syn(idx, src_ip, src_port,
+                                                  dst_port, seq);
+                if (child < 0) return;                /* backlog full → drop */
+                sock_t *c = &socks[child];
                 tcp_send(src_ip, src_port, dst_port,
-                          s->snd_nxt, s->rcv_nxt,
+                          c->snd_nxt, c->rcv_nxt,
                           TCP_FLAG_SYN | TCP_FLAG_ACK,
-                          tcp_advertised_window(s), NULL, 0);
-                s->snd_nxt++;
+                          tcp_advertised_window(c), NULL, 0);
+                c->snd_nxt++;
             }
             return;
 
@@ -356,6 +463,19 @@ void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
             if ((flags & TCP_FLAG_ACK) && ack == s->snd_nxt) {
                 s->snd_una = ack;
                 s->tcp_state = TCP_ESTABLISHED;
+                /* Hand the established child over to the LISTEN parent's
+                 * accept queue. If full, just leave the child sitting
+                 * in ESTABLISHED — the application will time out. */
+                if (s->parent_sd >= 0) {
+                    sock_t *p = &socks[s->parent_sd];
+                    if (p->used && p->tcp_state == TCP_LISTEN &&
+                        p->accept_q_count < SOCK_ACCEPT_QUEUE_DEPTH) {
+                        p->accept_q[p->accept_q_tail] = idx;
+                        p->accept_q_tail = (uint8_t)((p->accept_q_tail + 1)
+                                                       % SOCK_ACCEPT_QUEUE_DEPTH);
+                        p->accept_q_count++;
+                    }
+                }
             }
             return;
 

@@ -14,11 +14,12 @@
  * etc. can route by integer like POSIX expects.
  */
 
-#define SOCK_MAX            8
-#define SOCK_RX_QUEUE_DEPTH 8
-#define SOCK_RX_MAX_DGRAM   1024
-#define SOCK_TCP_RX_BUF     4096   /* byte ring per TCP socket */
-#define TCP_MSS             1400   /* IP+TCP+ETH safe payload */
+#define SOCK_MAX                8
+#define SOCK_RX_QUEUE_DEPTH     8
+#define SOCK_RX_MAX_DGRAM       1024
+#define SOCK_TCP_RX_BUF         4096   /* byte ring per TCP socket */
+#define SOCK_ACCEPT_QUEUE_DEPTH 4      /* pending ESTABLISHED children per LISTEN */
+#define TCP_MSS                 1400   /* IP+TCP+ETH safe payload */
 
 /* Match Linux x86_64 SOCK_* numbering so user-mode `socket(2)` calls
  * pass these through verbatim. */
@@ -51,12 +52,22 @@ int  sock_sendto(int sd, const void *buf, size_t len,
 
 /* ----- TCP (8.5.5a handshake + 8.5.5b data/close) ----- */
 
-/* Mark a SOCK_STREAM socket as LISTEN. Backlog is accepted but ignored
- * (there is at most one in-flight handshake per socket today). */
+/* Mark a SOCK_STREAM socket as LISTEN. `backlog` caps the accept queue
+ * (silently clamped to SOCK_ACCEPT_QUEUE_DEPTH). */
 int  sock_listen(int sd, int backlog);
 
-/* Poll: returns true and fills ip_out / port_out when an established
- * connection is sitting on the socket. */
+/*
+ * Pull the next ESTABLISHED child off a LISTEN socket's accept queue.
+ * Returns the new socket descriptor (>=0) and fills peer_ip / peer_port
+ * with the remote endpoint. Blocks up to `timeout_ms`. -2 on timeout.
+ * -1 on bad sd / not in LISTEN state.
+ */
+int  sock_accept(int listen_sd,
+                  uint32_t *peer_ip, uint16_t *peer_port,
+                  uint32_t timeout_ms);
+
+/* (Legacy 8.5.5a helper — drains the accept queue without consuming
+ * a slot. Kept for `tcptest` introspection; new code uses sock_accept.) */
 bool sock_tcp_get_peer(int sd, uint32_t *ip_out, uint16_t *port_out);
 
 /* RST the connection (immediate teardown). Returns the socket to

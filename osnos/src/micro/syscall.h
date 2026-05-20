@@ -27,9 +27,11 @@
 #define SYS_UNLINK   87
 #define SYS_GETDENTS 217   /* getdents64 in Linux x86_64 */
 #define SYS_SOCKET   41
+#define SYS_ACCEPT   43
 #define SYS_SENDTO   44
 #define SYS_RECVFROM 45
 #define SYS_BIND     49
+#define SYS_LISTEN   50
 
 /* osnos-specific (above 200 by convention). */
 #define SYS_ISATTY  201
@@ -148,6 +150,8 @@ int64_t sys_getdents(int fd, void *buf, size_t buf_size);
  */
 int64_t sys_socket  (int domain, int type, int protocol);
 int64_t sys_bind    (int fd, const void *addr, uint32_t addrlen);
+int64_t sys_listen  (int fd, int backlog);
+int64_t sys_accept  (int fd, void *addr, void *addrlen_ptr);
 int64_t sys_sendto  (int fd, const void *buf, size_t len, int flags,
                       const void *dst_addr, uint32_t addrlen);
 int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,

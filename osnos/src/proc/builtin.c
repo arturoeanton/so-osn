@@ -129,6 +129,7 @@ DECLARE_ELF(kill);
 DECLARE_ELF(top);
 DECLARE_ELF(libctest);
 DECLARE_ELF(udptest);
+DECLARE_ELF(echotcp);
 
 #undef DECLARE_ELF
 
@@ -179,6 +180,7 @@ static const builtin_t builtins[] = {
     ELF(top,   "live task viewer (Ctrl+C to exit)"),
     ELF(libctest, "libc smoke test (FILE*, qsort, setjmp, inet_pton, etc.)"),
     ELF(udptest,  "UDP echo on port 1234 via socket/bind/recvfrom/sendto"),
+    ELF(echotcp,  "TCP echo on port 80 via socket/bind/listen/accept/recv/send"),
 };
 
 #undef USER

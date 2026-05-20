@@ -127,28 +127,37 @@ int bind(int sockfd, const struct sockaddr *addr, socklen_t len) {
 }
 
 int listen(int sockfd, int backlog) {
-    (void)sockfd; (void)backlog;
-    return nosys_int();
+    long r = osnos_syscall2(SYS_LISTEN, sockfd, backlog);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return 0;
 }
 
 int accept(int sockfd, struct sockaddr *addr, socklen_t *len) {
-    (void)sockfd; (void)addr; (void)len;
-    return nosys_int();
+    long r = osnos_syscall3(SYS_ACCEPT, sockfd, (long)addr, (long)len);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (int)r;
 }
 
 int connect(int sockfd, const struct sockaddr *addr, socklen_t len) {
     (void)sockfd; (void)addr; (void)len;
-    return nosys_int();
+    return nosys_int();        /* 8.5.5d: active open */
 }
 
 ssize_t send(int sockfd, const void *buf, size_t len, int flags) {
-    (void)sockfd; (void)buf; (void)len; (void)flags;
-    return nosys_ssize();
+    /* Linux convention: send(fd,buf,len,flags) == sendto(...,NULL,0). */
+    long r = osnos_syscall6(SYS_SENDTO,
+                              sockfd, (long)buf, (long)len, flags,
+                              0L, 0L);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (ssize_t)r;
 }
 
 ssize_t recv(int sockfd, void *buf, size_t len, int flags) {
-    (void)sockfd; (void)buf; (void)len; (void)flags;
-    return nosys_ssize();
+    long r = osnos_syscall6(SYS_RECVFROM,
+                              sockfd, (long)buf, (long)len, flags,
+                              0L, 0L);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (ssize_t)r;
 }
 
 ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
