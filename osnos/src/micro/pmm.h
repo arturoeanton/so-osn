@@ -32,6 +32,13 @@ void pmm_init(
 /* Returns a 4KB-aligned physical address; 0 on out-of-memory. */
 uint64_t pmm_alloc_page(void);
 
+/*
+ * Allocate `n_pages` PHYSICALLY contiguous pages and return the base
+ * physical address (4KB aligned). 0 on failure. Useful for DMA buffers
+ * that hardware sees as one linear region. O(total_pages) linear scan.
+ */
+uint64_t pmm_alloc_pages_contig(size_t n_pages);
+
 /* Releases a page back to the pool. No-op for double-free. */
 void pmm_free_page(uint64_t phys);
 

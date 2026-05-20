@@ -1,6 +1,7 @@
 #include "sysfs.h"
 
 #include "../drivers/block_ata.h"
+#include "../drivers/rtl8139.h"
 #include "../fs/fat.h"
 #include "../fs/ramfs.h"
 #include "../lib/string.h"
@@ -321,6 +322,66 @@ static void gen_fat_fsck(char *out, size_t out_size) {
     fat_fsck_report(out, out_size);
 }
 
+static char hex_nib(uint8_t n) {
+    n &= 0xF;
+    return (char)(n < 10 ? '0' + n : 'a' + (n - 10));
+}
+
+static void gen_net(char *out, size_t out_size) {
+    out[0] = 0;
+
+    if (!rtl8139_present()) {
+        os_strlcat(out, "no NIC detected\n", out_size);
+        return;
+    }
+
+    /* MAC: cc:cc:cc:cc:cc:cc */
+    char macbuf[20];
+    const uint8_t *m = rtl8139_mac();
+    for (int i = 0; i < 6; i++) {
+        macbuf[i * 3 + 0] = hex_nib((uint8_t)(m[i] >> 4));
+        macbuf[i * 3 + 1] = hex_nib(m[i]);
+        macbuf[i * 3 + 2] = (i < 5) ? ':' : 0;
+    }
+
+    char num[24];
+    os_strlcat(out, "driver:     rtl8139\n", out_size);
+    os_strlcat(out, "mac:        ", out_size);
+    os_strlcat(out, macbuf, out_size);
+    os_strlcat(out, "\nio_base:    0x", out_size);
+    uint16_t io = rtl8139_io_base();
+    char hex4[5];
+    hex4[0] = hex_nib((uint8_t)(io >> 12));
+    hex4[1] = hex_nib((uint8_t)(io >> 8));
+    hex4[2] = hex_nib((uint8_t)(io >> 4));
+    hex4[3] = hex_nib((uint8_t)io);
+    hex4[4] = 0;
+    os_strlcat(out, hex4, out_size);
+    os_strlcat(out, "\nirq_line:   ", out_size);
+    os_format_u64(rtl8139_irq_line(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+
+    os_strlcat(out, "\nirqs:       ", out_size);
+    os_format_u64(rtl8139_irqs(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\nrx_packets: ", out_size);
+    os_format_u64(rtl8139_rx_packets(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\ntx_packets: ", out_size);
+    os_format_u64(rtl8139_tx_packets(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\nrx_bytes:   ", out_size);
+    os_format_u64(rtl8139_rx_bytes(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\ntx_bytes:   ", out_size);
+    os_format_u64(rtl8139_tx_bytes(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\nerrors:     ", out_size);
+    os_format_u64(rtl8139_errors(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\n", out_size);
+}
+
 static void gen_build(char *out, size_t out_size) {
     out[0] = 0;
     os_strlcat(out, "compiled: " __DATE__ " " __TIME__ "\n", out_size);
@@ -345,7 +406,8 @@ static const sysfs_entry_t entries[] = {
     { "meminfo",  gen_meminfo  },
     { "timer",    gen_timer    },
     { "disks",    gen_disks    },
-    { "fat_fsck", gen_fat_fsck }
+    { "fat_fsck", gen_fat_fsck },
+    { "net",      gen_net      }
 };
 
 #define SYSFS_ENTRY_COUNT (sizeof(entries) / sizeof(entries[0]))

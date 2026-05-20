@@ -1,5 +1,7 @@
 #include "pmm.h"
 
+#include <stdbool.h>
+
 /*
  * Bitmap layout:
  *   1 bit per PAGE_SIZE-aligned physical address.
@@ -124,6 +126,36 @@ uint64_t pmm_alloc_page(void) {
     first_free_hint = page + 1;
 
     return (uint64_t)page * PAGE_SIZE;
+}
+
+uint64_t pmm_alloc_pages_contig(size_t n_pages) {
+    if (!bitmap || n_pages == 0) return 0;
+    if (free_pages < n_pages)    return 0;
+
+    /*
+     * Linear scan from the start. For boot-time DMA buffers (called
+     * once or twice during driver init) the cost is irrelevant; for
+     * runtime allocations the caller would need a smarter strategy.
+     */
+    size_t i = 0;
+    while (i + n_pages <= total_pages) {
+        bool ok = true;
+        for (size_t k = 0; k < n_pages; k++) {
+            if (bit_get(i + k)) {
+                /* Skip past the offending page on next attempt. */
+                i = i + k + 1;
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) continue;
+
+        for (size_t k = 0; k < n_pages; k++) bit_set(i + k);
+        free_pages -= n_pages;
+        if (first_free_hint < i + n_pages) first_free_hint = i + n_pages;
+        return (uint64_t)i * PAGE_SIZE;
+    }
+    return 0;
 }
 
 void pmm_free_page(uint64_t phys) {

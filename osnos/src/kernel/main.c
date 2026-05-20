@@ -8,6 +8,7 @@
 #include "../drivers/framebuffer.h"
 #include "../drivers/lapic.h"
 #include "../drivers/pic.h"
+#include "../drivers/rtl8139.h"
 #include "../servers/console_server.h"
 #include "../servers/keyboard_server.h"
 #include "../servers/shell_server.h"
@@ -122,6 +123,7 @@ void kmain(void) {
     lapic_init();          /* enable LAPIC + LINT0=ExtINT (q35 needs this) */
     timer_init();          /* PIT @ 100 Hz, installs IDT[0x20], unmask IRQ0 */
     block_ata_init();      /* IDENTIFY primary master; FS layer mounts it */
+    rtl8139_init();        /* PCI scan + driver; silent if no NIC */
 
     ipc_init();
     task_init();

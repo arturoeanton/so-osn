@@ -771,15 +771,58 @@ OK 8.9 self-test extendido — VERIFICADO en QEMU
    - SKIP automático del bloque FAT si /sd no está montado (boot sin
      sd.img).
 
-### FASE 8.5 — Networking (post-FAT)
-La libc ya tiene la superficie POSIX preparada (arpa/inet.h, netinet/in.h,
-sys/socket.h con stubs ENOSYS) desde FASE 7.7. Cuando lleguemos:
-39. driver de red (RTL8139 ~200 LOC en QEMU; e1000 ~400)
-40. ARP + IPv4 + ICMP echo minimal
-41. UDP socket
-42. TCP socket (server + client minimal)
-43. Reemplazar stubs en lib/libc/inet.c con osnos_syscall*
-44. Demo: /bin/httpd sirviendo /sd/index.html
+### FASE 8.5 — Networking (post-FAT) — EN PROGRESO
+
+OK 8.5.1 PCI scan + RTL8139 driver — VERIFICADO en QEMU
+   - src/micro/pmm.c: pmm_alloc_pages_contig(n_pages). Linear scan
+     del bitmap buscando run de N free bits. O(total_pages*n_pages) en
+     worst case; aceptable porque sólo se usa para buffers DMA al boot.
+   - src/drivers/pci.{c,h}: PCI config-space sobre ports 0xCF8/0xCFC.
+     - pci_find_device(vendor, device, *out): scan bus 0..255 dev 0..31
+       fn=0, primer match retorna pci_addr_t.
+     - pci_read_bar / pci_read_irq: ofsets 0x10+4*N y 0x3C.
+     - pci_enable_bus_master: set bits 0 (I/O space) + 2 (bus master)
+       en el config register 0x04.
+   - src/drivers/rtl8139.{c,h}: driver minimal.
+     - Boot path: pci_find_device(0x10EC, 0x8139) → enable bus master
+       → read BAR0 (I/O port range) y IRQ line del PCI config →
+       wake CONFIG1=0 → soft-reset (write 0x10 a CMD, poll hasta 0)
+       → read MAC (IDR0..5).
+     - RX ring: 3 páginas contiguas (8KB+16+1500 ≈ 9.5KB) vía
+       pmm_alloc_pages_contig. RBSTART = phys, RCR =
+       APM|AB|WRAP (no AAP por ahora), RBLEN 8KB+16. CAPR inicializado
+       a -0x10 (convención on-chip). Reader offset trackeado en
+       dev.rx_offset, advancea por header(2)+length(2)+payload con
+       4-byte alignment, wrap dentro de 8192.
+     - TX ring: 4 buffers de 1 página cada uno (pmm_alloc_page,
+       single-page = contig por definición). TSAD0..3 = phys cada uno.
+       rtl8139_tx() round-robins entre los 4 slots; chequea OWN bit
+       del slot antes de reescribir para no pisar DMA en flight.
+       Disparo: outl(TSD, len), chip padea cortos a 60.
+     - IRQ: asm stub rtl8139_irq_entry (save GPRs, call C, restore,
+       iretq) instalado vía idt_set_handler en vector
+       PIC_VECTOR_BASE_{MASTER,SLAVE} + irq_line%8.
+       rtl8139_irq_handle drena ISR (write-1-to-clear), procesa
+       RX ring si ROK, cuenta TX si TOK, errors si RER/TER/RXOVW.
+       pic_send_eoi al final.
+   - Diagnósticos: /sys/net (sysfs) muestra driver, mac, io_base,
+     irq_line, irqs, rx_packets/bytes, tx_packets/bytes, errors.
+   - kmain: rtl8139_init() después de timer_init; silent-fail si no
+     hay chip (kernel sigue booteando sin red).
+   - GNUmakefile run-bios: agrega `-netdev user,id=net0,hostfwd=tcp::
+     8080-:80 -device rtl8139,netdev=net0`. QEMU slirp NAT con
+     guest IP 10.0.2.15, gateway 10.0.2.2, port-forward host:8080 →
+     guest:80 para futuro httpd.
+   - Verificado: /sys/net muestra mac 52:54:00:12:34:56 (default
+     QEMU), io_base 0xc000, irq_line 11. Sin tráfico al boot,
+     irqs=0 esperado (se van a mover en 8.5.2 cuando enviemos ARP).
+
+TODO 8.5.2 Ethernet + ARP — siguiente sub-fase
+TODO 8.5.3 IPv4 + ICMP echo
+TODO 8.5.4 UDP socket + syscalls
+TODO 8.5.5 TCP state machine
+TODO 8.5.6 Syscalls wireados + libc
+TODO 8.5.7 /bin/httpd sirviendo /sd/index.html
 
 ### FASE 9 — Scheduler real — CERRADA
 OK 9.1 timer IRQ infra — VERIFICADO en QEMU
