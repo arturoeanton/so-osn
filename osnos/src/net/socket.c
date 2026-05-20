@@ -118,7 +118,19 @@ int sock_create(int type) {
 
 static bool port_in_use(uint16_t port) {
     for (int i = 0; i < SOCK_MAX; i++) {
-        if (socks[i].used && socks[i].local_port == port) return true;
+        sock_t *s = &socks[i];
+        if (!s->used) continue;
+        if (s->local_port != port) continue;
+        /* Lingering TCP children of a (now closed) LISTEN socket
+         * still hold local_port — but they're per-connection, not a
+         * conflict for a fresh LISTEN bind. Treat them like Linux
+         * treats sockets in TIME_WAIT under SO_REUSEADDR: skip. */
+        if (s->type == OSNOS_SOCK_STREAM &&
+            s->tcp_state != TCP_LISTEN &&
+            s->tcp_state != TCP_CLOSED) {
+            continue;
+        }
+        return true;
     }
     return false;
 }
