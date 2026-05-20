@@ -1,0 +1,19 @@
+# Build artifacts
+osnos/build/
+osnos/**/build/
+
+# Generated images
+*.iso
+*.img
+*.hdd
+
+# Editor / OS cruft
+.DS_Store
+.vscode/
+.idea/
+compile_commands.json
+.cache/
+
+# Limine bootloader is installed on the host; never check it back in.
+limine-binary/
+edk2-ovmf/

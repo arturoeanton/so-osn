@@ -1,0 +1,57 @@
+#pragma once
+
+#include <stddef.h>
+#include <sys/types.h>
+
+#define STDIN_FILENO  0
+#define STDOUT_FILENO 1
+#define STDERR_FILENO 2
+
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
+ssize_t read (int fd, void *buf, size_t n);
+ssize_t write(int fd, const void *buf, size_t n);
+int     close(int fd);
+off_t   lseek(int fd, off_t off, int whence);
+int     isatty(int fd);
+
+int     unlink(const char *path);
+int     rmdir (const char *path);
+int     mkdir (const char *path, mode_t mode);
+int     rename(const char *oldpath, const char *newpath);
+
+/*
+ * Linux brk(addr): set the program break to addr; returns the new
+ * break, or the OLD break if the request was refused. sbrk(incr)
+ * is a libc convenience that adjusts brk by incr and returns the
+ * OLD break (or (void*)-1 on failure).
+ */
+int    brk (void *addr);
+void  *sbrk(intptr_t increment);
+
+__attribute__((noreturn))
+void   _exit(int code);
+
+/*
+ * sleep / usleep — wrap nanosleep. sleep returns the number of
+ * seconds left unslept if interrupted (currently always 0 since
+ * we never wake early). usleep returns 0 on success, -1 + errno on
+ * error.
+ */
+unsigned int sleep (unsigned int seconds);
+int          usleep(unsigned long usec);
+
+/*
+ * kill(pid, sig) — request the kernel to deliver a signal to `pid`.
+ * Today osnos has no signal table: any non-zero `sig` simply marks
+ * the target task with kill_pending; the kernel routes it through
+ * exit(130) at the next return-to-user boundary. Returns 0 on
+ * success or -1 + errno on failure (errno = ESRCH if pid doesn't
+ * exist or is a kernel task).
+ */
+int          kill  (pid_t pid, int sig);
+
+/* getpid — the calling task's pid. Always non-zero in user context. */
+pid_t        getpid(void);

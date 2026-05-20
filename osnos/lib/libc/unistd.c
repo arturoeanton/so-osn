@@ -1,0 +1,150 @@
+#include <errno.h>
+#include <fcntl.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <stdarg.h>
+
+#include "syscall.h"
+
+/*
+ * Each wrapper drops a syscall straight to the kernel. The dispatcher
+ * returns >= 0 on success, < 0 (== -errno) on failure. The caller
+ * expects the libc convention: -1 + errno on failure, real value on
+ * success.
+ */
+
+static long set_errno(long r) {
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return r;
+}
+
+ssize_t read(int fd, void *buf, size_t n) {
+    return (ssize_t)set_errno(
+        osnos_syscall3(SYS_READ, fd, (long)buf, (long)n));
+}
+
+ssize_t write(int fd, const void *buf, size_t n) {
+    return (ssize_t)set_errno(
+        osnos_syscall3(SYS_WRITE, fd, (long)buf, (long)n));
+}
+
+int open(const char *path, int flags, ...) {
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = (mode_t)va_arg(ap, int);
+        va_end(ap);
+    }
+    return (int)set_errno(
+        osnos_syscall3(SYS_OPEN, (long)path, flags, (long)mode));
+}
+
+int close(int fd) {
+    return (int)set_errno(osnos_syscall1(SYS_CLOSE, fd));
+}
+
+off_t lseek(int fd, off_t off, int whence) {
+    return (off_t)set_errno(
+        osnos_syscall3(SYS_LSEEK, fd, (long)off, whence));
+}
+
+int isatty(int fd) {
+    long r = osnos_syscall1(SYS_ISATTY, fd);
+    if (r < 0) { errno = (int)(-r); return 0; }
+    return (int)r;
+}
+
+int fstat(int fd, struct stat *out) {
+    return (int)set_errno(
+        osnos_syscall2(SYS_FSTAT, fd, (long)out));
+}
+
+int mkdir(const char *path, mode_t mode) {
+    return (int)set_errno(
+        osnos_syscall2(SYS_MKDIR, (long)path, (long)mode));
+}
+
+int rmdir(const char *path) {
+    return (int)set_errno(osnos_syscall1(SYS_RMDIR, (long)path));
+}
+
+int unlink(const char *path) {
+    return (int)set_errno(osnos_syscall1(SYS_UNLINK, (long)path));
+}
+
+int rename(const char *oldpath, const char *newpath) {
+    return (int)set_errno(
+        osnos_syscall2(SYS_RENAME, (long)oldpath, (long)newpath));
+}
+
+/*
+ * brk / sbrk.
+ *
+ * brk(addr): asks the kernel to move the program break to `addr`.
+ * The kernel returns the NEW break on success, the OLD break on
+ * refusal. brk(0) is a query that returns the current break.
+ *
+ * sbrk(incr): convenience that wraps brk. Returns the OLD break on
+ * success (so the caller has the start of the newly-allocated
+ * region), or (void *)-1 on failure.
+ */
+int brk(void *addr) {
+    long r = osnos_syscall1(SYS_BRK, (long)addr);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    if ((unsigned long)r != (unsigned long)addr) {
+        errno = ENOMEM;
+        return -1;
+    }
+    return 0;
+}
+
+void *sbrk(intptr_t increment) {
+    long cur = osnos_syscall1(SYS_BRK, 0);
+    if (cur < 0) { errno = (int)(-cur); return (void *)-1; }
+    if (increment == 0) return (void *)cur;
+
+    long want = cur + (long)increment;
+    long got  = osnos_syscall1(SYS_BRK, want);
+    if (got < 0) { errno = (int)(-got); return (void *)-1; }
+    if (got != want) { errno = ENOMEM; return (void *)-1; }
+    return (void *)cur;
+}
+
+__attribute__((noreturn))
+void _exit(int code) {
+    osnos_syscall1(SYS_EXIT, code);
+    for (;;) __asm__ volatile ("hlt");   /* unreachable defensive */
+}
+
+/* ---------------------------------------------------------------- */
+/* sleep / nanosleep                                                  */
+/* ---------------------------------------------------------------- */
+
+int nanosleep(const struct timespec *req, struct timespec *rem) {
+    return (int)set_errno(
+        osnos_syscall2(SYS_NANOSLEEP, (long)req, (long)rem));
+}
+
+unsigned int sleep(unsigned int seconds) {
+    struct timespec req = { (time_t)seconds, 0 };
+    if (nanosleep(&req, 0) < 0) return seconds;
+    return 0;
+}
+
+int usleep(unsigned long usec) {
+    struct timespec req = {
+        (time_t)(usec / 1000000UL),
+        (long)((usec % 1000000UL) * 1000UL)
+    };
+    return nanosleep(&req, 0);
+}
+
+int kill(pid_t pid, int sig) {
+    return (int)set_errno(osnos_syscall2(SYS_KILL, (long)pid, (long)sig));
+}
+
+pid_t getpid(void) {
+    return (pid_t)osnos_syscall0(SYS_GETPID);
+}

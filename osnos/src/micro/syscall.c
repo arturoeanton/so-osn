@@ -1,0 +1,655 @@
+#include "syscall.h"
+
+#include <stddef.h>
+
+#include "../drivers/framebuffer.h"
+#include "../fs/vfs.h"
+#include "../include/osnos_dirent.h"
+#include "../include/osnos_fcntl.h"
+#include "../include/osnos_status.h"
+#include "../lib/string.h"
+#include "../proc/exec.h"
+#include "fd.h"
+#include "ipc.h"
+#include "pmm.h"
+#include "scheduler.h"
+#include "task.h"
+#include "timer.h"
+#include "vmm.h"
+
+void syscall_init(void) {
+    fd_init();
+}
+
+/* Wrap an osnos_status_t into a syscall return: 0 on OK, -errno on error. */
+static int64_t err(osnos_status_t s) {
+    return -(int64_t)s;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_open                                                           */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_open(const char *path, int flags, uint32_t mode) {
+    (void)mode;  /* permission bits not enforced yet */
+
+    if (!path) return err(OSNOS_EFAULT);
+
+    vfs_stat_t st;
+    osnos_status_t s = vfs_stat(path, &st);
+    bool exists = (s == OSNOS_OK);
+
+    bool want_create = (flags & O_CREAT) != 0;
+    bool want_excl   = (flags & O_EXCL) != 0;
+    bool want_trunc  = (flags & O_TRUNC) != 0;
+
+    if (!exists && !want_create)               return err(OSNOS_ENOENT);
+    if (exists && want_create && want_excl)    return err(OSNOS_EEXIST);
+
+    bool is_dir = exists && st.type == VFS_NODE_DIR;
+
+    if (is_dir) {
+        /* Directories may only be opened read-only — they're for
+         * getdents, not write/truncate/create-over. */
+        int access = flags & O_ACCMODE;
+        if (access != O_RDONLY) return err(OSNOS_EISDIR);
+        if (want_create || want_trunc) return err(OSNOS_EISDIR);
+    }
+
+    /* Create or truncate before allocating the fd so we fail cleanly. */
+    if (!exists && want_create) {
+        s = vfs_write(path, "", 0);
+        if (s != OSNOS_OK) return err(s);
+    } else if (want_trunc && !is_dir) {
+        s = vfs_write(path, "", 0);
+        if (s != OSNOS_OK) return err(s);
+    }
+
+    int fd = fd_alloc();
+    if (fd < 0) return err(OSNOS_EMFILE);
+
+    osnos_fd_t *f = fd_get(fd);
+    os_strlcpy(f->path, path, OSNOS_PATH_MAX);
+    f->flags  = flags;
+    f->offset = 0;
+    f->is_dir = is_dir;
+    return fd;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_close                                                          */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_close(int fd) {
+    osnos_fd_t *f = fd_get(fd);
+    if (!f) return err(OSNOS_EBADF);
+    if (f->is_special) return err(OSNOS_EBADF);
+    fd_free(fd);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_write                                                          */
+/* ------------------------------------------------------------------ */
+
+static int64_t write_to_console(const char *buf, size_t count) {
+    if (count == 0) return 0;
+
+    /*
+     * One IPC message per call. If count is larger than the payload, we
+     * write a short prefix and let the caller loop. Linux is allowed to
+     * return short writes; standard libc loops to fill.
+     */
+    size_t n = count;
+    if (n > IPC_DATA_SIZE - 1) n = IPC_DATA_SIZE - 1;
+
+    ipc_msg_t msg;
+    task_t *t = task_current();
+    msg.from = t ? t->pid : 0;
+    msg.to   = SERVER_CONSOLE;
+    msg.type = IPC_CONSOLE_WRITE;
+    msg.arg0 = 0xffffff;
+    msg.arg1 = 0;
+
+    for (size_t i = 0; i < n; i++) msg.data[i] = buf[i];
+    msg.data[n] = 0;
+
+    osnos_status_t s = ipc_send(&msg);
+    if (s != OSNOS_OK) return err(s);
+    return (int64_t)n;
+}
+
+int64_t sys_write(int fd, const void *buf, size_t count) {
+    if (!buf && count > 0) return err(OSNOS_EFAULT);
+
+    if (fd == OSNOS_FD_STDIN) return err(OSNOS_EBADF);
+
+    if (fd == OSNOS_FD_STDOUT || fd == OSNOS_FD_STDERR) {
+        return write_to_console((const char *)buf, count);
+    }
+
+    osnos_fd_t *f = fd_get(fd);
+    if (!f || f->is_special) return err(OSNOS_EBADF);
+
+    int access = f->flags & O_ACCMODE;
+    if (access == O_RDONLY) return err(OSNOS_EBADF);
+
+    /*
+     * Today every write is append-from-current-position. Combined with
+     * O_TRUNC at open time, this matches `fopen("w")` and `fopen("a")`
+     * semantics. Random-access write (lseek + write into the middle)
+     * is not supported — backends would need offset-aware ops.
+     */
+    osnos_status_t s = vfs_append(f->path, (const char *)buf, count);
+    if (s != OSNOS_OK) return err(s);
+
+    f->offset += count;
+    return (int64_t)count;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_read                                                           */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_read(int fd, void *buf, size_t count) {
+    if (!buf && count > 0) return err(OSNOS_EFAULT);
+
+    if (fd == OSNOS_FD_STDIN) {
+        /*
+         * Non-blocking: returns 0 when no input is buffered. Userland
+         * loops. Real Linux would block here; we can't without a
+         * preemptive scheduler (FASE 9).
+         */
+        return (int64_t)stdin_pop((char *)buf, count);
+    }
+    if (fd == OSNOS_FD_STDOUT || fd == OSNOS_FD_STDERR) {
+        return err(OSNOS_EBADF);
+    }
+
+    osnos_fd_t *f = fd_get(fd);
+    if (!f || f->is_special) return err(OSNOS_EBADF);
+    if (f->is_dir) return err(OSNOS_EISDIR);
+
+    int access = f->flags & O_ACCMODE;
+    if (access == O_WRONLY) return err(OSNOS_EBADF);
+
+    /*
+     * Read entire file via VFS into a stack scratch buffer, then copy
+     * the requested slice from offset. Inefficient but correct; will
+     * become offset-native when backends grow read_at(offset).
+     */
+    char tmp[1024];
+    size_t got = 0;
+    osnos_status_t s = vfs_read(f->path, tmp, sizeof(tmp), &got);
+    if (s != OSNOS_OK) return err(s);
+
+    if (f->offset >= got) return 0;
+
+    size_t remaining = got - f->offset;
+    size_t n = (count < remaining) ? count : remaining;
+
+    char *out = (char *)buf;
+    for (size_t i = 0; i < n; i++) out[i] = tmp[f->offset + i];
+    f->offset += n;
+    return (int64_t)n;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_lseek                                                          */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_lseek(int fd, int64_t offset, int whence) {
+    osnos_fd_t *f = fd_get(fd);
+    if (!f || f->is_special) return err(OSNOS_EBADF);
+
+    int64_t new_offset;
+    switch (whence) {
+        case SEEK_SET:
+            new_offset = offset;
+            break;
+        case SEEK_CUR:
+            new_offset = (int64_t)f->offset + offset;
+            break;
+        case SEEK_END: {
+            vfs_stat_t st;
+            osnos_status_t s = vfs_stat(f->path, &st);
+            if (s != OSNOS_OK) return err(s);
+            new_offset = (int64_t)st.size + offset;
+            break;
+        }
+        default:
+            return err(OSNOS_EINVAL);
+    }
+
+    if (new_offset < 0) return err(OSNOS_EINVAL);
+    f->offset = (uint64_t)new_offset;
+    return new_offset;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_fstat                                                          */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_fstat(int fd, osnos_stat_t *out) {
+    if (!out) return err(OSNOS_EFAULT);
+
+    osnos_fd_t *f = fd_get(fd);
+    if (!f) return err(OSNOS_EBADF);
+
+    for (size_t i = 0; i < sizeof(*out); i++) ((char *)out)[i] = 0;
+
+    if (f->is_special) {
+        /* stdin/stdout/stderr report as char devices. */
+        out->st_mode    = (uint32_t)VFS_NODE_CHR | 0666;
+        out->st_nlink   = 1;
+        out->st_blksize = 1024;
+        return 0;
+    }
+
+    vfs_stat_t st;
+    osnos_status_t s = vfs_stat(f->path, &st);
+    if (s != OSNOS_OK) return err(s);
+
+    out->st_ino     = st.inode;
+    out->st_nlink   = 1;
+    out->st_mode    = (uint32_t)st.type | (st.mode & 07777);
+    out->st_size    = (int64_t)st.size;
+    out->st_blksize = 512;
+    out->st_blocks  = (int64_t)((st.size + 511) / 512);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_isatty                                                         */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_isatty(int fd) {
+    osnos_fd_t *f = fd_get(fd);
+    if (!f) return err(OSNOS_EBADF);
+    return f->is_special ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_exit                                                           */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_exit(int code) {
+    task_t *t = task_current();
+    if (!t) return 0;
+
+    /*
+     * Ring-3 user task: delegate to proc_exit_current_user, which
+     * tears down the AS, hands the per-task kstack to the reaper,
+     * notifies the shell, and longjmps back to the scheduler. Never
+     * returns.
+     */
+    if (t->pml4) proc_exit_current_user(code);
+
+    /* Kernel-mode builtin: mark DEAD; the trampoline catches it. */
+    t->state = TASK_DEAD;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_brk — grow / shrink the per-task user heap                     */
+/* ------------------------------------------------------------------ */
+
+#define PAGE_DOWN(x) ((x) & ~(uint64_t)(PAGE_SIZE - 1))
+#define PAGE_UP(x)   (((x) + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1))
+
+int64_t sys_brk(uintptr_t new_brk) {
+    task_t *t = task_current();
+
+    /*
+     * Kernel-mode tasks (no pml4) have no per-process heap. Returning 0
+     * keeps libc honest (it sees "couldn't grow" and falls back to
+     * its emergency NULL).
+     */
+    if (!t || !t->pml4 || !t->heap_start) return 0;
+
+    uint64_t cur = t->heap_brk;
+
+    /* brk(0) — just report. */
+    if (new_brk == 0) return (int64_t)cur;
+
+    /* Out-of-range requests are silently refused (Linux convention). */
+    if (new_brk < t->heap_start)            return (int64_t)cur;
+    if (new_brk >= OSNOS_USER_VIRT_MAX - PAGE_SIZE) return (int64_t)cur;
+
+    /* No motion -> nothing to do. */
+    if (new_brk == cur) return (int64_t)cur;
+
+    if (new_brk > cur) {
+        /*
+         * Grow: allocate + map every page in
+         *   [PAGE_UP(cur), PAGE_UP(new_brk))
+         * (we never re-allocate the page that already owns `cur`).
+         * On any failure, roll back the pages we just allocated.
+         */
+        uint64_t lo = PAGE_UP(cur == t->heap_start ? cur : cur);
+        uint64_t hi = PAGE_UP(new_brk);
+
+        for (uint64_t va = lo; va < hi; va += PAGE_SIZE) {
+            if (vmm_lookup(t->pml4, va) != 0) continue;  /* already mapped */
+
+            uint64_t phys = pmm_alloc_page();
+            if (!phys) goto rollback;
+
+            uint8_t *zp = (uint8_t *)(phys + pmm_hhdm_offset());
+            for (size_t i = 0; i < PAGE_SIZE; i++) zp[i] = 0;
+
+            if (!vmm_map(t->pml4, va, phys, PTE_W | PTE_U)) {
+                pmm_free_page(phys);
+                goto rollback;
+            }
+            continue;
+
+        rollback:
+            for (uint64_t r = lo; r < va; r += PAGE_SIZE) {
+                uint64_t p = vmm_lookup(t->pml4, r) & PTE_ADDR_MASK;
+                if (p) {
+                    vmm_unmap(t->pml4, r);
+                    pmm_free_page(p);
+                }
+            }
+            return (int64_t)cur;
+        }
+    } else {
+        /*
+         * Shrink: free every page entirely above the new break. We
+         * unmap pages at [PAGE_UP(new_brk), PAGE_UP(cur)) — the page
+         * containing the new brk byte stays mapped.
+         */
+        uint64_t lo = PAGE_UP(new_brk);
+        uint64_t hi = PAGE_UP(cur);
+
+        for (uint64_t va = lo; va < hi; va += PAGE_SIZE) {
+            uint64_t p = vmm_lookup(t->pml4, va) & PTE_ADDR_MASK;
+            if (!p) continue;
+            vmm_unmap(t->pml4, va);
+            pmm_free_page(p);
+        }
+    }
+
+    t->heap_brk = new_brk;
+    return (int64_t)new_brk;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_nanosleep — cooperative hlt-loop until timer_ms() >= target    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Suspend the current user task until wakeup_at_ms.
+ *
+ * Snapshots the iret frame (sitting at kernel_stack_top - 40) plus
+ * the 15-GPR syscall_frame_t pushed by int80_entry / syscall_entry,
+ * stashes them on the task, marks it BLOCKED, and longjmps back to
+ * the scheduler via sched_resume_jump. The kernel stack of THIS
+ * task is abandoned for the duration — it'll be fresh on the next
+ * dispatch.
+ *
+ * user_task_trampoline detects t->saved_valid on the wake-up
+ * dispatch and replays the iret frame + GPRs (with rax overwritten
+ * by t->saved_return) so the user-mode instruction right after the
+ * syscall continues with the right state.
+ */
+int64_t sys_nanosleep(const osnos_timespec_t *req, osnos_timespec_t *rem) {
+    (void)rem;
+    if (!req) return -(int64_t)OSNOS_EFAULT;
+
+    int64_t sec  = req->tv_sec;
+    int64_t nsec = req->tv_nsec;
+    if (sec < 0 || nsec < 0 || nsec >= 1000000000) return -(int64_t)OSNOS_EINVAL;
+
+    uint64_t ms = (uint64_t)sec * 1000ULL + (uint64_t)nsec / 1000000ULL;
+    if (ms == 0) return 0;
+
+    task_t *t = task_current();
+    if (!t || !t->pml4 || !t->kernel_stack_top) {
+        /* Kernel-mode caller (test path) — fall back to busy-hlt. */
+        uint64_t target = timer_ms() + ms;
+        __asm__ volatile ("sti");
+        while (timer_ms() < target) __asm__ volatile ("hlt");
+        return 0;
+    }
+
+    /* Iret frame is at the very top of the per-task kernel stack;
+     * the CPU pushed it on syscall entry, layout: rip, cs, rflags,
+     * rsp, ss going up from (kstack_top - 40). */
+    uint64_t *iret = (uint64_t *)(t->kernel_stack_top - 40);
+    t->saved_iret_rip    = iret[0];
+    t->saved_iret_cs     = iret[1];
+    t->saved_iret_rflags = iret[2];
+    t->saved_iret_rsp    = iret[3];
+    t->saved_iret_ss     = iret[4];
+
+    /* GPRs come from the syscall_frame_t pushed by int80_entry just
+     * below the iret frame: 15 * 8 = 120 bytes. rax gets overwritten
+     * with 0 — the return value of nanosleep(2) on success. */
+    syscall_frame_t *sf = (syscall_frame_t *)(t->kernel_stack_top - 40 - sizeof(*sf));
+    t->saved_rax = 0;                        /* return value visible to user */
+    t->saved_rbx = sf->rbx;
+    t->saved_rcx = sf->rcx;
+    t->saved_rdx = sf->rdx;
+    t->saved_rsi = sf->rsi;
+    t->saved_rdi = sf->rdi;
+    t->saved_rbp = sf->rbp;
+    t->saved_r8  = sf->r8;
+    t->saved_r9  = sf->r9;
+    t->saved_r10 = sf->r10;
+    t->saved_r11 = sf->r11;
+    t->saved_r12 = sf->r12;
+    t->saved_r13 = sf->r13;
+    t->saved_r14 = sf->r14;
+    t->saved_r15 = sf->r15;
+
+    t->saved_valid  = 1;
+    t->wakeup_at_ms = timer_ms() + ms;
+    t->state        = TASK_BLOCKED;
+
+    sched_resume_jump();                     /* never returns */
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_kill — Linux kill(2). Today signal is ignored; we just flip    */
+/* kill_pending on the target so the next kernel return path delivers */
+/* the death. Refuses kernel tasks (pml4 == NULL).                    */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_kill(uint64_t pid, int sig) {
+    (void)sig;
+    task_t *t = task_by_pid(pid);
+    if (!t || !t->pml4) return -(int64_t)OSNOS_ESRCH;
+    t->kill_pending = 1;
+
+    /*
+     * If the target is BLOCKED (e.g., inside a long nanosleep), it
+     * never makes it back to a kernel return point that checks
+     * kill_pending — so the kill wouldn't fire until the natural
+     * wake-up. Force-wake here so the scheduler can dispatch it
+     * one more tick, where user_task_trampoline notices the flag
+     * and routes it through proc_exit_current_user(130).
+     */
+    if (t->state == TASK_BLOCKED) {
+        t->wakeup_at_ms = 0;
+        t->state        = TASK_READY;
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_getpid — current task's pid. Always non-zero in user context.  */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_getpid(void) {
+    task_t *t = task_current();
+    if (!t) return 0;
+    return (int64_t)t->pid;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_mkdir / sys_rmdir / sys_unlink / sys_rename                    */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_mkdir(const char *path, uint32_t mode) {
+    (void)mode;  /* permission bits not enforced yet */
+    if (!path) return err(OSNOS_EFAULT);
+    return err(vfs_mkdir(path));
+}
+
+int64_t sys_rmdir(const char *path) {
+    if (!path) return err(OSNOS_EFAULT);
+    return err(vfs_rmdir(path));
+}
+
+int64_t sys_unlink(const char *path) {
+    if (!path) return err(OSNOS_EFAULT);
+    return err(vfs_unlink(path));
+}
+
+int64_t sys_rename(const char *oldpath, const char *newpath) {
+    if (!oldpath || !newpath) return err(OSNOS_EFAULT);
+    return err(vfs_move(oldpath, newpath));
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_getdents — Linux getdents64 layout                              */
+/* ------------------------------------------------------------------ */
+
+static uint8_t vfs_type_to_dt(vfs_node_type_t t) {
+    switch (t) {
+        case VFS_NODE_FIFO: return OSNOS_DT_FIFO;
+        case VFS_NODE_CHR:  return OSNOS_DT_CHR;
+        case VFS_NODE_DIR:  return OSNOS_DT_DIR;
+        case VFS_NODE_BLK:  return OSNOS_DT_BLK;
+        case VFS_NODE_REG:  return OSNOS_DT_REG;
+        case VFS_NODE_LNK:  return OSNOS_DT_LNK;
+        case VFS_NODE_SOCK: return OSNOS_DT_SOCK;
+        default:            return OSNOS_DT_UNKNOWN;
+    }
+}
+
+int64_t sys_getdents(int fd, void *buf, size_t buf_size) {
+    if (!buf && buf_size > 0) return err(OSNOS_EFAULT);
+
+    osnos_fd_t *f = fd_get(fd);
+    if (!f || f->is_special) return err(OSNOS_EBADF);
+    if (!f->is_dir)          return err(OSNOS_ENOTDIR);
+
+    char *out = (char *)buf;
+    size_t written = 0;
+    size_t cursor = (size_t)f->offset;
+
+    for (;;) {
+        vfs_dirent_t ent;
+        size_t prev_cursor = cursor;
+        osnos_status_t s = vfs_readdir(f->path, &cursor, &ent);
+        if (s == OSNOS_ENOENT) break;       /* end of dir */
+        if (s != OSNOS_OK) {
+            if (written > 0) break;         /* return what we have */
+            return err(s);
+        }
+
+        size_t name_len = os_strlen(ent.name);
+        /*
+         * record layout:
+         *   d_ino (8) + d_off (8) + d_reclen (2) + d_type (1) + name + '\0'
+         * then pad to 8-byte alignment.
+         */
+        size_t raw = 8 + 8 + 2 + 1 + name_len + 1;
+        size_t reclen = (raw + 7) & ~(size_t)7;
+
+        if (written + reclen > buf_size) {
+            /* Not enough room — rewind the cursor so the caller retries
+             * with a bigger buffer (or after consuming what we wrote). */
+            cursor = prev_cursor;
+            break;
+        }
+
+        osnos_dirent_t *d = (osnos_dirent_t *)(out + written);
+        d->d_ino    = ent.type == VFS_NODE_DIR ? 0 : 0;  /* TODO: real inode */
+        d->d_off    = (int64_t)cursor;
+        d->d_reclen = (uint16_t)reclen;
+        d->d_type   = vfs_type_to_dt(ent.type);
+        for (size_t i = 0; i < name_len; i++) d->d_name[i] = ent.name[i];
+        d->d_name[name_len] = 0;
+        /* zero the alignment padding */
+        for (size_t i = name_len + 1; i < reclen - (8 + 8 + 2 + 1); i++) {
+            d->d_name[i] = 0;
+        }
+
+        written += reclen;
+    }
+
+    f->offset = (uint64_t)cursor;
+    return (int64_t)written;
+}
+
+/* ------------------------------------------------------------------ */
+/* Frame dispatcher (ring3 entry point eventually)                    */
+/* ------------------------------------------------------------------ */
+
+static uint64_t pack(int64_t r) { return (uint64_t)r; }
+
+uint64_t syscall_dispatch(syscall_frame_t *frame) {
+    switch (frame->rax) {
+        case SYS_OPEN:
+            return pack(sys_open(
+                (const char *)frame->rdi,
+                (int)frame->rsi,
+                (uint32_t)frame->rdx));
+        case SYS_CLOSE:
+            return pack(sys_close((int)frame->rdi));
+        case SYS_READ:
+            return pack(sys_read(
+                (int)frame->rdi,
+                (void *)frame->rsi,
+                (size_t)frame->rdx));
+        case SYS_WRITE:
+            return pack(sys_write(
+                (int)frame->rdi,
+                (const void *)frame->rsi,
+                (size_t)frame->rdx));
+        case SYS_LSEEK:
+            return pack(sys_lseek(
+                (int)frame->rdi,
+                (int64_t)frame->rsi,
+                (int)frame->rdx));
+        case SYS_FSTAT:
+            return pack(sys_fstat(
+                (int)frame->rdi,
+                (osnos_stat_t *)frame->rsi));
+        case SYS_ISATTY:
+            return pack(sys_isatty((int)frame->rdi));
+        case SYS_EXIT:
+            return pack(sys_exit((int)frame->rdi));
+        case SYS_BRK:
+            return pack(sys_brk((uintptr_t)frame->rdi));
+        case SYS_NANOSLEEP:
+            return pack(sys_nanosleep(
+                (const osnos_timespec_t *)frame->rdi,
+                (osnos_timespec_t *)frame->rsi));
+        case SYS_KILL:
+            return pack(sys_kill(frame->rdi, (int)frame->rsi));
+        case SYS_GETPID:
+            return pack(sys_getpid());
+        case SYS_MKDIR:
+            return pack(sys_mkdir((const char *)frame->rdi, (uint32_t)frame->rsi));
+        case SYS_RMDIR:
+            return pack(sys_rmdir((const char *)frame->rdi));
+        case SYS_UNLINK:
+            return pack(sys_unlink((const char *)frame->rdi));
+        case SYS_RENAME:
+            return pack(sys_rename(
+                (const char *)frame->rdi,
+                (const char *)frame->rsi));
+        case SYS_GETDENTS:
+            return pack(sys_getdents(
+                (int)frame->rdi,
+                (void *)frame->rsi,
+                (size_t)frame->rdx));
+        default:
+            return pack(-(int64_t)OSNOS_EINVAL);
+    }
+}
