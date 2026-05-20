@@ -996,7 +996,44 @@ OK 8.5.5a TCP handshake (passive) — VERIFICADO en QEMU
      "connection from 10.0.2.2:NNNNN — handshake OK, sending RST"
      y nc ve el RST inmediato.
 
-TODO 8.5.5b TCP data transfer + graceful close
+OK 8.5.5b TCP data transfer + graceful close — VERIFICADO en QEMU
+   - sock_t extendido con byte ring `tcp_rx[4096]` + zombie/peer_fin
+     flags. SOCK_TCP_RX_BUF = 4096, TCP_MSS = 1400.
+   - sock_tcp_handle_segment recibe ahora `(payload, payload_len)` y
+     procesa data en ESTABLISHED / FIN_WAIT_1 / FIN_WAIT_2: si seq
+     matchea rcv_nxt, enqueue al ring (drop si lleno, peer retransmite),
+     avanza rcv_nxt, emite ACK inmediato. Acept window =
+     SOCK_TCP_RX_BUF - rx_count.
+   - State machine completa para close:
+     - active close: sock_close_tcp en ESTABLISHED → FIN+ACK out →
+       FIN_WAIT_1 → ACK in → FIN_WAIT_2 → FIN in → CLOSED.
+     - passive close: peer FIN in ESTABLISHED → CLOSE_WAIT, peer_fin
+       flag → recv devuelve 0 (EOF). User llama close →
+       FIN+ACK out → LAST_ACK → ACK in → CLOSED.
+     - simultaneous close: FIN_WAIT_1 + FIN in → CLOSED.
+   - Zombie flag: cuando sock_close_tcp se llama pero la conexión sigue
+     en FIN_WAIT_*/LAST_ACK, el slot se marca zombie y se libera
+     automáticamente cuando llega CLOSED (desde el IRQ handler).
+   - sock_recv(sd, buf, len, timeout_ms): busy-poll cli/sti contra el
+     ring. Returns n>0 bytes, 0 en EOF (peer_fin + ring vacío),
+     -2 timeout, -1 error. Linux semántica.
+   - sock_send(sd, buf, len): splittea en TCP_MSS-sized segments con
+     PSH|ACK flags, avanza snd_nxt. No retransmite (asumimos QEMU
+     localhost reliable — TODO 8.5.5d para retransmisión real).
+   - sock_close: para STREAM dispatcha a sock_close_tcp (Linux POSIX
+     semantics — orderly close por defecto, no RST).
+   - sock_tcp_reset: extension osnos para RST inmediato (sigue
+     disponible para tests).
+   - Shell tcptest extendido: tras handshake, lee una línea con
+     sock_recv 5s timeout, hace echo back con sock_send, close.
+   - Verificado: `echo "hola tcp" | nc -v -w2 127.0.0.1 8080` desde
+     macOS BSD nc → OSnOS muestra "rx 9B: hola tcp." + "echoed back,
+     closing" + tcptest done. nc recibe el echo y termina sin error.
+     FIN exchange limpio.
+
+   Gotcha documentado: nc BSD (macOS) no tiene `-N`; usar `-w2` para
+   que cierre por timeout o `( ... ; sleep 1 ) | nc ...` para EOF
+   programado.
 TODO 8.5.5c TCP listen/accept syscalls + multi-connection
 TODO 8.5.6 socket options + select()
 TODO 8.5.7 getaddrinfo (AI_PASSIVE no-DNS) + /bin/httpd

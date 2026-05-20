@@ -17,6 +17,8 @@
 #define SOCK_MAX            8
 #define SOCK_RX_QUEUE_DEPTH 8
 #define SOCK_RX_MAX_DGRAM   1024
+#define SOCK_TCP_RX_BUF     4096   /* byte ring per TCP socket */
+#define TCP_MSS             1400   /* IP+TCP+ETH safe payload */
 
 /* Match Linux x86_64 SOCK_* numbering so user-mode `socket(2)` calls
  * pass these through verbatim. */
@@ -47,7 +49,7 @@ int  sock_recvfrom(int sd, void *buf, size_t buf_len,
 int  sock_sendto(int sd, const void *buf, size_t len,
                   uint32_t dst_ip, uint16_t dst_port);
 
-/* ----- TCP (8.5.5a: passive handshake only) ----- */
+/* ----- TCP (8.5.5a handshake + 8.5.5b data/close) ----- */
 
 /* Mark a SOCK_STREAM socket as LISTEN. Backlog is accepted but ignored
  * (there is at most one in-flight handshake per socket today). */
@@ -57,9 +59,31 @@ int  sock_listen(int sd, int backlog);
  * connection is sitting on the socket. */
 bool sock_tcp_get_peer(int sd, uint32_t *ip_out, uint16_t *port_out);
 
-/* Tear down whatever connection we have (RST on the peer) and return
- * the socket to LISTEN. */
+/* RST the connection (immediate teardown). Returns the socket to
+ * LISTEN if it was bound, else CLOSED. */
 void sock_tcp_reset(int sd);
+
+/*
+ * Stream recv. Waits up to `timeout_ms` for at least 1 byte to be
+ * available. Returns:
+ *    n > 0  — bytes copied
+ *    0      — peer closed (FIN seen and buffer drained) → EOF
+ *   -1      — not connected / error
+ *   -2      — timeout with no data and connection still open
+ */
+int  sock_recv(int sd, void *buf, size_t buf_len, uint32_t timeout_ms);
+
+/* Stream send. Splits into MSS-sized segments. Returns total bytes
+ * queued (== len on success, or -1 on error). */
+int  sock_send(int sd, const void *buf, size_t len);
+
+/*
+ * Graceful close. Sends a FIN if the connection is open, transitions
+ * the state machine, and lets the FIN/ACK exchange complete in the
+ * background. The slot is marked "zombie" and reclaimed when the
+ * state reaches CLOSED.
+ */
+int  sock_close_tcp(int sd);
 
 /* ----- internal (called from UDP / TCP RX path) ----- */
 
@@ -71,10 +95,12 @@ bool sock_deliver_udp(uint32_t src_ip, uint16_t src_port,
                        const uint8_t *data, size_t len);
 
 /* IRQ-context entry from tcp_handle. Drives the per-socket state
- * machine in response to flags. */
+ * machine. `payload` / `payload_len` carry any data bytes after the
+ * TCP header. */
 void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
                                uint32_t dst_ip, uint16_t dst_port,
-                               uint32_t seq, uint32_t ack, uint8_t flags);
+                               uint32_t seq, uint32_t ack, uint8_t flags,
+                               const uint8_t *payload, size_t payload_len);
 
 /* Local port → 0 if sd is invalid. Used by udp_send to fill src_port. */
 uint16_t sock_local_port(int sd);

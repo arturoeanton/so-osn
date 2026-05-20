@@ -101,10 +101,13 @@ void tcp_handle(const uint8_t *data, size_t len,
     size_t hlen = (size_t)doff * 4;
     if (hlen < TCP_HEADER_SIZE || hlen > len) { rx_drops++; return; }
 
+    const uint8_t *payload = data + hlen;
+    size_t payload_len = len - hlen;
+
     rx_packets++;
 
     sock_tcp_handle_segment(src_ip, src_port, dst_ip, dst_port,
-                              seq, ack, flags);
+                              seq, ack, flags, payload, payload_len);
 }
 
 uint64_t tcp_rx_packets(void) { return rx_packets; }

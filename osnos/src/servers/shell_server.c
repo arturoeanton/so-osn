@@ -2183,7 +2183,7 @@ static void cmd_tcptest(const char *args) {
 
     if (got) {
         line[0] = 0;
-        os_strlcat(line, "connection from ", sizeof(line));
+        os_strlcat(line, "conn from ", sizeof(line));
         for (int i = 3; i >= 0; i--) {
             os_format_u64((peer_ip >> (i * 8)) & 0xFF, num, sizeof(num));
             os_strlcat(line, num, sizeof(line));
@@ -2192,9 +2192,35 @@ static void cmd_tcptest(const char *args) {
         os_strlcat(line, ":", sizeof(line));
         os_format_u64(peer_port, num, sizeof(num));
         os_strlcat(line, num, sizeof(line));
-        os_strlcat(line, " — handshake OK, sending RST\n", sizeof(line));
+        os_strlcat(line, "\n", sizeof(line));
         shell_send_console(line);
-        sock_tcp_reset(sd);
+
+        /* Recv one chunk + echo it back + graceful close. */
+        char rxbuf[256];
+        int n = sock_recv(sd, rxbuf, sizeof(rxbuf) - 1, 5000);
+        if (n > 0) {
+            rxbuf[n] = 0;
+            line[0] = 0;
+            os_strlcat(line, "rx ", sizeof(line));
+            os_format_u64((uint64_t)n, num, sizeof(num));
+            os_strlcat(line, num, sizeof(line));
+            os_strlcat(line, "B: ", sizeof(line));
+            for (int i = 0; i < n && os_strlen(line) + 2 < sizeof(line); i++) {
+                char c = (rxbuf[i] >= 0x20 && rxbuf[i] < 0x7F) ? rxbuf[i] : '.';
+                char two[2] = { c, 0 };
+                os_strlcat(line, two, sizeof(line));
+            }
+            os_strlcat(line, "\n", sizeof(line));
+            shell_send_console(line);
+
+            int sent = sock_send(sd, rxbuf, (size_t)n);
+            (void)sent;
+            shell_send_console("echoed back, closing\n");
+        } else if (n == 0) {
+            shell_send_console("peer closed without data\n");
+        } else {
+            shell_send_console("recv timeout/error\n");
+        }
     } else {
         shell_send_console("no connection within 15s\n");
     }

@@ -34,6 +34,19 @@ typedef struct {
     uint32_t         snd_nxt;     /* next byte we'll send (1 byte for SYN/FIN) */
     uint32_t         snd_una;     /* oldest unacked byte */
     uint32_t         rcv_nxt;     /* next byte we expect to receive */
+
+    /* RX byte ring buffer (stream semantics). */
+    uint8_t          tcp_rx[SOCK_TCP_RX_BUF];
+    uint32_t         tcp_rx_head;
+    uint32_t         tcp_rx_tail;
+    uint32_t         tcp_rx_count;
+
+    /* True when the user called sock_close_tcp but FIN exchange is
+     * still draining; the slot is freed when state hits CLOSED. */
+    bool             zombie;
+    /* True when peer's FIN was processed → recv returns 0 when buf
+     * drains. */
+    bool             peer_fin;
 } sock_t;
 
 static sock_t socks[SOCK_MAX];
@@ -67,6 +80,11 @@ int sock_create(int type) {
         s->snd_nxt    = 0;
         s->snd_una    = 0;
         s->rcv_nxt    = 0;
+        s->tcp_rx_head = 0;
+        s->tcp_rx_tail = 0;
+        s->tcp_rx_count = 0;
+        s->zombie     = false;
+        s->peer_fin   = false;
         for (int k = 0; k < SOCK_RX_QUEUE_DEPTH; k++) s->rx[k].valid = false;
         return i;
     }
@@ -106,6 +124,11 @@ int sock_bind(int sd, uint32_t ip, uint16_t port) {
 int sock_close(int sd) {
     sock_t *s = sock_at(sd);
     if (!s) return -1;
+    if (s->type == OSNOS_SOCK_STREAM) {
+        /* TCP: orderly close path. Slot is freed asynchronously
+         * when the FIN exchange completes. */
+        return sock_close_tcp(sd);
+    }
     cli();
     s->used       = false;
     s->local_port = 0;
@@ -219,37 +242,84 @@ bool sock_tcp_get_peer(int sd, uint32_t *ip_out, uint16_t *port_out) {
     return true;
 }
 
+static void tcp_reset_socket(sock_t *s);    /* fwd ref */
+
 void sock_tcp_reset(int sd) {
     sock_t *s = sock_at(sd);
     if (!s) return;
     if (s->type != OSNOS_SOCK_STREAM) return;
 
-    /* If we know a peer, slap a RST on it. snd_nxt holds the next
-     * unsent seq, which is exactly what the peer expects in their
-     * receive window for an immediate teardown. */
     if (s->remote_ip != 0 && s->local_port != 0) {
         tcp_send(s->remote_ip, s->remote_port,
                   s->local_port, s->snd_nxt, s->rcv_nxt,
                   TCP_FLAG_RST | TCP_FLAG_ACK, 0, NULL, 0);
     }
-
-    cli();
-    s->tcp_state   = TCP_LISTEN;
-    s->remote_ip   = 0;
-    s->remote_port = 0;
-    s->snd_nxt = s->snd_una = s->rcv_nxt = 0;
-    sti();
+    tcp_reset_socket(s);
 }
 
 /*
- * Single-connection-per-socket simplification: a LISTEN socket
- * transitions through SYN_RCVD → ESTABLISHED in-place when its first
- * SYN arrives. accept() (8.5.5c) will introduce real child sockets
- * pulled from a backlog queue.
+ * Append payload bytes to the socket's RX ring. Called from IRQ
+ * context (already holds cli implicitly via the asm stub). Returns
+ * how many bytes were actually accepted (drops the rest when full).
  */
+static size_t tcp_rx_enqueue(sock_t *s, const uint8_t *p, size_t n) {
+    size_t free = SOCK_TCP_RX_BUF - s->tcp_rx_count;
+    if (n > free) n = free;
+    for (size_t i = 0; i < n; i++) {
+        s->tcp_rx[s->tcp_rx_tail] = p[i];
+        s->tcp_rx_tail = (s->tcp_rx_tail + 1) % SOCK_TCP_RX_BUF;
+    }
+    s->tcp_rx_count += (uint32_t)n;
+    return n;
+}
+
+static uint16_t tcp_advertised_window(const sock_t *s) {
+    return (uint16_t)(SOCK_TCP_RX_BUF - s->tcp_rx_count);
+}
+
+/* Send a bare ACK reflecting current snd_nxt / rcv_nxt. */
+static void tcp_emit_ack(const sock_t *s) {
+    tcp_send(s->remote_ip, s->remote_port, s->local_port,
+              s->snd_nxt, s->rcv_nxt,
+              TCP_FLAG_ACK, tcp_advertised_window(s),
+              NULL, 0);
+}
+
+static void tcp_emit_fin_ack(sock_t *s) {
+    tcp_send(s->remote_ip, s->remote_port, s->local_port,
+              s->snd_nxt, s->rcv_nxt,
+              TCP_FLAG_FIN | TCP_FLAG_ACK, tcp_advertised_window(s),
+              NULL, 0);
+    s->snd_nxt++;       /* FIN consumes 1 seq */
+}
+
+static void tcp_emit_rst(uint32_t dst_ip, uint16_t dst_port,
+                          uint16_t src_port, uint32_t seq, uint32_t ack) {
+    tcp_send(dst_ip, dst_port, src_port, seq, ack,
+              TCP_FLAG_RST | TCP_FLAG_ACK, 0, NULL, 0);
+}
+
+/* Wipe TCP connection state and clear the zombie flag. */
+static void tcp_reset_socket(sock_t *s) {
+    cli();
+    if (s->zombie) {
+        s->used = false;
+        s->zombie = false;
+    } else if (s->tcp_state != TCP_CLOSED) {
+        s->tcp_state = TCP_LISTEN;
+    }
+    s->remote_ip = 0;
+    s->remote_port = 0;
+    s->snd_nxt = s->snd_una = s->rcv_nxt = 0;
+    s->tcp_rx_head = s->tcp_rx_tail = s->tcp_rx_count = 0;
+    s->peer_fin = false;
+    sti();
+}
+
 void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
                                uint32_t dst_ip, uint16_t dst_port,
-                               uint32_t seq, uint32_t ack, uint8_t flags) {
+                               uint32_t seq, uint32_t ack, uint8_t flags,
+                               const uint8_t *payload, size_t payload_len) {
     (void)dst_ip;
 
     for (int i = 0; i < SOCK_MAX; i++) {
@@ -258,7 +328,7 @@ void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
         if (s->type != OSNOS_SOCK_STREAM) continue;
         if (s->local_port != dst_port) continue;
 
-        /* For non-LISTEN states the connection 4-tuple must match. */
+        /* Non-LISTEN states require full 4-tuple match. */
         if (s->tcp_state != TCP_LISTEN && s->tcp_state != TCP_CLOSED) {
             if (s->remote_ip != src_ip || s->remote_port != src_port) continue;
         }
@@ -267,61 +337,119 @@ void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
         case TCP_LISTEN:
             if (flags & TCP_FLAG_RST) return;
             if (flags & TCP_FLAG_SYN) {
-                cli();
                 s->remote_ip   = src_ip;
                 s->remote_port = src_port;
-                /* Cheap ISN: timer + slot index. Not security-relevant
-                 * yet (no SYN-flood defense). */
-                s->snd_una = s->snd_nxt = (uint32_t)timer_ms() + (uint32_t)i * 1000;
-                s->rcv_nxt = seq + 1;                /* SYN consumes 1 seq */
+                s->snd_una = s->snd_nxt =
+                    (uint32_t)timer_ms() + (uint32_t)i * 1000;
+                s->rcv_nxt = seq + 1;
                 s->tcp_state = TCP_SYN_RCVD;
-                sti();
-
                 tcp_send(src_ip, src_port, dst_port,
                           s->snd_nxt, s->rcv_nxt,
-                          TCP_FLAG_SYN | TCP_FLAG_ACK, 8192,
-                          NULL, 0);
-                s->snd_nxt++;                         /* our SYN consumes 1 */
+                          TCP_FLAG_SYN | TCP_FLAG_ACK,
+                          tcp_advertised_window(s), NULL, 0);
+                s->snd_nxt++;
             }
             return;
 
         case TCP_SYN_RCVD:
-            if (flags & TCP_FLAG_RST) {
-                cli();
-                s->tcp_state = TCP_LISTEN;
-                s->remote_ip = 0;
-                s->remote_port = 0;
-                sti();
-                return;
-            }
+            if (flags & TCP_FLAG_RST) { tcp_reset_socket(s); return; }
             if ((flags & TCP_FLAG_ACK) && ack == s->snd_nxt) {
-                cli();
                 s->snd_una = ack;
                 s->tcp_state = TCP_ESTABLISHED;
-                sti();
             }
             return;
 
         case TCP_ESTABLISHED:
-            /* 8.5.5a: no data transfer. RST anything that isn't a
-             * keep-alive ACK so the peer doesn't hang. */
-            if (flags & TCP_FLAG_RST) {
-                cli();
-                s->tcp_state = TCP_LISTEN;
-                s->remote_ip = 0;
-                s->remote_port = 0;
-                sti();
-                return;
+            if (flags & TCP_FLAG_RST) { tcp_reset_socket(s); return; }
+
+            /* Advance snd_una on valid ACK. */
+            if ((flags & TCP_FLAG_ACK) &&
+                (int32_t)(ack - s->snd_una) > 0 &&
+                (int32_t)(ack - s->snd_nxt) <= 0) {
+                s->snd_una = ack;
             }
-            if (flags & (TCP_FLAG_FIN | TCP_FLAG_PSH)) {
-                tcp_send(src_ip, src_port, dst_port,
-                          s->snd_nxt, seq + 1,
-                          TCP_FLAG_RST, 0, NULL, 0);
-                cli();
-                s->tcp_state = TCP_LISTEN;
-                s->remote_ip = 0;
-                s->remote_port = 0;
-                sti();
+
+            /* In-order data only — drop anything else, peer retransmits. */
+            if (payload_len > 0 && seq == s->rcv_nxt) {
+                size_t got = tcp_rx_enqueue(s, payload, payload_len);
+                s->rcv_nxt += (uint32_t)got;
+                tcp_emit_ack(s);
+            }
+
+            if (flags & TCP_FLAG_FIN) {
+                /* FIN sits one past the last byte of payload. */
+                if (seq + payload_len == s->rcv_nxt) {
+                    s->rcv_nxt++;
+                    s->peer_fin = true;
+                    s->tcp_state = TCP_CLOSE_WAIT;
+                    tcp_emit_ack(s);
+                }
+            }
+            return;
+
+        case TCP_FIN_WAIT_1:
+            if (flags & TCP_FLAG_RST) { tcp_reset_socket(s); return; }
+
+            /* Accept any pending data while we wait for the FIN-ACK. */
+            if (payload_len > 0 && seq == s->rcv_nxt) {
+                size_t got = tcp_rx_enqueue(s, payload, payload_len);
+                s->rcv_nxt += (uint32_t)got;
+                tcp_emit_ack(s);
+            }
+
+            if ((flags & TCP_FLAG_ACK) && ack == s->snd_nxt) {
+                s->snd_una = ack;
+                s->tcp_state = TCP_FIN_WAIT_2;
+            }
+            if (flags & TCP_FLAG_FIN) {
+                if (seq + payload_len == s->rcv_nxt) {
+                    s->rcv_nxt++;
+                    s->peer_fin = true;
+                    tcp_emit_ack(s);
+                    /* Simultaneous close path or just-after-our-FIN
+                     * → CLOSED (we skip TIME_WAIT for simplicity). */
+                    s->tcp_state = TCP_CLOSED;
+                    if (s->zombie) { s->used = false; s->zombie = false; }
+                }
+            }
+            return;
+
+        case TCP_FIN_WAIT_2:
+            if (flags & TCP_FLAG_RST) { tcp_reset_socket(s); return; }
+            if (payload_len > 0 && seq == s->rcv_nxt) {
+                size_t got = tcp_rx_enqueue(s, payload, payload_len);
+                s->rcv_nxt += (uint32_t)got;
+                tcp_emit_ack(s);
+            }
+            if (flags & TCP_FLAG_FIN) {
+                if (seq + payload_len == s->rcv_nxt) {
+                    s->rcv_nxt++;
+                    s->peer_fin = true;
+                    tcp_emit_ack(s);
+                    s->tcp_state = TCP_CLOSED;
+                    if (s->zombie) { s->used = false; s->zombie = false; }
+                }
+            }
+            return;
+
+        case TCP_CLOSE_WAIT:
+            if (flags & TCP_FLAG_RST) { tcp_reset_socket(s); return; }
+            /* Waiting for application to call close(). Ignore. */
+            return;
+
+        case TCP_LAST_ACK:
+            if (flags & TCP_FLAG_RST) { tcp_reset_socket(s); return; }
+            if ((flags & TCP_FLAG_ACK) && ack == s->snd_nxt) {
+                s->tcp_state = TCP_CLOSED;
+                if (s->zombie) { s->used = false; s->zombie = false; }
+            }
+            return;
+
+        case TCP_CLOSING:
+            if (flags & TCP_FLAG_RST) { tcp_reset_socket(s); return; }
+            if ((flags & TCP_FLAG_ACK) && ack == s->snd_nxt) {
+                s->tcp_state = TCP_CLOSED;
+                if (s->zombie) { s->used = false; s->zombie = false; }
             }
             return;
 
@@ -330,14 +458,101 @@ void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
         }
     }
 
-    /*
-     * No socket bound to dst_port — bounce an RST so the peer doesn't
-     * stay in SYN_SENT until its retransmission timer expires.
-     */
+    /* No matching socket — RST so the peer doesn't hang. */
     if (!(flags & TCP_FLAG_RST)) {
-        uint32_t reply_ack = seq + ((flags & TCP_FLAG_SYN) ? 1 : 0);
-        tcp_send(src_ip, src_port, dst_port,
-                  ack, reply_ack,
-                  TCP_FLAG_RST | TCP_FLAG_ACK, 0, NULL, 0);
+        uint32_t reply_ack = seq + payload_len +
+                              ((flags & TCP_FLAG_SYN) ? 1 : 0) +
+                              ((flags & TCP_FLAG_FIN) ? 1 : 0);
+        tcp_emit_rst(src_ip, src_port, dst_port, ack, reply_ack);
+    }
+}
+
+/* ================================================================ */
+/* TCP user-facing API (recv / send / close)                        */
+/* ================================================================ */
+
+int sock_recv(int sd, void *buf, size_t buf_len, uint32_t timeout_ms) {
+    sock_t *s = sock_at(sd);
+    if (!s) return -1;
+    if (s->type != OSNOS_SOCK_STREAM) return -1;
+
+    uint64_t deadline = timer_ms() + timeout_ms;
+    for (;;) {
+        cli();
+        if (s->tcp_rx_count > 0) {
+            size_t n = s->tcp_rx_count;
+            if (n > buf_len) n = buf_len;
+            uint8_t *out = (uint8_t *)buf;
+            for (size_t i = 0; i < n; i++) {
+                out[i] = s->tcp_rx[s->tcp_rx_head];
+                s->tcp_rx_head = (s->tcp_rx_head + 1) % SOCK_TCP_RX_BUF;
+            }
+            s->tcp_rx_count -= (uint32_t)n;
+            sti();
+            return (int)n;
+        }
+        /* Buffer empty: EOF if peer has closed, else timeout/wait. */
+        if (s->peer_fin || s->tcp_state == TCP_CLOSED) {
+            sti();
+            return 0;
+        }
+        sti();
+        if (timer_ms() >= deadline) return -2;
+    }
+}
+
+int sock_send(int sd, const void *buf, size_t len) {
+    sock_t *s = sock_at(sd);
+    if (!s) return -1;
+    if (s->type != OSNOS_SOCK_STREAM) return -1;
+    if (s->tcp_state != TCP_ESTABLISHED && s->tcp_state != TCP_CLOSE_WAIT) {
+        return -1;
+    }
+
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t sent = 0;
+    while (sent < len) {
+        size_t chunk = len - sent;
+        if (chunk > TCP_MSS) chunk = TCP_MSS;
+
+        if (!tcp_send(s->remote_ip, s->remote_port, s->local_port,
+                       s->snd_nxt, s->rcv_nxt,
+                       TCP_FLAG_ACK | TCP_FLAG_PSH,
+                       tcp_advertised_window(s),
+                       p + sent, chunk)) {
+            return sent > 0 ? (int)sent : -1;
+        }
+        s->snd_nxt += (uint32_t)chunk;
+        sent += chunk;
+    }
+    return (int)sent;
+}
+
+int sock_close_tcp(int sd) {
+    sock_t *s = sock_at(sd);
+    if (!s) return -1;
+    if (s->type != OSNOS_SOCK_STREAM) return -1;
+
+    switch (s->tcp_state) {
+    case TCP_ESTABLISHED:
+        tcp_emit_fin_ack(s);
+        s->tcp_state = TCP_FIN_WAIT_1;
+        s->zombie = true;
+        return 0;
+    case TCP_CLOSE_WAIT:
+        tcp_emit_fin_ack(s);
+        s->tcp_state = TCP_LAST_ACK;
+        s->zombie = true;
+        return 0;
+    case TCP_LISTEN:
+    case TCP_CLOSED:
+        cli();
+        s->used = false;
+        sti();
+        return 0;
+    default:
+        /* Mid-handshake or already closing — let it drain. */
+        s->zombie = true;
+        return 0;
     }
 }
