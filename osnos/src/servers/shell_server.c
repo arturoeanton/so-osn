@@ -8,6 +8,7 @@
 #include "../fs/vfs.h"
 #include "../net/arp.h"
 #include "../net/eth.h"
+#include "../net/icmp.h"
 #include "../include/osnos_dirent.h"
 #include "../include/osnos_fcntl.h"
 #include "../include/osnos_elf.h"
@@ -330,6 +331,7 @@ static void cmd_ps(const char *args);
 static void cmd_mem(const char *args);
 static void cmd_mount(const char *args);
 static void cmd_arp(const char *args);
+static void cmd_ping(const char *args);
 static void cmd_exec(const char *args);
 static void cmd_kill(const char *args);
 static void cmd_neof(const char *args);
@@ -372,6 +374,7 @@ static const shell_command_t commands[] = {
     CMD("mem",     cmd_mem,     "mem"),
     CMD("mount",   cmd_mount,   "mount"),
     CMD("arp",     cmd_arp,     "arp [IP] (default: gateway)"),
+    CMD("ping",    cmd_ping,    "ping IP (one ICMP echo, 1s timeout)"),
     CMD("exec",    cmd_exec,    "exec /bin/PROG [args] [&]"),
     CMD("kill",    cmd_kill,    "kill PID"),
     CMD("neof",    cmd_neof,    "neof"),
@@ -1997,6 +2000,47 @@ static void cmd_arp(const char *args) {
         if (m < 5) os_strlcat(line, ":", sizeof(line));
     }
     os_strlcat(line, "\n", sizeof(line));
+    shell_send_console(line);
+    prompt();
+}
+
+static void cmd_ping(const char *args) {
+    while (*args == ' ' || *args == '\t') args++;
+
+    uint32_t ip;
+    if (*args == 0 || !parse_ipv4(args, &ip)) {
+        shell_send_console_color("\nusage: ping IP\n", 0xff5555);
+        prompt();
+        return;
+    }
+
+    char line[128];
+    line[0] = 0;
+    os_strlcat(line, "\nping ", sizeof(line));
+    char num[8];
+    for (int i = 3; i >= 0; i--) {
+        os_format_u64((ip >> (i * 8)) & 0xFF, num, sizeof(num));
+        os_strlcat(line, num, sizeof(line));
+        if (i > 0) os_strlcat(line, ".", sizeof(line));
+    }
+    os_strlcat(line, " ...\n", sizeof(line));
+    shell_send_console(line);
+
+    uint64_t rtt = 0;
+    /* Pick id/seq from timer for cheap uniqueness across pings. */
+    uint16_t id  = (uint16_t)(timer_ms() & 0xFFFF);
+    uint16_t seq = 1;
+    if (!icmp_ping(ip, id, seq, /*timeout_ms=*/1000, &rtt)) {
+        shell_send_console_color("timeout\n", 0xff5555);
+        prompt();
+        return;
+    }
+
+    line[0] = 0;
+    os_strlcat(line, "reply: time=", sizeof(line));
+    os_format_u64(rtt, num, sizeof(num));
+    os_strlcat(line, num, sizeof(line));
+    os_strlcat(line, " ms\n", sizeof(line));
     shell_send_console(line);
     prompt();
 }

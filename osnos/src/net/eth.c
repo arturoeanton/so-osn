@@ -2,6 +2,7 @@
 
 #include "../drivers/rtl8139.h"
 #include "arp.h"
+#include "ip.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -37,7 +38,9 @@ void net_rx(const uint8_t *frame, size_t len) {
     case ETHERTYPE_ARP:
         arp_handle(payload, plen);
         break;
-    /* ETHERTYPE_IPV4 lands here in 8.5.3 */
+    case ETHERTYPE_IPV4:
+        ip_handle(payload, plen);
+        break;
     default:
         /* Unknown ethertype — silently drop. */
         break;

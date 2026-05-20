@@ -817,8 +817,76 @@ OK 8.5.1 PCI scan + RTL8139 driver — VERIFICADO en QEMU
      QEMU), io_base 0xc000, irq_line 11. Sin tráfico al boot,
      irqs=0 esperado (se van a mover en 8.5.2 cuando enviemos ARP).
 
-TODO 8.5.2 Ethernet + ARP — siguiente sub-fase
-TODO 8.5.3 IPv4 + ICMP echo
+OK 8.5.2 Ethernet + ARP — VERIFICADO en QEMU
+   - src/drivers/rtl8139: extendido con rtl8139_set_rx_callback. El
+     drain_rx llama el callback registrado pasando el frame ya sin
+     el trailer CRC. Callback corre en IRQ context con IRQs enabled.
+   - src/net/eth.{c,h}: Ethernet II framing.
+     - ETH_HEADER_SIZE=14, ETHERTYPE_IPV4=0x0800, ETHERTYPE_ARP=0x0806.
+     - eth_broadcast_mac = FF:FF:FF:FF:FF:FF constante.
+     - net_init: registra net_rx como callback del driver, llama
+       arp_init. Silent-fail si no hay NIC.
+     - net_rx(frame, len): parsea ethertype del header (offset 12..13,
+       big-endian), dispatcha a arp_handle por ahora; ETHERTYPE_IPV4
+       cae en default (handled en 8.5.3).
+     - eth_send(dst_mac, ethertype, payload, len): copia 14 bytes
+       de header (dst + nuestra src MAC vía rtl8139_mac + ethertype
+       BE) + payload, manda vía rtl8139_tx. Stack-local buffer
+       hasta ETH_MAX_PAYLOAD=1500.
+     - Config estática: LOCAL_IP 10.0.2.15, GATEWAY 10.0.2.2,
+       NETMASK 255.255.255.0 (defaults slirp).
+   - src/net/arp.{c,h}:
+     - ARP wire layout (28 bytes): htype/ptype/hlen/plen/oper +
+       sha/spa/tha/tpa. Todos los multi-byte fields BE.
+     - Cache 8 entries: { valid, ip (host order), mac[6], last_seen_ms }.
+       Insert con LRU eviction sobre last_seen_ms. Lookups cli/sti-
+       guarded porque writes vienen del IRQ.
+     - arp_send_request(ip): broadcast con oper=1, tha=0.
+     - arp_send_reply(target_mac, target_ip): unicast con oper=2.
+     - arp_handle: valida htype/ptype/hlen/plen, popula cache con
+       sha/spa (todo request o reply nos enseña algo nuevo), responde
+       si oper=REQUEST y tpa == nuestra IP.
+     - arp_resolve(ip, mac_out, timeout_ms): cache check primero;
+       si miss, envía request y busy-polls timer_ms() hasta hit o
+       deadline. Funciona porque el IRQ del NIC corre asíncrono
+       y actualiza la cache.
+     - arp_dump(out): texto human-readable para /sys/arp.
+   - Sysfs nuevo: /sys/arp (cache + IPs locales).
+   - Shell nuevo: comando `arp [IP]` (default = gateway). Parser
+     dotted-quad propio (parse_ipv4), imprime MAC en formato
+     `xx:xx:xx:xx:xx:xx`.
+   - kmain: net_init() después de rtl8139_init.
+   - Verificado: `arp` desde shell → /sys/net muestra
+     tx_packets/rx_packets/irqs incrementados, /sys/arp lista
+     10.0.2.2 con su MAC.
+OK 8.5.3 IPv4 + ICMP echo — VERIFICADO en QEMU
+   - src/net/ip.{c,h}: header de 20 bytes (sin opciones, IHL=5), TTL
+     fijo en 64. Routing trivial: si dst está en el mismo /24 que
+     local_ip → ARP del dst; si no → ARP del gateway. ip_send
+     llama arp_resolve(next_hop, 500ms) y arma el frame Ethernet
+     vía eth_send.
+   - ip_checksum: RFC 1071 — sum de 16-bit words BE + carry fold +
+     ones complement. Mismo helper sirve para generar (con field=0)
+     y para validar (sum sobre header completo debe dar 0).
+   - ip_handle: valida version=4, IHL>=5, total_len<=frame, checksum.
+     Dropea si el dst no es nuestra IP ni broadcast (255.255.255.255).
+     Dispatcha por byte protocol: 1=ICMP (8.5.3), 6=TCP (8.5.5),
+     17=UDP (8.5.4).
+   - src/net/icmp.{c,h}: echo request/reply (type 8/0, code 0).
+     icmp_handle responde automáticamente a requests dirigidos a
+     nosotros (copia payload, type=0, recalcula checksum). Para
+     replies, hace match contra el `pending` slot (src_ip + id + seq)
+     y setea replied=true para despertar a icmp_ping.
+   - icmp_ping(dst, id, seq, timeout_ms, *rtt_out): synchronous —
+     send + busy-poll de timer_ms() hasta hit o deadline. Payload
+     fijo de 56 bytes (ping clásico, total 64 incluyendo header).
+   - Shell nuevo: comando `ping IP` con parser dotted-quad reutilizado
+     de cmd_arp. Imprime "reply: time=N ms" o "timeout".
+   - /sys/net extendido: counters de ip rx/tx/drop e icmp rx/tx.
+   - Verificado: ping al gateway 10.0.2.2 (10ms primera vez con ARP
+     resolve, 0ms con cache) y ping a 10.0.2.3 (DNS slirp) andando.
+     ping a 10.0.2.15 (self) hace timeout — esperado: el chip no
+     devuelve sus propios frames y slirp tampoco bouncea localhost.
 TODO 8.5.4 UDP socket + syscalls
 TODO 8.5.5 TCP state machine
 TODO 8.5.6 Syscalls wireados + libc

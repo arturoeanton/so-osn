@@ -6,6 +6,8 @@
 #include "../fs/ramfs.h"
 #include "../lib/string.h"
 #include "../net/arp.h"
+#include "../net/icmp.h"
+#include "../net/ip.h"
 #include "../micro/idt.h"
 #include "../micro/ipc.h"
 #include "../micro/kmalloc.h"
@@ -387,6 +389,21 @@ static void gen_net(char *out, size_t out_size) {
     os_strlcat(out, num, out_size);
     os_strlcat(out, "\nerrors:     ", out_size);
     os_format_u64(rtl8139_errors(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\n\nip rx/tx/drop: ", out_size);
+    os_format_u64(ip_rx_packets(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, " / ", out_size);
+    os_format_u64(ip_tx_packets(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, " / ", out_size);
+    os_format_u64(ip_rx_drops(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\nicmp rx/tx:    ", out_size);
+    os_format_u64(icmp_rx_packets(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, " / ", out_size);
+    os_format_u64(icmp_tx_packets(), num, sizeof(num));
     os_strlcat(out, num, out_size);
     os_strlcat(out, "\n", out_size);
 }
