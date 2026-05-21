@@ -45,5 +45,6 @@ typedef enum {
     OSNOS_ENETDOWN       = 100,
     OSNOS_ECONNRESET     = 104,
     OSNOS_ETIMEDOUT      = 110,
-    OSNOS_ECONNREFUSED   = 111
+    OSNOS_ECONNREFUSED   = 111,
+    OSNOS_EINPROGRESS    = 115  /* connect() still negotiating */
 } osnos_status_t;

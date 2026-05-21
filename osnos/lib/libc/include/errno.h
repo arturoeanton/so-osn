@@ -42,3 +42,4 @@ extern int errno;
 #define ECONNRESET    104
 #define ETIMEDOUT     110
 #define ECONNREFUSED  111
+#define EINPROGRESS   115

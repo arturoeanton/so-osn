@@ -1302,13 +1302,68 @@ OK 8.5.10b httpd multi-curl bug post-mortem — RESUELTO
      parece correcto, mirá el driver. Especialmente si los counters
      IP tx ≠ NIC tx (señal de eth_send fallando).
 
-TODO 8.5.13 select() / accept blocking real via task suspend
-            (hoy es busy-poll en kernel; las syscalls que blockean
-            por mucho tiempo no dejan correr otros servers
-            cooperativos sin libc wrapping con nanosleep como hicimos
-            en select; Ctrl+C en accept tampoco llega al fg_pid).
-            Se desbloquea automáticamente cuando FASE 9 tenga
-            preempción en CPL=0 (hoy solo CPL=3).
+OK 8.5.13 task-suspend para blocking syscalls — VERIFICADO en QEMU
+   El problema: el busy-poll del kernel monopolizaba el CPU en CPL=0,
+   los servers cooperativos (keyboard, shell) nunca podían correr, y
+   por lo tanto Ctrl+C nunca llegaba al fg_pid durante accept/recv/
+   connect que se quedaban pegados forever.
+   El patrón: mover el loop a userspace. Los syscalls se hacen
+   non-blocking (single-shot poll, retornan EAGAIN/EINPROGRESS), y
+   la libc loopea con nanosleep entre intentos. Mismo modelo que
+   ya aplicamos en select().
+   - osnos_status.h: + OSNOS_EINPROGRESS=115 (Linux value).
+   - errno.h libc: + EINPROGRESS=115.
+   - sock_connect refactorizado para re-entry:
+     - state CLOSED + remote_port==0 → fire SYN, state SYN_SENT,
+       devuelve -2 (in progress).
+     - state SYN_SENT → devuelve -2.
+     - state ESTABLISHED → devuelve 0.
+     - state CLOSED después de SYN previo (remote_port != 0) →
+       devuelve -1 (refused / RST).
+     Ya no busy-polla — single step y devuelve.
+   - sys_accept: pasa timeout=0 a sock_accept. -2 → EAGAIN.
+   - sys_recvfrom: pasa timeout=0. -2 → EAGAIN. Stream y datagram.
+   - sys_connect: 0 → 0; -2 → EINPROGRESS; -1 → ECONNREFUSED.
+   - libc accept/recv/recvfrom/connect: loop calling syscall.
+     - EAGAIN o EINPROGRESS → osnos_yield_ms(10 o 20) entre intentos.
+     - Otro errno → propaga normal.
+     - 0/n>0 → success.
+   - osnos_yield_ms helper hace nanosleep que vía sys_nanosleep
+     suspende el task vía sched_resume_jump (FASE 9.3). Otros tasks
+     READY corren. Cuando el timer dispara wakeup, scheduler nos
+     re-dispatcha.
+   - Verificado: `exec /bin/httpd` + 8 curls en sucesión (todas
+     funcionando), luego Ctrl+C en QEMU → httpd matado limpiamente,
+     vuelta al shell. Ya no se cuelga el sistema.
+OK 8.5.14 fd cleanup en kill/exit path — VERIFICADO en QEMU
+   Cuando un task termina (sea por sys_exit, fault recovery, o Ctrl+C
+   vía kill_pending), proc_exit_current_user ahora itera fds 3..MAX-1
+   y los cierra antes del address-space teardown:
+   - is_socket → sock_close (que dispatcha a sock_close_tcp en TCP,
+     emitiendo FIN o liberando directo si LISTEN/CLOSED).
+   - todos → fd_free (libera slot del fd table).
+   Sin esto, matar httpd con Ctrl+C dejaba el listen socket vivo,
+   reusando el puerto causaba EADDRINUSE al re-bindear.
+   Verificado: exec httpd → Ctrl+C → exec httpd otra vez → bind OK,
+   sirve nuevas curls. La tabla fd queda completamente limpia.
+
+OK 8.5.X cleanup de instrumentación post-mortem — VERIFICADO en QEMU
+   Removidos los counters diagnostic introducidos durante la caza del
+   bug 8.5.10b (RTL8139 tx-slot saturation):
+   - g_free_udp_close / g_free_*_zombie / g_free_close_listen /
+     g_free_tick_maxretx (8 counters, ~64 bytes BSS).
+   - g_last_send_fail_* (5 ints + 5 getters).
+   - g_sendto_fail_* en syscall.c (4 ints + 4 getters).
+   - fd_peek_raw (helper sólo usado por el diag de syscall.c).
+   - Sentinel `state = -100 - tcp_state` en sock_send cuando tcp_send
+     fallaba.
+   - Dump verboso en /sys/net (~30 líneas de format) — vuelve a ser
+     compacto con solo tcp retx/drops.
+   - Build ~7 KB más chico.
+   Mantenidos: sock_tcp_retx_total/drops (métrica legítima), getters
+   públicos sock_tcp_state_int / sock_tcp_retx_len / sock_tcp_retx_count
+   / sock_tcp_get_local_port (usados por los 17 tests SOCK del
+   `test` command).
 
 (IPv6 movido a ROADMAP_APENDICE.md como item de "Networking
  avanzado" — no bloquea nada del roadmap principal.)

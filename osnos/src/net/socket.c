@@ -74,26 +74,6 @@ typedef struct {
 static uint64_t g_retx_total;
 static uint64_t g_retx_drops;
 
-/* Debug counters for tracking WHO is freeing socket slots. Each path
- * that sets `s->used = false` bumps a different counter. Dumped via
- * /sys/net so we can see which one fires on the httpd second-curl bug. */
-static uint64_t g_free_udp_close;
-static uint64_t g_free_tcp_reset_zombie;
-static uint64_t g_free_finwait1_zombie;
-static uint64_t g_free_finwait2_zombie;
-static uint64_t g_free_lastack_zombie;
-static uint64_t g_free_closing_zombie;
-static uint64_t g_free_close_listen;
-static uint64_t g_free_tick_maxretx;
-
-/* Last reason sock_send returned -1. Helps narrow down the httpd
- * second-curl bug. Updated on every -1 return from sock_send. */
-static int g_last_send_fail_sd      = -1;
-static int g_last_send_fail_used    = -1;   /* 1 if slot was used, 0 if not */
-static int g_last_send_fail_type    = -1;
-static int g_last_send_fail_state   = -1;
-static int g_last_send_fail_parent  = -2;   /* -2 means "never set" */
-
 static sock_t socks[SOCK_MAX];
 static uint16_t ephemeral_next = 40000;
 
@@ -207,7 +187,6 @@ int sock_close(int sd) {
         return sock_close_tcp(sd);
     }
     cli();
-    g_free_udp_close++;
     s->used       = false;
     s->local_port = 0;
     s->rx_count   = 0;
@@ -342,12 +321,37 @@ int sock_listen(int sd, int backlog) {
 
 static uint16_t tcp_advertised_window(const sock_t *s);   /* fwd ref */
 
+/*
+ * Re-entrant connect step. Drives the state machine forward by one
+ * iteration:
+ *   - state CLOSED  + no remote yet → fire SYN, transition to SYN_SENT,
+ *                                      return -2 (in progress).
+ *   - state SYN_SENT                → return -2.
+ *   - state ESTABLISHED             → return 0.
+ *   - state CLOSED after handshake  → return -1 (refused / RST).
+ *   - bad arguments                 → return -1.
+ *
+ * Called from sys_connect in a libc loop with nanosleep between
+ * iterations — that yields to the scheduler so keyboard/shell can run
+ * and Ctrl+C is delivered.
+ */
 int sock_connect(int sd, uint32_t dst_ip, uint16_t dst_port,
                   uint32_t timeout_ms) {
+    (void)timeout_ms;     /* kept for ABI symmetry; libc owns the timeout */
     sock_t *s = sock_at(sd);
     if (!s) return -1;
     if (s->type != OSNOS_SOCK_STREAM) return -1;
-    if (s->tcp_state != TCP_CLOSED) return -1;
+
+    if (s->tcp_state == TCP_ESTABLISHED) return 0;
+    if (s->tcp_state == TCP_SYN_SENT)    return -2;
+    if (s->tcp_state != TCP_CLOSED)      return -1;
+
+    /* state == CLOSED — but did we already send a SYN that bounced? */
+    if (s->remote_port != 0) {
+        /* SYN was sent + we got RST → CLOSED back. Permanent failure. */
+        return -1;
+    }
+
     if (dst_ip == 0 || dst_port == 0) return -1;
 
     /* Auto-bind to an ephemeral port so the SYN has a meaningful src. */
@@ -364,8 +368,6 @@ int sock_connect(int sd, uint32_t dst_ip, uint16_t dst_port,
     s->tcp_state = TCP_SYN_SENT;
     sti();
 
-    /* Fire the SYN. tcp_advertised_window reads volatile fields, no
-     * issue if it runs with the state half-set. */
     if (!tcp_send(dst_ip, dst_port, s->local_port,
                    s->snd_nxt, 0,
                    TCP_FLAG_SYN, tcp_advertised_window(s),
@@ -379,18 +381,8 @@ int sock_connect(int sd, uint32_t dst_ip, uint16_t dst_port,
     }
     s->snd_nxt++;     /* SYN consumes 1 seq */
 
-    /* Block until handshake completes. The NIC IRQ flips tcp_state to
-     * ESTABLISHED when the SYN-ACK round-trip closes, or CLOSED on RST. */
-    volatile sock_t *vs = (volatile sock_t *)s;
-    uint64_t deadline = timer_ms() + timeout_ms;
-    while (timer_ms() < deadline) {
-        if (poll_interrupted()) return -1;
-        tcp_state_t st = vs->tcp_state;
-        if (st == TCP_ESTABLISHED) return 0;
-        if (st == TCP_CLOSED)      return -1;
-    }
-    /* Timeout — leave the socket roughly intact but signal failure. */
-    return -1;
+    /* Hand control back to libc; it'll re-call us until ESTABLISHED. */
+    return -2;
 }
 
 int sock_accept(int listen_sd,
@@ -503,7 +495,6 @@ static void tcp_reset_socket(sock_t *s) {
     cli();
     if (s->zombie) {
         /* User already called close() — free the slot for real. */
-        g_free_tcp_reset_zombie++;
         s->used = false;
         s->zombie = false;
         s->parent_sd = -1;
@@ -746,7 +737,7 @@ void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
                     /* Simultaneous close path or just-after-our-FIN
                      * → CLOSED (we skip TIME_WAIT for simplicity). */
                     s->tcp_state = TCP_CLOSED;
-                    if (s->zombie) { g_free_finwait1_zombie++; s->used = false; s->zombie = false; }
+                    if (s->zombie) { s->used = false; s->zombie = false; }
                 }
             }
             return;
@@ -764,7 +755,7 @@ void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
                     s->peer_fin = true;
                     tcp_emit_ack(s);
                     s->tcp_state = TCP_CLOSED;
-                    if (s->zombie) { g_free_finwait2_zombie++; s->used = false; s->zombie = false; }
+                    if (s->zombie) { s->used = false; s->zombie = false; }
                 }
             }
             return;
@@ -778,7 +769,7 @@ void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
             if (flags & TCP_FLAG_RST) { tcp_reset_socket(s); return; }
             if ((flags & TCP_FLAG_ACK) && ack == s->snd_nxt) {
                 s->tcp_state = TCP_CLOSED;
-                if (s->zombie) { g_free_lastack_zombie++; s->used = false; s->zombie = false; }
+                if (s->zombie) { s->used = false; s->zombie = false; }
             }
             return;
 
@@ -786,7 +777,7 @@ void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
             if (flags & TCP_FLAG_RST) { tcp_reset_socket(s); return; }
             if ((flags & TCP_FLAG_ACK) && ack == s->snd_nxt) {
                 s->tcp_state = TCP_CLOSED;
-                if (s->zombie) { g_free_closing_zombie++; s->used = false; s->zombie = false; }
+                if (s->zombie) { s->used = false; s->zombie = false; }
             }
             return;
 
@@ -841,33 +832,10 @@ int sock_recv(int sd, void *buf, size_t buf_len, uint32_t timeout_ms) {
 }
 
 int sock_send(int sd, const void *buf, size_t len) {
-    /* Inspect the raw slot regardless of `used`, so failure diagnostics
-     * see if the user is calling us against a freed slot. */
-    int valid_idx = (sd >= 0 && sd < SOCK_MAX);
-    sock_t *raw = valid_idx ? &socks[sd] : 0;
     sock_t *s = sock_at(sd);
-    if (!s) {
-        g_last_send_fail_sd    = sd;
-        g_last_send_fail_used  = raw ? (raw->used ? 1 : 0) : -1;
-        g_last_send_fail_type  = raw ? (int)raw->type : -1;
-        g_last_send_fail_state = raw ? (int)raw->tcp_state : -1;
-        g_last_send_fail_parent= raw ? raw->parent_sd : -2;
-        return -1;
-    }
-    if (s->type != OSNOS_SOCK_STREAM) {
-        g_last_send_fail_sd    = sd;
-        g_last_send_fail_used  = 1;
-        g_last_send_fail_type  = (int)s->type;
-        g_last_send_fail_state = (int)s->tcp_state;
-        g_last_send_fail_parent= s->parent_sd;
-        return -1;
-    }
+    if (!s) return -1;
+    if (s->type != OSNOS_SOCK_STREAM) return -1;
     if (s->tcp_state != TCP_ESTABLISHED && s->tcp_state != TCP_CLOSE_WAIT) {
-        g_last_send_fail_sd    = sd;
-        g_last_send_fail_used  = 1;
-        g_last_send_fail_type  = (int)s->type;
-        g_last_send_fail_state = (int)s->tcp_state;
-        g_last_send_fail_parent= s->parent_sd;
         return -1;
     }
 
@@ -883,13 +851,6 @@ int sock_send(int sd, const void *buf, size_t len) {
                        TCP_FLAG_ACK | TCP_FLAG_PSH,
                        tcp_advertised_window(s),
                        p + sent, chunk)) {
-            /* Diagnostic — same as the other sock_send failure exits.
-             * Record TCP state/parent so /sys/net shows the cause. */
-            g_last_send_fail_sd    = sd;
-            g_last_send_fail_used  = 1;
-            g_last_send_fail_type  = (int)s->type;
-            g_last_send_fail_state = -100 - (int)s->tcp_state;  /* sentinel: tcp_send failed in this state */
-            g_last_send_fail_parent= s->parent_sd;
             return sent > 0 ? (int)sent : -1;
         }
         s->snd_nxt += (uint32_t)chunk;
@@ -929,7 +890,6 @@ int sock_close_tcp(int sd) {
     case TCP_LISTEN:
     case TCP_CLOSED:
         cli();
-        g_free_close_listen++;
         s->used = false;
         sti();
         return 0;
@@ -968,7 +928,7 @@ void sock_tick(uint64_t now_ms) {
             s->tcp_state = TCP_CLOSED;
             s->retx_len = 0;
             g_retx_drops++;
-            if (s->zombie) { g_free_tick_maxretx++; s->used = false; s->zombie = false; }
+            if (s->zombie) { s->used = false; s->zombie = false; }
             continue;
         }
 
@@ -986,21 +946,6 @@ void sock_tick(uint64_t now_ms) {
 
 uint64_t sock_tcp_retx_total(void) { return g_retx_total; }
 uint64_t sock_tcp_retx_drops(void) { return g_retx_drops; }
-
-uint64_t sock_free_udp_close        (void) { return g_free_udp_close; }
-uint64_t sock_free_tcp_reset_zombie (void) { return g_free_tcp_reset_zombie; }
-uint64_t sock_free_finwait1_zombie  (void) { return g_free_finwait1_zombie; }
-uint64_t sock_free_finwait2_zombie  (void) { return g_free_finwait2_zombie; }
-uint64_t sock_free_lastack_zombie   (void) { return g_free_lastack_zombie; }
-uint64_t sock_free_closing_zombie   (void) { return g_free_closing_zombie; }
-uint64_t sock_free_close_listen     (void) { return g_free_close_listen; }
-uint64_t sock_free_tick_maxretx     (void) { return g_free_tick_maxretx; }
-
-int sock_last_send_fail_sd     (void) { return g_last_send_fail_sd; }
-int sock_last_send_fail_used   (void) { return g_last_send_fail_used; }
-int sock_last_send_fail_type   (void) { return g_last_send_fail_type; }
-int sock_last_send_fail_state  (void) { return g_last_send_fail_state; }
-int sock_last_send_fail_parent (void) { return g_last_send_fail_parent; }
 
 int sock_tcp_state_int(int sd) {
     sock_t *s = sock_at(sd);

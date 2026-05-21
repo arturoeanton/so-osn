@@ -13,6 +13,7 @@
 #include "../micro/task.h"
 #include "../micro/tss.h"
 #include "../micro/vmm.h"
+#include "../net/socket.h"
 #include "builtin.h"
 
 #define USER_CODE_VIRT    0x400000ULL
@@ -432,6 +433,26 @@ void proc_exit_current_user(int exit_code) {
      */
     uint64_t *user_pml4   = t->pml4;
     void     *kstack_base = t->kernel_stack_base;
+
+    /*
+     * Close every fd the dying task held open. Without this, a task
+     * killed mid-blocking-syscall (e.g. httpd in accept loop killed by
+     * Ctrl+C) would leak its listen socket, its accepted children, any
+     * open files. Most painfully, the listen socket's local_port stays
+     * occupied so the next re-exec gets EADDRINUSE at bind().
+     *
+     * The fd table is global today (no per-process namespace), but the
+     * shell server doesn't open fds (talks via IPC), so it's safe to
+     * sweep every non-stdio entry on exit.
+     */
+    for (int fd = 3; fd < OSNOS_MAX_FDS; fd++) {
+        osnos_fd_t *f = fd_get(fd);
+        if (!f) continue;
+        if (f->is_socket && f->sock_idx >= 0) {
+            sock_close(f->sock_idx);
+        }
+        fd_free(fd);
+    }
 
     t->state             = TASK_DEAD;
     t->pml4              = 0;

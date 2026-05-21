@@ -135,20 +135,37 @@ int listen(int sockfd, int backlog) {
     return 0;
 }
 
+/* Sleep a short slice between non-blocking syscall retries. nanosleep
+ * properly suspends the task (FASE 9.3 task_block + sched_resume_jump),
+ * so other ready tasks — keyboard, shell, server ticks — get to run.
+ * That's what makes Ctrl+C arrive while an app blocks on accept/recv. */
+static void osnos_yield_ms(unsigned ms) {
+    struct timespec ts;
+    ts.tv_sec  = (long)(ms / 1000);
+    ts.tv_nsec = (long)((ms % 1000) * 1000000);
+    nanosleep(&ts, NULL);
+}
+
 int accept(int sockfd, struct sockaddr *addr, socklen_t *len) {
-    long r = osnos_syscall3(SYS_ACCEPT, sockfd, (long)addr, (long)len);
-    if (r < 0) { errno = (int)(-r); return -1; }
-    return (int)r;
+    for (;;) {
+        long r = osnos_syscall3(SYS_ACCEPT, sockfd, (long)addr, (long)len);
+        if (r >= 0) return (int)r;
+        if (-r != EAGAIN) { errno = (int)(-r); return -1; }
+        osnos_yield_ms(20);
+    }
 }
 
 int connect(int sockfd, const struct sockaddr *addr, socklen_t len) {
-    long r = osnos_syscall3(SYS_CONNECT, sockfd, (long)addr, (long)len);
-    if (r < 0) { errno = (int)(-r); return -1; }
-    return 0;
+    for (;;) {
+        long r = osnos_syscall3(SYS_CONNECT, sockfd, (long)addr, (long)len);
+        if (r == 0) return 0;
+        if (-r != EINPROGRESS) { errno = (int)(-r); return -1; }
+        osnos_yield_ms(10);
+    }
 }
 
 ssize_t send(int sockfd, const void *buf, size_t len, int flags) {
-    /* Linux convention: send(fd,buf,len,flags) == sendto(...,NULL,0). */
+    /* send rarely blocks (kernel send path is sync). No retry loop here. */
     long r = osnos_syscall6(SYS_SENDTO,
                               sockfd, (long)buf, (long)len, flags,
                               0L, 0L);
@@ -157,11 +174,14 @@ ssize_t send(int sockfd, const void *buf, size_t len, int flags) {
 }
 
 ssize_t recv(int sockfd, void *buf, size_t len, int flags) {
-    long r = osnos_syscall6(SYS_RECVFROM,
-                              sockfd, (long)buf, (long)len, flags,
-                              0L, 0L);
-    if (r < 0) { errno = (int)(-r); return -1; }
-    return (ssize_t)r;
+    for (;;) {
+        long r = osnos_syscall6(SYS_RECVFROM,
+                                  sockfd, (long)buf, (long)len, flags,
+                                  0L, 0L);
+        if (r >= 0) return (ssize_t)r;
+        if (-r != EAGAIN) { errno = (int)(-r); return -1; }
+        osnos_yield_ms(20);
+    }
 }
 
 ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
@@ -175,11 +195,14 @@ ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
 
 ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags,
                  struct sockaddr *from, socklen_t *fromlen) {
-    long r = osnos_syscall6(SYS_RECVFROM,
-                              sockfd, (long)buf, (long)len, flags,
-                              (long)from, (long)fromlen);
-    if (r < 0) { errno = (int)(-r); return -1; }
-    return (ssize_t)r;
+    for (;;) {
+        long r = osnos_syscall6(SYS_RECVFROM,
+                                  sockfd, (long)buf, (long)len, flags,
+                                  (long)from, (long)fromlen);
+        if (r >= 0) return (ssize_t)r;
+        if (-r != EAGAIN) { errno = (int)(-r); return -1; }
+        osnos_yield_ms(20);
+    }
 }
 
 ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {

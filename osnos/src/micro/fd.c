@@ -78,11 +78,6 @@ osnos_fd_t *fd_get(int fd) {
     return &fds[fd];
 }
 
-osnos_fd_t *fd_peek_raw(int fd) {
-    if (fd < 0 || fd >= OSNOS_MAX_FDS) return 0;
-    return &fds[fd];
-}
-
 /* ---- stdin ring buffer ---- */
 
 void stdin_push(char c) {

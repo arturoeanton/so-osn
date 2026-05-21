@@ -681,12 +681,14 @@ int64_t sys_connect(int fd, const void *addr, uint32_t addrlen) {
     int64_t e;
     if (!unpack_sockaddr_in(addr, addrlen, &ip, &port, &e)) return e;
 
-    /* 5-second handshake timeout — Linux default is minutes, but for
-     * a hobby stack on QEMU localhost that's overkill. */
-    if (sock_connect(f->sock_idx, ip, port, 5000) != 0) {
-        return err(OSNOS_ECONNREFUSED);
-    }
-    return 0;
+    /* Non-blocking single-step: 0 = ESTABLISHED, -2 = still in progress
+     * (SYN_SENT), -1 = refused / bad. libc retries on EINPROGRESS with
+     * nanosleep in between, which lets the scheduler dispatch other
+     * tasks (keyboard, shell) → Ctrl+C is deliverable mid-connect. */
+    int r = sock_connect(f->sock_idx, ip, port, 0);
+    if (r == 0)  return 0;
+    if (r == -2) return err(OSNOS_EINPROGRESS);
+    return err(OSNOS_ECONNREFUSED);
 }
 
 /*
@@ -821,8 +823,11 @@ int64_t sys_accept(int fd, void *addr, void *addrlen_ptr) {
 
     uint32_t peer_ip = 0;
     uint16_t peer_port = 0;
-    int child_sd = sock_accept(f->sock_idx, &peer_ip, &peer_port, 0x7FFFFFFFu);
-    if (child_sd < 0) return err(OSNOS_EBADF);
+    /* Non-blocking single-shot. -2 = nothing in accept queue → EAGAIN.
+     * libc retries with nanosleep so other tasks run between polls. */
+    int child_sd = sock_accept(f->sock_idx, &peer_ip, &peer_port, 0);
+    if (child_sd == -2) return err(OSNOS_EAGAIN);
+    if (child_sd < 0)   return err(OSNOS_EBADF);
 
     int new_fd = fd_alloc();
     if (new_fd < 0) {
@@ -843,31 +848,11 @@ int64_t sys_accept(int fd, void *addr, void *addrlen_ptr) {
     return (int64_t)new_fd;
 }
 
-/* Diagnostic for the httpd-multi-curl bug — capture fd state the
- * moment send fails up here, before sock_send even gets called. */
-static int g_sendto_fail_fd        = -1;
-static int g_sendto_fail_fd_used   = -1;
-static int g_sendto_fail_is_socket = -1;
-static int g_sendto_fail_sock_idx  = -2;
-int sys_sendto_fail_fd       (void) { return g_sendto_fail_fd; }
-int sys_sendto_fail_fd_used  (void) { return g_sendto_fail_fd_used; }
-int sys_sendto_fail_is_socket(void) { return g_sendto_fail_is_socket; }
-int sys_sendto_fail_sock_idx (void) { return g_sendto_fail_sock_idx; }
-
 int64_t sys_sendto(int fd, const void *buf, size_t len, int flags,
                     const void *dst_addr, uint32_t addrlen) {
     (void)flags;
     osnos_fd_t *f = fd_get(fd);
-    if (!f || !f->is_socket) {
-        /* Grab whatever the slot looks like even if 'used' is false. */
-        extern osnos_fd_t *fd_peek_raw(int fd);
-        osnos_fd_t *raw = (fd >= 0 && fd < OSNOS_MAX_FDS) ? fd_peek_raw(fd) : 0;
-        g_sendto_fail_fd        = fd;
-        g_sendto_fail_fd_used   = raw ? (int)raw->used : -1;
-        g_sendto_fail_is_socket = raw ? (int)raw->is_socket : -1;
-        g_sendto_fail_sock_idx  = raw ? raw->sock_idx : -2;
-        return err(OSNOS_EBADF);
-    }
+    if (!f || !f->is_socket) return err(OSNOS_EBADF);
     if (!buf && len > 0)     return err(OSNOS_EFAULT);
 
     /* On a stream socket dst_addr is ignored — connection is already
@@ -903,25 +888,24 @@ int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
     if (!f || !f->is_socket) return err(OSNOS_EBADF);
     if (!buf && len > 0)     return err(OSNOS_EFAULT);
 
-    /* Stream sockets ignore src_addr (use getpeername). Easiest check:
-     * try sock_recv first; if it works, the socket is TCP. If it errors
-     * with -1, fall back to sock_recvfrom (datagram path). */
-    int n = sock_recv(f->sock_idx, buf, len, 0x7FFFFFFFu);
-    if (n != -1) {
-        /* Stream path used. peer info via getpeername in the future. */
-        if (n == -2) n = 0;     /* timeout — should never happen with INT_MAX */
+    /* Stream sockets ignore src_addr (use getpeername). Non-blocking
+     * single-shot; libc loops with nanosleep on EAGAIN. */
+    int n = sock_recv(f->sock_idx, buf, len, 0);
+    if (n == -2) return err(OSNOS_EAGAIN);
+    if (n >= 0) {
         if (src_addr && addrlen_ptr) {
             uint32_t *alenp = (uint32_t *)addrlen_ptr;
-            *alenp = 0;          /* not filled */
+            *alenp = 0;
         }
         return (int64_t)n;
     }
+    /* sock_recv returned -1 → not a stream socket; try datagram path. */
 
-    /* Datagram path. */
     uint32_t src_ip = 0;
     uint16_t src_port = 0;
-    n = sock_recvfrom(f->sock_idx, buf, len, &src_ip, &src_port, 0x7FFFFFFFu);
-    if (n < 0) return err(OSNOS_EBADF);
+    n = sock_recvfrom(f->sock_idx, buf, len, &src_ip, &src_port, 0);
+    if (n == -2) return err(OSNOS_EAGAIN);
+    if (n < 0)   return err(OSNOS_EBADF);
 
     if (src_addr && addrlen_ptr) {
         uint32_t *alenp = (uint32_t *)addrlen_ptr;

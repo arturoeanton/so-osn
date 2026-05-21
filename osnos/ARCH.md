@@ -36,6 +36,11 @@ ROADMAP eventualmente moverá los servers a ring 3.
 |   ipc_send / ipc_recv / ipc_recv_block                          |
 |   single shared queue, IPC_QUEUE_SIZE=64, payload 1024 bytes    |
 +----------------------------------------------------------------+
+|                          net/ stack                             |
+|  socket (UDP + full TCP state machine, accept queue, retx RTO)  |
+|  tcp -> ip -> eth (rtl8139)  +  arp (cache + ARP_TIMEOUT poll)  |
+|  icmp + udp delivered through socket layer to ring-3            |
++----------------------------------------------------------------+
 |                       micro/ core                               |
 |  task (16 slots), scheduler (cooperative + resume_jump), reaper |
 |  ipc, service, fd, extable, uaccess (fault-recoverable)         |
@@ -49,6 +54,8 @@ ROADMAP eventualmente moverá los servers a ring 3.
 |                          drivers/                               |
 |     keyboard (PS/2, scancode + Shift + Ctrl + arrows)           |
 |     framebuffer (linear FB + 8x8 bitmap font)                   |
+|     rtl8139 (PCI; PIO+DMA; 4 TX slots, RX ring; IRQ stub)       |
+|     block_ata (ATA PIO over IDE primary master, LBA28)          |
 +----------------------------------------------------------------+
 |                       Limine bootloader                         |
 +----------------------------------------------------------------+
@@ -134,6 +141,61 @@ shell_server_tick()
    |  prompt()
    v
 console_server_tick() renders the listing + prompt
+```
+
+## Flujo de un GET HTTP entrante (`curl http://localhost:8080/`)
+
+```
+host curl: TCP SYN -> 10.0.2.2:8080 (slirp gateway from guest's POV)
+   |
+   |  slirp NATs and bridges packet to guest @ 10.0.2.15:80
+   v
+RTL8139 chip receives frame
+   |  asserts IRQ 11
+   v
+rtl8139_irq_entry asm stub -> rtl8139_irq_handle (C)
+   |  reads ISR, drain_rx() walks RX ring
+   |  passes each frame to net_rx() with ethertype
+   v
+net_rx -> ip_handle (validates header, checksum) -> tcp_handle
+   |
+   v
+sock_tcp_handle_segment(src, dst, seq, ack, flags, payload)
+   |
+   |  2-pass lookup: matched LISTEN socket (TCP/80)
+   |  state machine: LISTEN + SYN -> alloc_child_for_syn
+   |  child socket initialized: SYN_RCVD, ISN, parent_sd
+   |  tcp_send(SYN-ACK)  via ip_send -> eth_send -> rtl8139_tx
+   |
+   |  ...host ACKs the SYN-ACK...
+   |  state machine: SYN_RCVD + ACK -> ESTABLISHED
+   |  push child idx into parent's accept_q
+   |
+   |  ...host sends "GET / HTTP/1.0\r\n..."...
+   |  state machine: ESTABLISHED + data -> enqueue in tcp_rx, ACK back
+   v
+[ring 3] httpd's accept() is busy-looping in libc:
+   |  syscall(SYS_ACCEPT) -> sock_accept -> dequeue -> returns child fd
+   |  syscall(SYS_RECVFROM) -> sock_recv -> drains tcp_rx
+   |
+   |  parses "GET /sd/index.html"
+   |  open("/sd/index.html") -> VFS -> fat_vfs_read -> block_ata_read_sector
+   |
+   |  send(fd, header) + stream chunks via send(fd, chunk)
+   v
+syscall(SYS_SENDTO) -> sock_send
+   |  tcp_send for each MSS-sized chunk
+   |  saves last segment in retx_buf for RTO retransmission
+   v
+ip_send -> eth_send -> rtl8139_tx
+   |  rtl8139_tx hunts free slot (avoids tx_cur saturation)
+   |  writes packet to TX_BUF, fires TSD with size
+   |  chip transmits + TOK IRQ when done
+   v
+host curl receives the response, renders HTML.
+   |  half-close (FIN) from curl -> we transition ESTABLISHED -> CLOSE_WAIT
+   |  httpd close(fd) -> sock_close_tcp -> emit FIN+ACK, LAST_ACK
+   |  host's ACK of our FIN -> CLOSED, slot freed via zombie path
 ```
 
 ## Contratos clave

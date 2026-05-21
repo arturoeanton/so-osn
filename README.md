@@ -229,7 +229,10 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | Scheduler preemptivo timer-driven (CPL=3, 50 ms quantum) | ✅ |
 | Sleep real + Ctrl+C live + background jobs (`&`) + `kill` | ✅ |
 | Driver ATA PIO + FAT16 read/write + persistencia en `/sd` | ✅ |
-| Networking | ⏳ (fase 8.5: libc surface lista, falta driver + stack) |
+| Driver RTL8139 + ARP + IPv4 + ICMP + UDP + TCP completo | ✅ |
+| Sockets POSIX (socket/bind/listen/accept/connect/send/recv/select) | ✅ |
+| DNS resolver + getaddrinfo (vía slirp 10.0.2.3) | ✅ |
+| `/bin/httpd` sirviendo FAT16 sobre HTTP; `selectserver.c` de Beej verbatim | ✅ |
 | Servers en ring 3 (hoy todos ring 0) | ⏳ (fase 10) |
 | `fork` / `exec` real | ❌ |
 | Multi-core (SMP) | ❌ |
@@ -388,6 +391,11 @@ lejano y muy difícil de debuggear. Están repetidas en
 
 Cerrado recientemente:
 
+- **FASE 8.5 — Networking completo**: driver RTL8139 + Ethernet/ARP +
+  IPv4/ICMP + UDP + TCP completo (handshake, data, close, listen+accept
+  multi-cliente, connect outbound, retransmisión RTO 500 ms) + DNS
+  resolver + select/setsockopt. `/bin/httpd` sirve FAT16 sobre HTTP a
+  Firefox real; `selectserver.c` de Beej corre verbatim.
 - **FASE 9 — Scheduler preempt** con timer-driven quantum sobre CPL=3
   + sleep real + Ctrl+C live + background jobs.
 - **FASE 8 — Disco real**: driver ATA PIO + FAT16 read/write sobre
@@ -396,17 +404,14 @@ Cerrado recientemente:
 
 Las próximas fases grandes:
 
-1. **Stack de red** (FASE 8.5): driver RTL8139 + ARP/IPv4/ICMP + UDP/TCP
-   minimal. La superficie POSIX (`<arpa/inet.h>`, `<sys/socket.h>`) ya
-   está en la libc desde FASE 7.7, hoy con stubs `ENOSYS`.
-2. **Mover servers a ring 3** (FASE 10): shell, fs, console, keyboard
+1. **Mover servers a ring 3** (FASE 10): shell, fs, console, keyboard
    como procesos de usuario con IPC kernel-mediated.
-3. **fork/exec** real (hoy `exec` reemplaza la task actual, no hay
+2. **fork/exec** real (hoy `exec` reemplaza la task actual, no hay
    `fork`).
-4. **TUI potente** (FASE 11): mini Norton Commander, viewer, editor —
+3. **TUI potente** (FASE 11): mini Norton Commander, viewer, editor —
    ahora que FAT da archivos persistentes vale la pena editar.
-5. **Gráfico** (FASE 12): window server + terminal en ventana + mouse.
-6. **SMP** (mucho después).
+4. **Gráfico** (FASE 12): window server + terminal en ventana + mouse.
+5. **SMP** (mucho después).
 
 Detalle en `osnos/PLAN.md` y `osnos/STATUS.md`.
 
