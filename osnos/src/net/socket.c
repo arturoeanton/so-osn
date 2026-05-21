@@ -65,8 +65,12 @@ typedef struct {
 static sock_t socks[SOCK_MAX];
 static uint16_t ephemeral_next = 40000;
 
-static inline void cli(void) { __asm__ volatile ("cli"); }
-static inline void sti(void) { __asm__ volatile ("sti"); }
+/* Memory clobber so the compiler doesn't hoist reads/writes across
+ * the critical-section boundary — the NIC IRQ mutates shared state
+ * (rx_count, accept_q_count, tcp_state) and we'd otherwise loop on a
+ * cached value forever. */
+static inline void cli(void) { __asm__ volatile ("cli" ::: "memory"); }
+static inline void sti(void) { __asm__ volatile ("sti" ::: "memory"); }
 
 /* True when the current task has a pending kill (e.g. Ctrl+C) and the
  * busy-poll loop should bail out so the syscall can return early. */
@@ -212,11 +216,12 @@ int sock_recvfrom(int sd, void *buf, size_t buf_len,
     if (!s) return -1;
     if (s->local_port == 0) return -1;     /* unbound */
 
+    volatile sock_t *vs = (volatile sock_t *)s;
     uint64_t deadline = timer_ms() + timeout_ms;
     for (;;) {
         if (poll_interrupted()) return -1;
         cli();
-        if (s->rx_count > 0) {
+        if (vs->rx_count > 0) {
             sock_rx_slot_t *slot = &s->rx[s->rx_tail];
             uint16_t n = slot->len;
             if (n > buf_len) n = (uint16_t)buf_len;
@@ -359,14 +364,17 @@ int sock_accept(int listen_sd,
     if (s->type != OSNOS_SOCK_STREAM) return -1;
     if (s->tcp_state != TCP_LISTEN) return -1;
 
+    /* Volatile alias so clang -O2 doesn't cache accept_q_count across
+     * the busy-loop — same trick as sock_readable. */
+    volatile sock_t *vs = (volatile sock_t *)s;
     uint64_t deadline = timer_ms() + timeout_ms;
     for (;;) {
         if (poll_interrupted()) return -1;
         cli();
-        if (s->accept_q_count > 0) {
-            int child = s->accept_q[s->accept_q_head];
-            s->accept_q_head = (uint8_t)((s->accept_q_head + 1) % SOCK_ACCEPT_QUEUE_DEPTH);
-            s->accept_q_count--;
+        if (vs->accept_q_count > 0) {
+            int child = vs->accept_q[vs->accept_q_head];
+            vs->accept_q_head = (uint8_t)((vs->accept_q_head + 1) % SOCK_ACCEPT_QUEUE_DEPTH);
+            vs->accept_q_count--;
             sti();
             if (peer_ip)   *peer_ip   = socks[child].remote_ip;
             if (peer_port) *peer_port = socks[child].remote_port;
@@ -457,16 +465,28 @@ static void tcp_emit_rst(uint32_t dst_ip, uint16_t dst_port,
 static void tcp_reset_socket(sock_t *s) {
     cli();
     if (s->zombie) {
+        /* User already called close() — free the slot for real. */
         s->used = false;
         s->zombie = false;
+        s->parent_sd = -1;
+    } else if (s->parent_sd >= 0) {
+        /*
+         * Child socket the user still owns via accept'd fd. Mark the
+         * connection CLOSED but DO NOT free the slot — the user's
+         * subsequent send/recv must see EBADF or 0/EOF, then explicit
+         * close() frees it. Without this guard a stray RST mid-session
+         * yanked the slot and the user got EBADF on its next call.
+         */
+        s->tcp_state = TCP_CLOSED;
+        s->peer_fin = true;       /* recv → 0 (EOF) */
     } else if (s->tcp_state != TCP_CLOSED) {
+        /* Standalone (non-child) socket reverting. */
         s->tcp_state = TCP_LISTEN;
     }
     s->remote_ip = 0;
     s->remote_port = 0;
     s->snd_nxt = s->snd_una = s->rcv_nxt = 0;
     s->tcp_rx_head = s->tcp_rx_tail = s->tcp_rx_count = 0;
-    s->peer_fin = false;
     sti();
 }
 
@@ -741,11 +761,12 @@ int sock_recv(int sd, void *buf, size_t buf_len, uint32_t timeout_ms) {
     if (!s) return -1;
     if (s->type != OSNOS_SOCK_STREAM) return -1;
 
+    volatile sock_t *vs = (volatile sock_t *)s;
     uint64_t deadline = timer_ms() + timeout_ms;
     for (;;) {
         if (poll_interrupted()) return -1;
         cli();
-        if (s->tcp_rx_count > 0) {
+        if (vs->tcp_rx_count > 0) {
             size_t n = s->tcp_rx_count;
             if (n > buf_len) n = buf_len;
             uint8_t *out = (uint8_t *)buf;

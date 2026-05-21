@@ -1195,13 +1195,45 @@ OK 8.5.9 DNS resolver + getaddrinfo con nombres — VERIFICADO en QEMU
      programa BSD-sockets que use getaddrinfo/connect/recv compila
      y resuelve nombres reales vía DNS.
 
-TODO opcional 8.5.10 retransmisión + RTT + congestion control real
-TODO opcional 8.5.11 /bin/httpd sirviendo /sd/index.html
-TODO opcional 8.5.12 /bin/wget con HTTP parsing más rico
-TODO opcional 8.5.13 IPv6
-TODO 8.5.5 TCP state machine
-TODO 8.5.6 Syscalls wireados + libc
-TODO 8.5.7 /bin/httpd sirviendo /sd/index.html
+OK 8.5.10 /bin/httpd HTTP/1.0 server — VERIFICADO en QEMU
+   - tests/httpd.c: bind+listen TCP port 80 (default), accept loop
+     hasta MAX_CONNS=50 conexiones, parse de "GET /path HTTP/1.0\r\n",
+     map a /sd/<path> (default /sd/index.html), abre el archivo
+     vía open(O_RDONLY), fstat para Content-Length, stream con
+     send() en chunks de 2 KiB.
+   - Buffers grandes (g_req[1024] / g_chunk[2048] / g_hdr[256] /
+     g_abs_path[256]) en BSS estático en vez de stack, porque la
+     user stack en osnos es 1 página (4 KiB) y el call chain
+     main→handle_conn→serve_file con buffers locales overflowea.
+   - Bugfix: cli/sti ahora con clobber "memory" para que el compiler
+     no cachee accept_q_count / tcp_rx_count / rx_count a través de
+     los busy-polls. sock_accept y sock_recv y sock_recvfrom usan
+     volatile sock_t * sobre el socket en sus loops por la misma
+     razón. Sin esto, la SEGUNDA accept después de servir una
+     conexión nunca veía el flag actualizado por el NIC IRQ.
+   - Content-Type guess por extensión: html/htm/txt/css/js/json/png/
+     jpg/gif. Default application/octet-stream.
+   - Manejo de path traversal: rechaza ".." con 403. Limpia query
+     string "?..." y fragment "#..." antes del mapping.
+   - 404 cuando open falla, 405 si method != GET, 400 si malformed.
+   - QEMU forwarding existente (`hostfwd=tcp::8080-:80`) sirve esto
+     directamente; `curl http://localhost:8080/` desde Mac baja el
+     HTML seed que mformat instaló al compilar sd.img.
+   - sd.img seed: index.html (~690 bytes) con HTML decorado en
+     español + CSS inline + listado del data path osnos.
+   - Verificado: curl baja el index.html con HTTP/1.0 200 OK +
+     headers correctos. Browsers (Safari/Chrome) renderizan la
+     página con CSS. Multi-cliente (varias curls en sucesión) anda
+     gracias al fix volatile/memory-barrier — sin el fix, accept
+     se quedaba pegado a partir de la segunda conexión.
+
+TODO opcional 8.5.11 retransmisión + RTT + congestion control real
+TODO opcional 8.5.12 IPv6 (struct sockaddr_in6 + state machine)
+TODO opcional 8.5.13 select() / accept blocking real via task suspend
+                       (hoy es busy-poll en kernel; las syscalls que
+                       blockean por mucho tiempo no dejan correr otros
+                       servers cooperativos sin libc wrapping con
+                       nanosleep como hicimos en select)
 
 ### FASE 9 — Scheduler real — CERRADA
 OK 9.1 timer IRQ infra — VERIFICADO en QEMU

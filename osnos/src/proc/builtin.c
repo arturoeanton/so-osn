@@ -133,6 +133,7 @@ DECLARE_ELF(echotcp);
 DECLARE_ELF(selecttest);
 DECLARE_ELF(selectserver);
 DECLARE_ELF(tcpclient);
+DECLARE_ELF(httpd);
 
 #undef DECLARE_ELF
 
@@ -187,6 +188,7 @@ static const builtin_t builtins[] = {
     ELF(selecttest, "select() demo: multiplex TCP listen + stdin"),
     ELF(selectserver, "Beej's selectserver.c — multi-client chat on TCP 9034"),
     ELF(tcpclient,    "outbound TCP demo: tcpclient HOST PORT"),
+    ELF(httpd,        "minimal HTTP/1.0 server, serves /sd/ files"),
 };
 
 #undef USER

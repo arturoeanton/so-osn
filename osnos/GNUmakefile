@@ -102,7 +102,8 @@ USER_ELF_LIBC_SRCS := tests/hello_libc.c \
                       tests/echotcp.c \
                       tests/selecttest.c \
                       tests/selectserver.c \
-                      tests/tcpclient.c
+                      tests/tcpclient.c \
+                      tests/httpd.c
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS))
@@ -162,9 +163,11 @@ $(SD_IMG):
 	printf '%s\n' '$(SD_README_TXT)' > $(SD_TMP)/README.TXT
 	printf '%s\n' '$(SD_HELLO_TXT)'  > $(SD_TMP)/HELLO.TXT
 	printf '%s\n' '$(SD_LONG_TXT)'   > $(SD_TMP)/long.txt
+	printf '<!doctype html>\n<html><head><meta charset="utf-8"><title>osnos</title>\n<style>body{font-family:system-ui,sans-serif;max-width:40em;margin:3em auto;padding:1em;color:#222}h1{color:#0a0}code{background:#eee;padding:.2em .4em}</style></head>\n<body>\n<h1>Hola desde osnos</h1>\n<p>Esto es un servidor HTTP/1.0 corriendo como ELF ring-3 en osnos, sirviendo este archivo desde FAT16 en <code>/sd/index.html</code>.</p>\n<p>El path completo:</p>\n<ul>\n<li>Mac envia un GET via slirp NAT a guest:80</li>\n<li>RTL8139 driver entrega el frame</li>\n<li>eth -&gt; ip -&gt; tcp accept -&gt; recv en ring 3</li>\n<li>open + read del FAT16</li>\n<li>send con HTTP/1.0 200 OK y el HTML</li>\n</ul>\n</body></html>\n' > $(SD_TMP)/index.html
 	mcopy -i $@ $(SD_TMP)/README.TXT ::README.TXT
 	mcopy -i $@ $(SD_TMP)/HELLO.TXT  ::HELLO.TXT
 	mcopy -i $@ $(SD_TMP)/long.txt   "::My Long Filename.txt"
+	mcopy -i $@ $(SD_TMP)/index.html ::index.html
 	rm -rf $(SD_TMP)
 
 iso: $(ISO)
