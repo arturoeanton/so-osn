@@ -1108,8 +1108,40 @@ OK 8.5.6 select() + setsockopt + cooperative yield — VERIFICADO en QEMU
    - Verificado: nc desde Mac llega, OSnOS imprime el peer y echoea;
      tipear una tecla en QEMU termina selecttest limpio; re-correr
      `exec /bin/selecttest` rebindea sin EADDRINUSE.
-TODO 8.5.7 getaddrinfo (AI_PASSIVE no-DNS) + /bin/httpd
-TODO 8.5.8 compilar y correr selectserver.c de Beej end-to-end
+OK 8.5.7 getaddrinfo no-DNS + /bin/selectserver — VERIFICADO en QEMU
+   - lib/libc/include/netdb.h: struct addrinfo (Linux layout), flags
+     AI_PASSIVE / AI_NUMERICHOST / AI_CANONNAME, EAI_* error codes,
+     getaddrinfo / freeaddrinfo / gai_strerror prototypes.
+   - lib/libc/netdb.c: scope minimal pero suficiente para Beej:
+     - AF_UNSPEC → AF_INET (default). AF_INET6 → EAI_FAMILY.
+     - node==NULL + AI_PASSIVE → INADDR_ANY; sin AI_PASSIVE → loopback.
+     - node!=NULL → parse vía inet_aton (numeric IPv4). Nombres
+       reales devuelven EAI_NONAME (no hay DNS resolver todavía).
+     - service: decimal port 1..65535. /etc/services no soportado.
+     - Aloca con malloc; freeaddrinfo libera struct + sockaddr_in.
+     - Una sola entrada por call (no enumera IPv4+IPv6 separadas).
+   - sys/socket.h ahora hace #include <sys/select.h> transitivamente
+     (matchea glibc — necesario para compilar código que asume
+     `sys/socket.h` trae `fd_set` consigo).
+   - QEMU: hostfwd=tcp::9034-:9034 agregado al -netdev user.
+   - tests/selectserver.c: **VERBATIM de Beej**
+     (https://beej.us/guide/bgnet/source/examples/selectserver.c).
+     Solo cambia el comentario header. Usa getaddrinfo, setsockopt
+     SO_REUSEADDR, socket/bind/listen/select/accept/recv/send/close,
+     inet_ntop, fprintf, perror, exit, FD_*. Todo de la libc + kernel
+     osnos.
+   - Verificado: `exec /bin/selectserver` en OSnOS, dos `nc -v
+     127.0.0.1 9034` desde Mac. Cada uno se ve "new connection from
+     ... on socket N". Tipear en uno aparece en el otro (chat multi-
+     cliente broadcast). nc cierra con Ctrl+D → "socket N hung up".
+   - **MILESTONE**: networking osnos completa el surface mínimo para
+     correr aplicaciones BSD-sockets unmodified. La invariante de
+     Linux ABI compat (números syscall, struct sockaddr_in,
+     errno values, fd_set layout) se mantuvo desde FASE 4 sin grietas.
+
+TODO opcional 8.5.8 connect() / active open + DNS resolver
+TODO opcional 8.5.9 retransmisión + RTT + congestion control real
+TODO opcional 8.5.10 IPv6
 TODO 8.5.5 TCP state machine
 TODO 8.5.6 Syscalls wireados + libc
 TODO 8.5.7 /bin/httpd sirviendo /sd/index.html
