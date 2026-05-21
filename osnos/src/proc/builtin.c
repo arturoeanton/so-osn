@@ -139,6 +139,7 @@ DECLARE_ELF(tcpclient);
 DECLARE_ELF(httpd);
 DECLARE_ELF(ttytest);
 DECLARE_ELF(envtest);
+DECLARE_ELF(fptest);
 
 #undef DECLARE_ELF
 
@@ -199,6 +200,7 @@ static const builtin_t builtins[] = {
     ELF(httpd,        "minimal HTTP/1.0 server, serves /sd/ files"),
     ELF(ttytest,      "demo termios canonical vs raw mode"),
     ELF(envtest,      "dump environ + setenv/unsetenv smoke test"),
+    ELF(fptest,       "stress per-task FXSAVE/FXRSTOR (run twice in //)"),
 };
 
 #undef USER

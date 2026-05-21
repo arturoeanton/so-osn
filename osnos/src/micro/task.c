@@ -2,6 +2,8 @@
 
 #include <stddef.h>
 
+#include "fpu.h"
+
 static task_t tasks[MAX_TASKS];
 
 static uint64_t next_pid = 1;
@@ -67,6 +69,28 @@ task_t *task_current(void) {
 }
 
 void task_run_next(void) {
+    /*
+     * Snapshot the outgoing task's FP/SSE state BEFORE we start
+     * looking for the next victim. The HW registers still hold
+     * whatever the user was doing when the timer IRQ or syscall
+     * dragged us into the kernel — once we dispatch a different
+     * task, FXRSTOR will overwrite them. We need that snapshot
+     * sitting in the outgoing task's struct so its next dispatch
+     * picks up where it left off.
+     *
+     * Kernel tasks (servers, shell) compile with -mno-sse so they
+     * never touch FP. The save still runs against their slot, but
+     * the bytes it captures are whatever the previous user task
+     * left in HW — harmless because no kernel task reads them.
+     */
+    int prev_index = current_index;
+    if (prev_index >= 0 && prev_index < MAX_TASKS) {
+        task_t *prev = &tasks[prev_index];
+        if (prev->state != TASK_UNUSED) {
+            fpu_save(prev->fpu_state);
+        }
+    }
+
     for (int step = 0; step < MAX_TASKS; step++) {
         current_index++;
         current_index %= MAX_TASKS;
@@ -78,6 +102,13 @@ void task_run_next(void) {
         }
 
         task->state = TASK_RUNNING;
+
+        /* Reload the incoming task's FP/SSE before its code runs.
+         * Skip if it's the same slot we just saved — pure waste of
+         * cycles and the regs are already correct. */
+        if (current_index != prev_index) {
+            fpu_restore(task->fpu_state);
+        }
 
         if (task->entry) {
             task->dispatches++;

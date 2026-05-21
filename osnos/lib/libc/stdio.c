@@ -560,6 +560,23 @@ static int do_format(sink_t *s, const char *fmt, va_list ap) {
             }
         }
 
+        /* Precision (".N" — applies to %s, %d, %f, etc). -1 means
+         * "not specified"; each %fmt picks its own default. */
+        int precision = -1;
+        if (*p == '.') {
+            p++;
+            precision = 0;
+            if (*p == '*') {
+                precision = va_arg(ap, int);
+                if (precision < 0) precision = -1;
+                p++;
+            } else {
+                while (*p >= '0' && *p <= '9') {
+                    precision = precision * 10 + (*p - '0'); p++;
+                }
+            }
+        }
+
         int is_long = 0, is_longlong = 0, is_size = 0;
         if (*p == 'l') {
             is_long = 1; p++;
@@ -640,6 +657,52 @@ static int do_format(sink_t *s, const char *fmt, va_list ap) {
             flen  = strlen(first);
             sink_flush(s, "0x", 2);
             emit_padded(s, first, flen, width > 2 ? width - 2 : 0, left, '0');
+            continue;
+        }
+        case 'f': case 'F': case 'g': case 'G': {
+            /*
+             * Decimal float. No exponent form (so %g degenerates to
+             * %f), no NaN/Inf names — for those we'd want printf
+             * proper. Honors precision (default 6).
+             *
+             * Strategy: split into integer + fractional via floor,
+             * itoa the int part, then a rounded-to-prec digit loop
+             * for the fraction. Works for the magnitudes any
+             * sensible test program will throw at it.
+             */
+            double v = va_arg(ap, double);
+            int negative = 0;
+            if (v < 0) { negative = 1; v = -v; }
+            int prec = (precision < 0) ? 6 : precision;
+
+            /* Round v to prec decimals. */
+            double scale = 1.0;
+            for (int k = 0; k < prec; k++) scale *= 10.0;
+            v = (double)(long long)(v * scale + 0.5) / scale;
+
+            long long int_part = (long long)v;
+            double      frac   = v - (double)int_part;
+
+            char ipart[32];
+            char *ip = utoa_rev((unsigned long long)int_part, 10, 0,
+                                  ipart + sizeof(ipart));
+            size_t iplen = strlen(ip);
+
+            char out[64];
+            size_t w = 0;
+            if (negative && w < sizeof(out)) out[w++] = '-';
+            for (size_t k = 0; k < iplen && w < sizeof(out); k++) out[w++] = ip[k];
+            if (prec > 0) {
+                if (w < sizeof(out)) out[w++] = '.';
+                for (int k = 0; k < prec && w < sizeof(out); k++) {
+                    frac *= 10.0;
+                    int d = (int)frac;
+                    if (d < 0) d = 0; if (d > 9) d = 9;
+                    out[w++] = (char)('0' + d);
+                    frac -= (double)d;
+                }
+            }
+            emit_padded(s, out, w, width, left, ' ');
             continue;
         }
         case '%':

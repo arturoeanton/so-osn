@@ -146,6 +146,20 @@ typedef struct {
      */
     struct pipe *pipe_in;
     struct pipe *pipe_out;
+
+    /*
+     * Per-task FPU/SSE state for FXSAVE/FXRSTOR. The instruction
+     * dumps/loads 512 bytes aligned to 16. We snapshot the dying
+     * task's HW regs into here when task_run_next switches to a
+     * different task, and reload the incoming task's bytes before
+     * resuming it. Kernel tasks don't touch FP (built with
+     * -mno-sse), so their slot ends up holding a "clean" state.
+     *
+     * Initial contents come from a FNINIT+FXSAVE capture at
+     * task_create_user_elf time so a freshly-spawned task's first
+     * dispatch loads a sane FPU rather than uninitialised bytes.
+     */
+    uint8_t   fpu_state[512] __attribute__((aligned(16)));
 } task_t;
 
 void task_init(void);

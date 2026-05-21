@@ -10,6 +10,7 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| FXSAVE/FXRSTOR per-task | 512 B fpu_state aligned 16 en task_t, save/restore en task_run_next, printf %f | 120 |
 | Shell pipes `a \| b` | pipe ring-buffer kernel object (4 KiB × 16), task pipe_in/out, concurrent stages, /bin/head ELF | 350 |
 | Shell redirection | `cmd > file`, `>>`, `< file` parser + proc_execve_redir + per-task stdin/stdout paths | 250 |
 | TCC prep (1-6) | write+offset, exec VFS, stack 64 KiB, FPU init, ctype/limits/float/signal/math.h, ramfs bin fix | 900 |
@@ -56,8 +57,6 @@ canonical/raw, /home persistente cross-reboot.
 - Shell builtins (cat/ls/echo/...) que respeten redirects (hoy
   solo los ELFs los honran; el short-circuit en run_command salta
   al ELF cuando hay `<`/`>` / `|`)
-- FXSAVE/FXRSTOR per-task (hoy FP funciona single-task, multi-task
-  puede corromper FP regs entre context switches)
 - Open file description shared offsets para dup POSIX-strict
 - O_NONBLOCK runtime real (hoy fcntl lo almacena pero sys_read/write
   no lo respetan)
@@ -1613,6 +1612,55 @@ OK .history (historial persistente) + .oshrc (startup script)
      Tipo en un boot, recuperá con flecha ↑ tras reboot. .oshrc
      queda como el lugar natural para "cd a tu workdir" o
      "export VARS" automáticos.
+
+### FASE FXSAVE/FXRSTOR per-task — CERRADA
+OK Task struct field — task_t.fpu_state[512] aligned 16
+   - Buffer FXSAVE/FXRSTOR-compatible embebido en task_t. El
+     atributo `__attribute__((aligned(16)))` propaga a task_t
+     mismo y el array static, así que cada slot del pool queda
+     naturalmente alineado.
+
+OK Helpers en src/micro/fpu.{c,h}
+   - `fpu_save(state)` — `fxsaveq (state)`.
+   - `fpu_restore(state)` — `fxrstorq (state)`.
+   - `fpu_state_init(state)` — FNINIT + LDMXCSR(0x1F80) + FXSAVE
+     a `state`. Captura una imagen "default FPU" para sembrar el
+     primer FXRSTOR de un task recién creado (sino FXRSTOR de
+     bytes uninitialised podría tirar #XM).
+
+OK Hook en task_run_next
+   - ANTES de buscar el próximo READY: snapshot el task saliente
+     vía `fpu_save(prev->fpu_state)`. Los HW regs siguen con lo
+     que el user dejó al entrar en kernel (timer IRQ o syscall);
+     hay que capturarlo antes de que FXRSTOR del nuevo task los
+     pisotee.
+   - DESPUÉS de encontrar el READY: si current_index cambió,
+     `fpu_restore(task->fpu_state)`. Same-task dispatch salta el
+     restore (HW regs ya correctos).
+
+OK Seed en task_create_user_elf
+   - `fpu_state_init(t->fpu_state)` después de task_clear. Garantiza
+     que la primera dispatch de un task fresh carga "FPU limpio"
+     en vez de bytes uninitialised.
+
+OK printf %f / %g (libc enhancement)
+   - `lib/libc/stdio.c`: agregado parse de precision (`.N`) y
+     handler para `%f %F %g %G`. Round-half-up a `precision`
+     dígitos (default 6). Split int / fractional vía `(long
+     long)`. Sin notación exponencial (— %g degenera a %f para
+     magnitudes razonables).
+   - Sin esto, /bin/fptest mostraba literal "a=%.6f" porque el
+     vararg de double se consumía pero no se imprimía.
+
+OK ELF /bin/fptest para validación
+   - `elfs/tests/fptest.c`: N rondas (default 200) de sin/cos/
+     sqrt/fabs sobre valores semilla, con nanosleep(1ms) entre
+     iteraciones para forzar preemption.
+   - **Test crítico**: correr 5 instancias en paralelo:
+     `fptest 500 & fptest 500 & fptest 500 & fptest 500 & fptest 500`.
+     Sin FXSAVE per-task, los outputs divergen (FP regs se
+     contaminan entre context switches). Con FXSAVE, los 5 dan
+     el mismo `a=1.481451 b=1.001098 c=50.477837` bit-exact.
 
 ### FASE Shell pipes `cmd1 | cmd2` — CERRADA
 OK Pipe kernel object — src/micro/pipe.{c,h}

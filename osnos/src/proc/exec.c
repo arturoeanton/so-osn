@@ -4,6 +4,7 @@
 #include "../include/osnos_status.h"
 #include "../lib/string.h"
 #include "../micro/fd.h"
+#include "../micro/fpu.h"
 #include "../micro/gdt.h"
 #include "../micro/ipc.h"
 #include "elf.h"
@@ -467,6 +468,10 @@ static int64_t task_create_user_elf(
     t->user_stack_top    = init_rsp;
     t->heap_start        = USER_HEAP_BASE;
     t->heap_brk          = USER_HEAP_BASE;
+
+    /* Seed FPU state — first FXRSTOR on this task's first dispatch
+     * needs sane bytes, not whatever the BSS happens to hold. */
+    fpu_state_init(t->fpu_state);
 
     /* Seed cwd from envp's PWD entry, falling back to "/". Lets the
      * child resolve relative paths via getcwd() without the libc
