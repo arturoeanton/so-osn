@@ -7,14 +7,19 @@
 #include "../include/osnos_limits.h"
 
 /*
- * Global file descriptor table. Lives in kernel for now; per-task FD
- * spaces arrive with FASE 6 (ELF/ring3 + processes).
+ * Per-task file descriptor table. Each task owns its OSNOS_MAX_FDS
+ * entries inside task_t.fds[]; this header exposes the per-slot
+ * struct + the operations that act on a given task's table.
  *
- * Layout:
- *   fd 0 = stdin   (read from keyboard, TODO)
- *   fd 1 = stdout  (write to console)
- *   fd 2 = stderr  (write to console, distinguishable later)
+ * Layout per task:
+ *   fd 0 = stdin
+ *   fd 1 = stdout
+ *   fd 2 = stderr
  *   fd 3+ = regular files, allocated by sys_open
+ *
+ * Kernel-resident "tasks" (servers) get the same layout — their
+ * stdin/stdout/stderr slots are wired to the TTY/console even though
+ * they normally don't issue read/write syscalls.
  */
 #define OSNOS_MAX_FDS    16
 
@@ -33,35 +38,40 @@ typedef struct {
     char     path[OSNOS_PATH_MAX];
 } osnos_fd_t;
 
-void fd_init(void);
-
-/* Allocate a fresh fd >= 3. Returns -1 if the table is full. */
-int  fd_alloc(void);
-
-void fd_free(int fd);
-
-/* Look up an fd. Returns NULL for invalid / unused fds. Includes the
- * special fds 0/1/2 (which always exist). */
-osnos_fd_t *fd_get(int fd);
+/* Forward decl — fd.c only ever dereferences task_t through task->fds. */
+struct task;
+typedef struct task task_t;
 
 /*
- * Duplicate an existing fd into a fresh slot. The clone gets a copy
- * of the source's flags, path, type bits, and (importantly) a
- * snapshot of its current offset — i.e. they don't share an "open
- * file description". POSIX-strict dup expects shared offsets; that
- * needs a separate file-description refcount layer (TODO).
+ * Reset `t->fds` to a freshly-initialised state with stdin/stdout/
+ * stderr pre-wired. Called by task_create for every new task slot.
+ */
+void fd_init_for_task(task_t *t);
+
+/* Allocate a fresh fd >= 3 in task `t`. Returns -1 if the table is full. */
+int  fd_alloc(task_t *t);
+
+void fd_free(task_t *t, int fd);
+
+/* Look up an fd in task `t`. Returns NULL for invalid / unused fds.
+ * Includes the special fds 0/1/2 (which always exist). */
+osnos_fd_t *fd_get(task_t *t, int fd);
+
+/*
+ * Duplicate an existing fd into a fresh slot within the SAME task.
+ * Cross-task dup is not exposed — every dup variant operates on `t`.
  *
- *   fd_dup(src)           — find any free fd >= 3.
- *   fd_dup_min(src, min)  — find the lowest free fd >= min (F_DUPFD).
- *   fd_dup2(src, target)  — copy into specific target; closes target
- *                            first if it was open. src==target is a
- *                            no-op (POSIX).
+ *   fd_dup(t, src)           — find any free fd >= 3.
+ *   fd_dup_min(t, src, min)  — find the lowest free fd >= min (F_DUPFD).
+ *   fd_dup2(t, src, target)  — copy into specific target; closes target
+ *                              first if it was open. src==target is a
+ *                              no-op (POSIX).
  *
  * All three return the new fd on success, -1 on failure.
  */
-int fd_dup     (int src);
-int fd_dup_min (int src, int min_fd);
-int fd_dup2    (int src, int target);
+int fd_dup     (task_t *t, int src);
+int fd_dup_min (task_t *t, int src, int min_fd);
+int fd_dup2    (task_t *t, int src, int target);
 
 /*
  * stdin ring buffer. keyboard_server pushes printable chars and '\n';

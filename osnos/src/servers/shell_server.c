@@ -2484,7 +2484,7 @@ static void cmd_test(const char *args) {
         int64_t target = 12;
         int64_t r2 = sys_dup2((int)base, (int)target);
         CHECK(r2 == target, "DUP2: returns newfd");
-        CHECK(fd_get((int)target) != 0, "DUP2: newfd is live");
+        CHECK(fd_get(task_current(), (int)target) != 0, "DUP2: newfd is live");
 
         /* dup2(fd, fd) is a no-op. */
         int64_t same = sys_dup2((int)base, (int)base);

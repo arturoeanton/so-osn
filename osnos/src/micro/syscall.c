@@ -24,7 +24,9 @@
 #include "vmm.h"
 
 void syscall_init(void) {
-    fd_init();
+    /* fd tables live inside task_t now (FASE 10.0.a) — task_create
+     * invokes fd_init_for_task per slot. Nothing kernel-global to
+     * initialise here. */
     tty_init();
 }
 
@@ -72,10 +74,10 @@ int64_t sys_open(const char *path, int flags, uint32_t mode) {
         if (s != OSNOS_OK) return err(s);
     }
 
-    int fd = fd_alloc();
+    int fd = fd_alloc(task_current());
     if (fd < 0) return err(OSNOS_EMFILE);
 
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     os_strlcpy(f->path, path, OSNOS_PATH_MAX);
     f->flags  = flags;
     f->offset = 0;
@@ -88,13 +90,13 @@ int64_t sys_open(const char *path, int flags, uint32_t mode) {
 /* ------------------------------------------------------------------ */
 
 int64_t sys_close(int fd) {
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f) return err(OSNOS_EBADF);
     if (f->is_special) return err(OSNOS_EBADF);
     if (f->is_socket && f->sock_idx >= 0) {
         sock_close(f->sock_idx);
     }
-    fd_free(fd);
+    fd_free(task_current(), fd);
     return 0;
 }
 
@@ -153,7 +155,7 @@ int64_t sys_write(int fd, const void *buf, size_t count) {
         return write_to_console((const char *)buf, count);
     }
 
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f || f->is_special) return err(OSNOS_EBADF);
 
     int access = f->flags & O_ACCMODE;
@@ -272,7 +274,7 @@ int64_t sys_read(int fd, void *buf, size_t count) {
         return err(OSNOS_EBADF);
     }
 
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f || f->is_special) return err(OSNOS_EBADF);
     if (f->is_dir) return err(OSNOS_EISDIR);
 
@@ -305,7 +307,7 @@ int64_t sys_read(int fd, void *buf, size_t count) {
 /* ------------------------------------------------------------------ */
 
 int64_t sys_lseek(int fd, int64_t offset, int whence) {
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f || f->is_special) return err(OSNOS_EBADF);
 
     int64_t new_offset;
@@ -339,7 +341,7 @@ int64_t sys_lseek(int fd, int64_t offset, int whence) {
 int64_t sys_fstat(int fd, osnos_stat_t *out) {
     if (!out) return err(OSNOS_EFAULT);
 
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f) return err(OSNOS_EBADF);
 
     for (size_t i = 0; i < sizeof(*out); i++) ((char *)out)[i] = 0;
@@ -370,7 +372,7 @@ int64_t sys_fstat(int fd, osnos_stat_t *out) {
 /* ------------------------------------------------------------------ */
 
 int64_t sys_isatty(int fd) {
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f) return err(OSNOS_EBADF);
     return f->is_special ? 1 : 0;
 }
@@ -570,14 +572,16 @@ int64_t sys_kill(uint64_t pid, int sig) {
     t->kill_pending = 1;
 
     /*
-     * If the target is BLOCKED (e.g., inside a long nanosleep), it
-     * never makes it back to a kernel return point that checks
-     * kill_pending — so the kill wouldn't fire until the natural
-     * wake-up. Force-wake here so the scheduler can dispatch it
-     * one more tick, where user_task_trampoline notices the flag
-     * and routes it through proc_exit_current_user(130).
+     * If the target is BLOCKED (e.g., inside a long nanosleep) or
+     * STOPPED (after Ctrl+Z), it never makes it back to a kernel
+     * return point that checks kill_pending — so the kill wouldn't
+     * fire until the user manually resumes it (which they probably
+     * won't, because they wanted it dead). Force-wake here so the
+     * scheduler dispatches it one more tick, where user_task_
+     * trampoline notices kill_pending and routes through
+     * proc_exit_current_user(130).
      */
-    if (t->state == TASK_BLOCKED) {
+    if (t->state == TASK_BLOCKED || t->state == TASK_STOPPED) {
         t->wakeup_at_ms = 0;
         t->state        = TASK_READY;
     }
@@ -639,7 +643,7 @@ static uint8_t vfs_type_to_dt(vfs_node_type_t t) {
 int64_t sys_getdents(int fd, void *buf, size_t buf_size) {
     if (!buf && buf_size > 0) return err(OSNOS_EFAULT);
 
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f || f->is_special) return err(OSNOS_EBADF);
     if (!f->is_dir)          return err(OSNOS_ENOTDIR);
 
@@ -741,20 +745,20 @@ int64_t sys_socket(int domain, int type, int protocol) {
     int sd = sock_create(type);
     if (sd < 0) return err(OSNOS_EMFILE);
 
-    int fd = fd_alloc();
+    int fd = fd_alloc(task_current());
     if (fd < 0) {
         sock_close(sd);
         return err(OSNOS_EMFILE);
     }
 
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     f->is_socket = true;
     f->sock_idx  = sd;
     return (int64_t)fd;
 }
 
 int64_t sys_bind(int fd, const void *addr, uint32_t addrlen) {
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f || !f->is_socket) return err(OSNOS_EBADF);
 
     uint32_t ip = 0;
@@ -767,14 +771,14 @@ int64_t sys_bind(int fd, const void *addr, uint32_t addrlen) {
 }
 
 int64_t sys_listen(int fd, int backlog) {
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f || !f->is_socket) return err(OSNOS_EBADF);
     if (sock_listen(f->sock_idx, backlog) != 0) return err(OSNOS_EINVAL);
     return 0;
 }
 
 int64_t sys_connect(int fd, const void *addr, uint32_t addrlen) {
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f || !f->is_socket) return err(OSNOS_EBADF);
 
     uint32_t ip = 0;
@@ -800,7 +804,7 @@ int64_t sys_connect(int fd, const void *addr, uint32_t addrlen) {
 int64_t sys_setsockopt(int fd, int level, int optname,
                         const void *optval, uint32_t optlen) {
     (void)optval; (void)optlen;
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f || !f->is_socket) return err(OSNOS_EBADF);
     /* SOL_SOCKET = 1, SO_REUSEADDR = 2 (Linux numbers, see libc). */
     if (level == 1 && optname == 2) return 0;
@@ -812,7 +816,7 @@ int64_t sys_setsockopt(int fd, int level, int optname,
 #define FDSET_NWORDS  16          /* 1024 bits = 16 * uint64_t */
 
 static bool fd_readable(int fd) {
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f) return false;
     if (f->is_special) {
         return (fd == OSNOS_FD_STDIN) ? stdin_readable() : false;
@@ -1101,7 +1105,7 @@ int64_t sys_munmap(void *addr, size_t length) {
 #define OSNOS_O_NONBLOCK 04000
 
 int64_t sys_dup(int fd) {
-    int r = fd_dup(fd);
+    int r = fd_dup(task_current(), fd);
     if (r < 0) return err(OSNOS_EBADF);
     return r;
 }
@@ -1110,18 +1114,18 @@ int64_t sys_dup2(int oldfd, int newfd) {
     /* fd_dup2 validates oldfd internally; we just gate the newfd
      * range here to surface a clean EBADF instead of -1. */
     if (newfd < 0 || newfd >= OSNOS_MAX_FDS) return err(OSNOS_EBADF);
-    int r = fd_dup2(oldfd, newfd);
+    int r = fd_dup2(task_current(), oldfd, newfd);
     if (r < 0) return err(OSNOS_EBADF);
     return r;
 }
 
 int64_t sys_fcntl(int fd, int cmd, int64_t arg) {
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f) return err(OSNOS_EBADF);
 
     switch (cmd) {
     case OSNOS_F_DUPFD: {
-        int r = fd_dup_min(fd, (int)arg);
+        int r = fd_dup_min(task_current(), fd, (int)arg);
         if (r < 0) return err(OSNOS_EMFILE);
         return r;
     }
@@ -1150,7 +1154,7 @@ int64_t sys_fcntl(int fd, int cmd, int64_t arg) {
  * a faulting pointer becomes EFAULT, not a kernel panic.
  */
 int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f) return err(OSNOS_EBADF);
     /* Only the special fds 0/1/2 (the TTY) accept these requests. */
     if (!f->is_special) return -(int64_t)OSNOS_ENOTTY;
@@ -1265,7 +1269,7 @@ int64_t sys_select(int nfds,
             count++;
         }
         if (in_write[word] & bit) {
-            osnos_fd_t *f = fd_get(fd);
+            osnos_fd_t *f = fd_get(task_current(), fd);
             if (f) { out_write[word] |= bit; count++; }
         }
         (void)in_except;
@@ -1287,7 +1291,7 @@ int64_t sys_select(int nfds,
 }
 
 int64_t sys_accept(int fd, void *addr, void *addrlen_ptr) {
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f || !f->is_socket) return err(OSNOS_EBADF);
 
     uint32_t peer_ip = 0;
@@ -1298,12 +1302,12 @@ int64_t sys_accept(int fd, void *addr, void *addrlen_ptr) {
     if (child_sd == -2) return err(OSNOS_EAGAIN);
     if (child_sd < 0)   return err(OSNOS_EBADF);
 
-    int new_fd = fd_alloc();
+    int new_fd = fd_alloc(task_current());
     if (new_fd < 0) {
         sock_close(child_sd);
         return err(OSNOS_EMFILE);
     }
-    osnos_fd_t *nf = fd_get(new_fd);
+    osnos_fd_t *nf = fd_get(task_current(), new_fd);
     nf->is_socket = true;
     nf->sock_idx  = child_sd;
 
@@ -1320,7 +1324,7 @@ int64_t sys_accept(int fd, void *addr, void *addrlen_ptr) {
 int64_t sys_sendto(int fd, const void *buf, size_t len, int flags,
                     const void *dst_addr, uint32_t addrlen) {
     (void)flags;
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f || !f->is_socket) return err(OSNOS_EBADF);
     if (!buf && len > 0)     return err(OSNOS_EFAULT);
 
@@ -1353,7 +1357,7 @@ int64_t sys_sendto(int fd, const void *buf, size_t len, int flags,
 int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
                       void *src_addr, void *addrlen_ptr) {
     (void)flags;
-    osnos_fd_t *f = fd_get(fd);
+    osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f || !f->is_socket) return err(OSNOS_EBADF);
     if (!buf && len > 0)     return err(OSNOS_EFAULT);
 

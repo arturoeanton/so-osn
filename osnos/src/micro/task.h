@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "../include/osnos_limits.h"
+#include "fd.h"
 
 #define MAX_TASKS 16
 
@@ -18,7 +19,7 @@ typedef enum {
     TASK_DEAD
 } task_state_t;
 
-typedef struct {
+typedef struct task {
     uint64_t pid;
     const char *name;
     task_entry_t entry;
@@ -186,6 +187,21 @@ typedef struct {
         uint64_t addr;       /* 0 = empty slot */
         uint64_t len;
     } mmap_regions[TASK_MMAP_MAX];
+
+    /*
+     * Per-task file descriptor table (FASE 10.0.a).
+     *
+     * Replaces the old kernel-global fd[] table — each task now owns
+     * its own slots. fd 0/1/2 are wired by fd_init_for_task at task
+     * creation; fd 3+ get allocated by sys_open / sys_socket / etc.
+     *
+     * Kernel-resident tasks (servers, shell pre-FASE-10) get the same
+     * layout for uniformity; they normally don't issue read/write
+     * syscalls but having 0/1/2 set up means cmd_test inside the
+     * shell can exercise the fd API against its own task without
+     * special-casing.
+     */
+    osnos_fd_t fds[OSNOS_MAX_FDS];
 } task_t;
 
 void task_init(void);

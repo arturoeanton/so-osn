@@ -530,12 +530,12 @@ void proc_exit_current_user(int exit_code) {
      * sweep every non-stdio entry on exit.
      */
     for (int fd = 3; fd < OSNOS_MAX_FDS; fd++) {
-        osnos_fd_t *f = fd_get(fd);
+        osnos_fd_t *f = fd_get(t, fd);
         if (!f) continue;
         if (f->is_socket && f->sock_idx >= 0) {
             sock_close(f->sock_idx);
         }
-        fd_free(fd);
+        fd_free(t, fd);
     }
 
     /* Close any pipe endpoints the task held so the peer sees EOF

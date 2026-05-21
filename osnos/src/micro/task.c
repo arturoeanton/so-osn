@@ -36,6 +36,7 @@ int task_create(
             tasks[i].state == TASK_DEAD) {
 
             task_clear(&tasks[i]);
+            fd_init_for_task(&tasks[i]);
             tasks[i].pid   = next_pid++;
             tasks[i].name  = name;
             tasks[i].entry = entry;

@@ -71,13 +71,36 @@ static void tty_signal(int sig) {
 /* Deliver SIGTSTP to the foreground user task — Ctrl+Z. The task
  * transitions to TASK_STOPPED on its next dispatch (user_task_
  * trampoline checks the flag); resume via shell `fg`/`bg`. Send
- * IPC to the shell so it can drop fg_pid and print "[pid] stopped". */
+ * IPC to the shell so it can drop fg_pid and print "[pid] stopped".
+ *
+ * Special case: if the task is currently TASK_BLOCKED (e.g. asleep
+ * inside nanosleep) it will not be re-dispatched until the timer
+ * wakes it, so the stop_pending flag would sit unchecked and
+ * `jobs`/`fg` would see "blocked", not "stopped". Fold the stop
+ * into the state directly. The saved_iret_* are populated by the
+ * blocking syscall (nanosleep, etc.); when `fg` later flips state
+ * to READY, user_task_trampoline replays them and the syscall
+ * returns immediately — the sleep effectively gets interrupted
+ * with a normal-looking 0 return, which matches user intuition
+ * after a Ctrl+Z. */
 static void tty_stop_signal(void) {
     uint64_t pid = shell_fg_pid();
     if (pid == 0) return;
     task_t *t = task_by_pid(pid);
     if (!t || !t->pml4) return;
-    t->stop_pending = 1;
+    if (t->state == TASK_BLOCKED) {
+        /* Apply the stop transition directly. The trampoline (which
+         * normally consumes stop_pending and sets state=STOPPED) will
+         * not run until something resumes us, so we have to do the
+         * bookkeeping here. Leave stop_pending = 0 so the very first
+         * dispatch after fg/bg resumes cleanly instead of immediately
+         * re-stopping. */
+        t->state = TASK_STOPPED;
+    } else {
+        /* Running/ready/etc. Leave the flag set; the trampoline picks
+         * it up on the next dispatch and applies the transition + clear. */
+        t->stop_pending = 1;
+    }
     stat_signals++;
 
     ipc_msg_t msg;
