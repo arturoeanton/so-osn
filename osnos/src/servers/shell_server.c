@@ -234,17 +234,121 @@ static void shell_send_clear(void) {
     ipc_send(&msg);
 }
 
-/* ---- generic fs senders ---- */
+/* ---- generic fs senders ----
+ *
+ * Pre-FASE-10.3 these forwarded an IPC to SERVER_FS and the
+ * response came back asynchronously via the IPC_FS_RESPONSE
+ * handler in shell_server_tick. fs_server is gone now (10.3) —
+ * the shell speaks directly to the VFS layer and renders the
+ * result inline, then redraws the prompt. Behaviour is
+ * user-identical (same yellow text, same prompt cadence).
+ *
+ * Return value stays `osnos_status_t` so the existing check_fs
+ * callers don't need to change. Today nothing ever fails on
+ * the send path (we don't send), so OSNOS_OK is returned. The
+ * per-op error (vfs_* failure) is printed inline, like
+ * fs_server did via IPC_FS_RESPONSE.
+ */
+
+static void fs_print_yellow(const char *text) {
+    shell_send_console("\n");
+    shell_send_console_color(text, 0xffff00);
+    prompt();
+}
+
+/* Format an unsigned count with a suffix into a small buffer
+ * (e.g. "5 deleted\n"). Same shape as the old fs_server helper
+ * but lifted here for inline use. */
+static void shell_format_count(size_t n, const char *suffix,
+                                char *out, size_t out_size) {
+    char digits[20];
+    size_t k = 0;
+    if (n == 0) {
+        digits[k++] = '0';
+    } else {
+        while (n > 0 && k < sizeof(digits)) {
+            digits[k++] = (char)('0' + (n % 10));
+            n /= 10;
+        }
+    }
+    size_t w = 0;
+    while (k > 0 && w + 1 < out_size) out[w++] = digits[--k];
+    size_t s = 0;
+    while (suffix[s] && w + 1 < out_size) out[w++] = suffix[s++];
+    out[w] = 0;
+}
 
 static osnos_status_t shell_send_fs1(ipc_type_t type, const char *path) {
-    ipc_msg_t msg;
-    msg.from = SERVER_SHELL;
-    msg.to = SERVER_FS;
-    msg.type = type;
-    msg.arg0 = 0;
-    msg.arg1 = 0;
-    os_strlcpy(msg.data, path ? path : "", IPC_DATA_SIZE);
-    return ipc_send(&msg);
+    char buf[IPC_DATA_SIZE];
+    buf[0] = 0;
+    const char *p = path ? path : "";
+
+    switch (type) {
+    case IPC_FS_LIST: {
+        const char *q = p[0] ? p : "/";
+        if (vfs_path_has_wildcard(q)) {
+            size_t matches = vfs_glob_list(q, buf, sizeof(buf));
+            if (matches == 0) os_strlcpy(buf, "no match\n", sizeof(buf));
+        } else {
+            vfs_list_dir(q, buf, sizeof(buf));
+        }
+        break;
+    }
+    case IPC_FS_READ: {
+        if (vfs_path_has_wildcard(p)) {
+            size_t matches = vfs_glob_read(p, buf, sizeof(buf));
+            if (matches == 0) os_strlcpy(buf, "no match\n", sizeof(buf));
+        } else {
+            size_t got = 0;
+            osnos_status_t s = vfs_read(p, buf, sizeof(buf) - 1, &got);
+            if (s == OSNOS_OK) buf[got] = 0;
+            else               os_strlcpy(buf, "file not found\n", sizeof(buf));
+        }
+        break;
+    }
+    case IPC_FS_TOUCH: {
+        osnos_status_t s = vfs_touch(p);
+        os_strlcpy(buf, s == OSNOS_OK ? "touch ok\n" : "touch failed\n",
+                   sizeof(buf));
+        break;
+    }
+    case IPC_FS_DELETE: {
+        if (vfs_path_has_wildcard(p)) {
+            size_t n = vfs_glob_unlink(p);
+            if (n == 0) os_strlcpy(buf, "no match\n", sizeof(buf));
+            else        shell_format_count(n, " deleted\n", buf, sizeof(buf));
+        } else {
+            osnos_status_t s = vfs_unlink(p);
+            os_strlcpy(buf, s == OSNOS_OK ? "delete ok\n" : "delete failed\n",
+                       sizeof(buf));
+        }
+        break;
+    }
+    case IPC_FS_MKDIR: {
+        osnos_status_t s = vfs_mkdir(p);
+        os_strlcpy(buf, s == OSNOS_OK ? "mkdir ok\n" : "mkdir failed\n",
+                   sizeof(buf));
+        break;
+    }
+    case IPC_FS_RMDIR: {
+        osnos_status_t s = vfs_rmdir(p);
+        os_strlcpy(buf, s == OSNOS_OK ? "rmdir ok\n" : "rmdir failed\n",
+                   sizeof(buf));
+        break;
+    }
+    case IPC_FS_TREE: {
+        const char *q = p[0] ? p : "/";
+        size_t written = vfs_tree(q, buf, sizeof(buf));
+        if (written == 0) os_strlcpy(buf, "empty\n", sizeof(buf));
+        break;
+    }
+    default:
+        os_strlcpy(buf, "unknown op\n", sizeof(buf));
+        break;
+    }
+
+    fs_print_yellow(buf);
+    return OSNOS_OK;
 }
 
 static osnos_status_t shell_send_fs2(
@@ -252,20 +356,43 @@ static osnos_status_t shell_send_fs2(
     const char *a,
     const char *b
 ) {
-    ipc_msg_t msg;
-    msg.from = SERVER_SHELL;
-    msg.to = SERVER_FS;
-    msg.type = type;
-    msg.arg0 = 0;
-    msg.arg1 = 0;
+    char buf[IPC_DATA_SIZE];
+    buf[0] = 0;
+    const char *src = a ? a : "";
+    const char *dst = b ? b : "";
 
-    size_t a_len = os_strlcpy(msg.data, a, IPC_DATA_SIZE);
-
-    if (a_len + 1 < IPC_DATA_SIZE) {
-        os_strlcpy(msg.data + a_len + 1, b, IPC_DATA_SIZE - a_len - 1);
+    switch (type) {
+    case IPC_FS_WRITE: {
+        osnos_status_t s = vfs_write(src, dst, os_strlen(dst));
+        os_strlcpy(buf, s == OSNOS_OK ? "write ok\n" : "write failed\n",
+                   sizeof(buf));
+        break;
+    }
+    case IPC_FS_APPEND: {
+        osnos_status_t s = vfs_append(src, dst, os_strlen(dst));
+        os_strlcpy(buf, s == OSNOS_OK ? "append ok\n" : "append failed\n",
+                   sizeof(buf));
+        break;
+    }
+    case IPC_FS_COPY: {
+        osnos_status_t s = vfs_copy(src, dst);
+        os_strlcpy(buf, s == OSNOS_OK ? "cp ok\n" : "cp failed\n",
+                   sizeof(buf));
+        break;
+    }
+    case IPC_FS_MOVE: {
+        osnos_status_t s = vfs_move(src, dst);
+        os_strlcpy(buf, s == OSNOS_OK ? "mv ok\n" : "mv failed\n",
+                   sizeof(buf));
+        break;
+    }
+    default:
+        os_strlcpy(buf, "unknown op\n", sizeof(buf));
+        break;
     }
 
-    return ipc_send(&msg);
+    fs_print_yellow(buf);
+    return OSNOS_OK;
 }
 
 static void report_fs_failure(osnos_status_t status) {
@@ -3624,12 +3751,8 @@ void shell_server_tick(void) {
         return;
     }
 
-    if (msg.type == IPC_FS_RESPONSE) {
-        shell_send_console("\n");
-        shell_send_console_color(msg.data, 0xffff00);
-        prompt();
-        return;
-    }
+    /* IPC_FS_RESPONSE handler removed in FASE 10.3 — fs_server is
+     * gone and shell_send_fs1/fs2 render their result inline. */
 
     /*
      * Child task finished. Output from its sys_write() calls has already

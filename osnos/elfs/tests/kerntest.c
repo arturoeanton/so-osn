@@ -56,7 +56,6 @@ static void test_taskinfo(void) {
     int saw_shell    = 0;
     int saw_keyboard = 0;
     int saw_console  = 0;
-    int saw_fs       = 0;
     int saw_self     = 0;
     int n_user       = 0;
 
@@ -73,17 +72,15 @@ static void test_taskinfo(void) {
          * it migrates to a ring-3 ELF. Either name counts. */
         if (strcmp(info.name, "console")  == 0 ||
             strcmp(info.name, "consrv")   == 0) saw_console++;
-        if (strcmp(info.name, "fs")       == 0) saw_fs++;
         if ((long)info.pid == my_pid)           saw_self++;
         if (info.is_user)                       n_user++;
     }
 
     CHECK(saw_shell    == 1, "taskinfo: shell server present");
-    CHECK(saw_keyboard == 1, "taskinfo: keyboard server present");
+    CHECK(saw_keyboard == 1, "taskinfo: keyboard feeder present");
     CHECK(saw_console  == 1, "taskinfo: console server present");
-    CHECK(saw_fs       == 1, "taskinfo: fs server present");
     CHECK(saw_self     == 1, "taskinfo: own task visible");
-    CHECK(n_user       >= 1, "taskinfo: at least one ring-3 task");
+    CHECK(n_user       >= 2, "taskinfo: at least two ring-3 tasks (consrv+kbdsrv)");
 
     /* Walking past the slot table returns -ENOENT cleanly. */
     osnos_taskinfo_t dummy;

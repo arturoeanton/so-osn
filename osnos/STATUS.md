@@ -10,6 +10,7 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| FASE 10.3 fs_server eliminado | shell_send_fs1/fs2 ahora llaman vfs_* sincronamente + imprimen amarillo inline (sin IPC roundtrip). IPC_FS_RESPONSE handler removido del shell. **Borrados**: src/servers/fs_server.{c,h} (-240 LOC) + src/servers/console_server.{c,h} (-50 LOC) + int80 console_server_tick hack (-7 LOC). kmain sin fs_pid ni fs_server_init. SERVER_FS ID reservado en ABI pero no se registra | -290 |
 | FASE 10.2 keyboard_server ring-3 | **Segundo server en ring 3** (checkpoint pasado). SYS_TTY_INPUT=264 con guard solo-SERVER_KEYBOARD. Kernel keyboard_server.c reducido a feeder mínimo (poll + devfs_input_push). elfs/osn-server/kbdsrv.c (~90 LOC): lee /dev/input0, dispatch CSI arrows + sys_tty_input + ipc_send a shell. ipc_tty_input wrapper en libc. Comportamiento user-visible idéntico — typing, Ctrl+C/Z, arrow keys, ovi raw mode | 200 |
 | FASE 10.1 console_server ring-3 | **Primer server en ring 3**. SYS_IPC_SEND/RECV/SERVICE_REGISTER/LOOKUP (260-263). lib/libc/include/osnos_ipc.h con ipc_send/recv/recv_block/service_*. elfs/osn-server/consrv.c (~70 LOC): open(/dev/fb0)+register+loop. Framebuffer parser CSI extendido a truecolor SGR 38;2;R;G;B. kmain pre-registra SERVER_CONSOLE→pid del ELF antes de spawn shell. ps muestra consrv BLOCKED con dispatches > 1000 | 350 |
 | FASE 10.0.d + 10.0.e ABI + kerntest | osnos_ipc_abi.h (ipc_msg_t/SERVER_*/opcodes) compartido kernel↔ring-3; service.h+ipc.h forwardean. Build add `-I src/include` a USER_CFLAGS para que ELFs vean los headers ABI. SYS_TASKINFO=265 + osnos_taskinfo.h. /bin/kerntest con 22 PASS sobre sys_taskinfo, /dev/fb0/input0, pipe roundtrip, dup-pipe-share, /sys/meminfo | 220 |
@@ -63,7 +64,7 @@ canonical/raw, /home persistente cross-reboot.
   terminales (job control real ya está)
 - Process groups + sessions POSIX-strict (hoy job control usa
   pid 1-to-1 vía fg_pid; pgid/sid no existen)
-- FASE 10 (servers a ring 3 en elfs/osn-server/) — **en curso**, ver PLAN_FASE10.md (10.0 + 10.1 cerradas; próxima: 10.2 keyboard_server ring-3). El port completo de cmd_test queda postergado a 10.4 (los checks kernel-internos se quedan en cmd_test del shell por ahora; /bin/kerntest cubre la cara user-visible)
+- FASE 10 (servers a ring 3 en elfs/osn-server/) — **en curso**, ver PLAN_FASE10.md (10.0 + 10.1 + 10.2 + 10.3 cerradas; próxima: 10.4 shell_server ring-3, el grande ~4-5 hr). El port completo de cmd_test queda postergado a 10.4 (los checks kernel-internos se quedan en cmd_test del shell por ahora; /bin/kerntest cubre la cara user-visible)
 - fork() real (sin fork hoy)
 - Pipelines con más de 4 stages (hoy MAX_PIPELINE_STAGES=4)
 - Shell builtins (cat/ls/...) que respeten redirects sin
@@ -91,25 +92,24 @@ canonical/raw, /home persistente cross-reboot.
 | Network stack | `src/net/`: eth, arp, ip, icmp, udp, tcp, socket |
 | Process lifecycle | `src/proc/`: builtin, elf (loader), exec |
 | Lib freestanding | `src/lib/`: memory, printf, string |
-| **Servers ring-0 (a migrar)** | `src/servers/`: fs_server, keyboard_server, shell_server (+ console_server.c sin uso, queda hasta 10.5 cleanup) |
+| **Servers ring-0 (a migrar)** | `src/servers/`: keyboard_server (feeder mínimo, queda en ring-0 hasta FASE 11), shell_server (3375 LOC, a migrar en 10.4) |
 
 **Ring 3 — ELFs separados embebidos en el kernel vía objcopy:**
 
 | Categoría | ELFs | Cantidad | Detalle |
 |-----------|------|----------|---------|
-| 🆕 Servers | `consrv` | **1** | console server, FASE 10.1 — único server que ya migró |
+| 🆕 Servers | `consrv`, `kbdsrv` | **2** | FASE 10.1 + 10.2 — primeros servers ring-3 |
 | Shell script | `osh` | 1 | intérprete de scripts |
 | Tools (coreutils-like) | hello, true, false, init, cat, touch, mkdir, rmdir, rm, mv, cp, ls, echo, calc, sleep, kill, top, ovi, tcc, head | 20 | en `/bin/` |
 | Net | tcpclient, udptest, echotcp, selecttest, selectserver, httpd | 6 | clientes/servidores TCP/UDP |
 | Tests | hello_libc, libctest, ttytest, envtest, fptest, mmaptest, pipetest, fbtest, inputtest, kerntest, user_hello (bare) | 11 | sanidad + ABI |
-| **Total ELFs** | | **39** | |
+| **Total ELFs** | | **40** | |
 
-**Distinción clave**: de los 39 ELFs, solo `consrv` es un *server* (long-running daemon spawneado al boot por kmain). Los otros 38 son programas one-shot que el usuario invoca desde el shell.
+**Distinción clave**: de los 40 ELFs, `consrv` y `kbdsrv` son *servers* (long-running daemons spawneados al boot por kmain). Los otros 38 son programas one-shot.
 
-**Lo que falta migrar a ring 3 (FASE 10.2+):**
-- `keyboard_server.c` → próxima sesión, ELF `kbdsrv`
-- `fs_server.c` → eliminar entero (shell hace syscalls directos en 10.4)
+**Lo que falta migrar a ring 3 (FASE 10.4+):**
 - `shell_server.c` → ELF `shellsrv` (el más grande, ~3375 LOC sin cmd_test)
+- Cleanup final + ARCH.md actualizado (10.5)
 
 **Lo que NO migra en FASE 10 (queda ring 0, futuro FASE 11):**
 - Todos los drivers (framebuffer pixels, PS/2 hardware, ATA PIO, RTL8139, PIT, LAPIC)
@@ -2489,13 +2489,13 @@ Pre-reqs cerrados (10.0 entera, sesión 2026-05-21):
 - 10.0.d osnos_ipc_abi.h compartido kernel↔ring-3
 - 10.0.e SYS_TASKINFO + /bin/kerntest ELF
 
-Servers migrados:
+Servers migrados / eliminados:
 - ✅ 10.1 console_server → elfs/osn-server/consrv.c (PRIMER SERVER RING-3)
 - ✅ 10.2 keyboard_server → elfs/osn-server/kbdsrv.c (checkpoint pasado)
+- ✅ 10.3 fs_server ELIMINADO (-290 LOC) — shell habla vfs directo
 
-Servers a migrar (próximas sesiones):
-- 10.3 fs_server: ELIMINAR (shell hace syscalls directos mientras sigue ring-0)
-- 10.4 shell_server → elfs/osn-server/shellsrv.c
+Pendientes:
+- 10.4 shell_server → elfs/osn-server/shellsrv.c (el grande, ~4-5 hr)
 - 10.5 cleanup + ARCH.md actualizado
 
 ### FASE 11 — Drivers a ring 3 (futuro, NO mezclar con 10)

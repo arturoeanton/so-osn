@@ -1,7 +1,6 @@
 #include "syscall.h"
 
 #include "../proc/exec.h"
-#include "../servers/console_server.h"
 #include "task.h"
 
 /*
@@ -26,13 +25,11 @@
 uint64_t int80_dispatch_wrapper(syscall_frame_t *frame) {
     uint64_t result = syscall_dispatch(frame);
 
-    /*
-     * Drain pending console writes synchronously so a user task's
-     * sys_write to stdout becomes visible BEFORE we iretq back to
-     * ring 3 (which won't yield until it does another syscall or
-     * faults). Temporary until we have proper preemption / yield.
-     */
-    console_server_tick();
+    /* Note: pre-FASE-10.1 we drained the in-kernel console_server
+     * here so console writes were visible before the iretq. That's
+     * no longer needed — ipc_send wakes the ring-3 consrv via
+     * task_unblock, and the scheduler picks it up on its next
+     * dispatch. */
 
     /*
      * Honour a pending Ctrl+C kill before returning to ring 3. The

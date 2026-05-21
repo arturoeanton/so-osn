@@ -32,7 +32,6 @@
 #include "../fs/bootstrap.h"
 #include "../fs/ramfs.h"
 #include "../net/eth.h"
-#include "../servers/fs_server.h"
 
 // ======================================================
 // Limine requests
@@ -139,7 +138,6 @@ void kmain(void) {
     ramfs_init();
     bootstrap_fs();
 
-    int fs_pid = task_create("fs", fs_server_tick);
     /*
      * Kernel-side "keyboard" task is now a hardware-poll feeder only
      * (FASE 10.2): every tick it drains keyboard_poll into the
@@ -152,8 +150,12 @@ void kmain(void) {
     (void)keyboard_pid;
     int shell_pid = task_create("shell", shell_server_tick);
 
-    service_register(SERVER_FS, fs_pid);
     service_register(SERVER_SHELL, shell_pid);
+
+    /* SERVER_FS / fs_server.c removed in FASE 10.3 — the shell now
+     * speaks directly to the VFS layer. The SERVER_FS ID stays
+     * reserved in osnos_ipc_abi.h for ABI stability but nobody
+     * registers against it anymore. */
 
     /*
      * Console + keyboard policy servers run as ring-3 ELFs (FASE
@@ -172,7 +174,6 @@ void kmain(void) {
         service_register(SERVER_KEYBOARD, (uint64_t)kbdsrv_pid);
     }
 
-    fs_server_init();
     keyboard_server_init();
     shell_server_init();
 
