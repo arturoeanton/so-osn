@@ -129,7 +129,11 @@ USER_ELF_LIBC_SRCS := \
     elfs/tests/ttytest.c \
     elfs/tests/envtest.c \
     elfs/tests/fptest.c \
-    elfs/tests/mmaptest.c
+    elfs/tests/mmaptest.c \
+    elfs/tests/pipetest.c \
+    elfs/tests/fbtest.c \
+    elfs/tests/inputtest.c \
+    elfs/tests/kerntest.c
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS))
@@ -239,9 +243,12 @@ $(BUILD)/%.c.o: %.c
 	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(CPPFLAGS) -c $< -o $@
 
 # libc C objects.
+# -I src/include lets libc + user ELFs reach the shared ABI headers
+# (osnos_ipc_abi.h, osnos_keys.h, osnos_status.h) — single source of
+# truth shared with the kernel.
 $(BUILD)/$(LIBC_DIR)/%.c.o: $(LIBC_DIR)/%.c
 	mkdir -p "$(dir $@)"
-	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -I $(LIBC_INC) -MMD -MP -c $< -o $@
+	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include -MMD -MP -c $< -o $@
 
 # libc assembly objects (crt0.S).
 $(BUILD)/$(LIBC_DIR)/%.S.o: $(LIBC_DIR)/%.S
@@ -265,7 +272,7 @@ $(BUILD)/elfs/tests/user_hello.elf: elfs/tests/user_hello.c elfs/tests/user_hell
 # elfs/ (% matches "tools/ls", "net/httpd", etc.). All share libc.lds.
 $(BUILD)/elfs/%.elf: elfs/%.c elfs/libc.lds $(LIBC_A) $(LIBC_CRT0)
 	mkdir -p "$(dir $@)"
-	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -I $(LIBC_INC) -c $< -o $@.tmp.o
+	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include -c $< -o $@.tmp.o
 	$(LD) $(USER_LDFLAGS) -T elfs/libc.lds \
 	    $(LIBC_CRT0) $@.tmp.o $(LIBC_A) -o $@
 	rm $@.tmp.o

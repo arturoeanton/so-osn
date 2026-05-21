@@ -1,7 +1,53 @@
 #include "devfs.h"
 
+#include "../drivers/framebuffer.h"
+#include "../drivers/keyboard.h"
+#include "../include/osnos_status.h"
 #include "../lib/string.h"
 #include "vfs.h"
+
+/* ------------------------------------------------------------------ */
+/* /dev/input0 event ring                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Today the kernel keyboard_server already consumes raw events from
+ * the PS/2 driver each tick (feeds the TTY + IPC_KEY_EVENT). The
+ * /dev/input0 readers (e.g. /bin/inputtest, future ring-3 kbdsrv)
+ * must NOT call keyboard_poll() directly — that would race with the
+ * kernel server and lose events.
+ *
+ * Instead, keyboard_server pushes every event into this small ring
+ * buffer via devfs_input_push(), and input0_read drains it. Once
+ * FASE 10.2 moves the kbdsrv to ring 3, the kernel server goes away
+ * and the ring becomes the SOLE consumer of keyboard_poll.
+ */
+#define DEVFS_INPUT_RING 32
+static struct {
+    keyboard_event_t buf[DEVFS_INPUT_RING];
+    size_t head;
+    size_t tail;
+    size_t level;
+} input_ring;
+
+void devfs_input_push(keyboard_event_t ev) {
+    if (input_ring.level >= DEVFS_INPUT_RING) {
+        /* Drop oldest — match the TTY's overflow policy. */
+        input_ring.tail = (input_ring.tail + 1) % DEVFS_INPUT_RING;
+        input_ring.level--;
+    }
+    input_ring.buf[input_ring.head] = ev;
+    input_ring.head = (input_ring.head + 1) % DEVFS_INPUT_RING;
+    input_ring.level++;
+}
+
+static bool input_ring_pop(keyboard_event_t *out) {
+    if (input_ring.level == 0) return false;
+    *out = input_ring.buf[input_ring.tail];
+    input_ring.tail = (input_ring.tail + 1) % DEVFS_INPUT_RING;
+    input_ring.level--;
+    return true;
+}
 
 /*
  * Each character device has its own read/write semantics. Stat / readdir /
@@ -39,9 +85,58 @@ static osnos_status_t zero_write(const char *buf, size_t buf_size) {
     return OSNOS_OK;
 }
 
+/*
+ * /dev/fb0 — write-only character device backed by the framebuffer.
+ * Bytes pass through framebuffer_write_bytes which honours the same
+ * CSI escape vocabulary as the kernel console. Reads return EOF.
+ *
+ * Used by the future ring-3 console_server (FASE 10.1) which reads
+ * IPC_CONSOLE_WRITE messages and forwards them here via write(fb_fd).
+ */
+static osnos_status_t fb0_read(char *buf, size_t buf_size, size_t *out) {
+    (void)buf; (void)buf_size;
+    *out = 0;          /* EOF — framebuffer isn't a source. */
+    return OSNOS_OK;
+}
+
+static osnos_status_t fb0_write(const char *buf, size_t buf_size) {
+    framebuffer_write_bytes(buf, buf_size, 0xffffff);
+    return OSNOS_OK;
+}
+
+/*
+ * /dev/input0 — read-only character device exposing raw keyboard
+ * events as `keyboard_event_t` structs (3 bytes: ascii + keycode16).
+ *
+ * Non-blocking: returns EAGAIN when the keyboard buffer is empty so
+ * the libc loop yields via nanosleep. Used by the future ring-3
+ * kbdsrv (FASE 10.2) which reads from here and forwards into the TTY
+ * + the shell IPC.
+ */
+static osnos_status_t input0_read(char *buf, size_t buf_size, size_t *out) {
+    keyboard_event_t ev;
+    if (!input_ring_pop(&ev)) {
+        *out = 0;
+        return OSNOS_EAGAIN;
+    }
+    size_t n = sizeof(ev);
+    if (n > buf_size) n = buf_size;
+    const char *src = (const char *)&ev;
+    for (size_t i = 0; i < n; i++) buf[i] = src[i];
+    *out = n;
+    return OSNOS_OK;
+}
+
+static osnos_status_t input0_write(const char *buf, size_t buf_size) {
+    (void)buf; (void)buf_size;
+    return OSNOS_EROFS;
+}
+
 static const devfs_dev_t devices[] = {
-    { "null", null_read, null_write },
-    { "zero", zero_read, zero_write }
+    { "null",   null_read,  null_write  },
+    { "zero",   zero_read,  zero_write  },
+    { "fb0",    fb0_read,   fb0_write   },
+    { "input0", input0_read, input0_write }
 };
 
 #define DEVFS_DEV_COUNT (sizeof(devices) / sizeof(devices[0]))

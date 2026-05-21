@@ -141,6 +141,10 @@ DECLARE_ELF(ttytest);
 DECLARE_ELF(envtest);
 DECLARE_ELF(fptest);
 DECLARE_ELF(mmaptest);
+DECLARE_ELF(pipetest);
+DECLARE_ELF(fbtest);
+DECLARE_ELF(inputtest);
+DECLARE_ELF(kerntest);
 
 #undef DECLARE_ELF
 
@@ -203,6 +207,10 @@ static const builtin_t builtins[] = {
     ELF(envtest,      "dump environ + setenv/unsetenv smoke test"),
     ELF(fptest,       "stress per-task FXSAVE/FXRSTOR (run twice in //)"),
     ELF(mmaptest,     "smoke test anonymous mmap/munmap"),
+    ELF(pipetest,     "exercise sys_pipe(2) + per-task pipe fds"),
+    ELF(fbtest,       "write a line to /dev/fb0 (FASE 10.0.c)"),
+    ELF(inputtest,    "read 5 keystrokes from /dev/input0 (FASE 10.0.c)"),
+    ELF(kerntest,     "FASE 10 ABI userland tests (sys_taskinfo, dev, pipe, dup)"),
 };
 
 #undef USER

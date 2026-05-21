@@ -273,6 +273,32 @@ void framebuffer_draw_string(
     }
 }
 
+void framebuffer_write_bytes(
+    const char *buf,
+    size_t n,
+    uint32_t color
+) {
+    /* draw_string is NUL-terminated and parses ESC[...] sequences in
+     * order, so we shovel `buf` into a stack chunk + null-terminate +
+     * emit. Embedded NULs are skipped (CSI uses ESC = 0x1B, never 0x00,
+     * so dropping NULs is safe). Loop in 256-byte chunks for huge
+     * writes. */
+    if (!buf || n == 0) return;
+    char chunk[257];
+    size_t cap = sizeof(chunk) - 1;
+    size_t i = 0;
+    while (i < n) {
+        size_t len = 0;
+        while (i < n && len < cap) {
+            char c = buf[i++];
+            if (c == 0) continue;            /* drop embedded NULs */
+            chunk[len++] = c;
+        }
+        chunk[len] = 0;
+        if (len > 0) framebuffer_draw_string(chunk, color);
+    }
+}
+
 void framebuffer_backspace(void) {
     if (cursor_x <= TERM_MARGIN_X) {
         if (cursor_y <= TERM_MARGIN_Y) {

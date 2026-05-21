@@ -20,6 +20,7 @@
 #define SYS_MUNMAP   11
 #define SYS_LSEEK     8
 #define SYS_BRK      12
+#define SYS_PIPE     22
 #define SYS_DUP      32
 #define SYS_DUP2     33
 #define SYS_NANOSLEEP 35
@@ -49,7 +50,8 @@
 #define SYS_SETSOCKOPT 54
 
 /* osnos-specific (above 250 to dodge Linux's #201 = time, #228 = clock_gettime). */
-#define SYS_ISATTY  250
+#define SYS_ISATTY      250
+#define SYS_TASKINFO    265
 
 /*
  * Saved user GPR set, pushed by int80_entry / syscall_entry on every
@@ -200,6 +202,23 @@ int64_t sys_munmap (void *addr, size_t length);
  */
 int64_t sys_dup     (int fd);
 int64_t sys_dup2    (int oldfd, int newfd);
+
+/*
+ * Linux pipe(2). Allocates a fresh kernel pipe object + two task-local
+ * fds: pipefd[0] = read end, pipefd[1] = write end. Returns 0 on
+ * success and -errno on failure (EMFILE if the fd table is full,
+ * ENFILE if the pipe pool is empty, EFAULT for bad user pointer).
+ */
+int64_t sys_pipe    (int *pipefd);
+
+/*
+ * SYS_TASKINFO — read-only snapshot of a task slot. Lets ring-3
+ * inspectors enumerate the task table without leaking saved iret
+ * frames or pml4 pointers. Walk idx from 0..MAX_TASKS-1; -ENOENT
+ * when the slot is unused or out of range, 0 on success.
+ */
+struct osnos_taskinfo;
+int64_t sys_taskinfo(size_t idx, struct osnos_taskinfo *out);
 
 /*
  * Minimal fcntl(2). Supported cmds:

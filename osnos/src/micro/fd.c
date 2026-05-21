@@ -20,7 +20,11 @@ static inline void fd_clear_slot(osnos_fd_t *f) {
     f->is_special = false;
     f->is_dir     = false;
     f->is_socket  = false;
+    f->is_pipe    = false;
+    f->is_chr     = false;
     f->sock_idx   = -1;
+    f->pipe_ref   = 0;
+    f->pipe_side  = 0;
     f->flags      = 0;
     f->offset     = 0;
     f->path[0]    = 0;
@@ -85,7 +89,11 @@ static void fd_copy_struct(osnos_fd_t *dst, const osnos_fd_t *src) {
     dst->is_special = src->is_special;
     dst->is_dir     = src->is_dir;
     dst->is_socket  = src->is_socket;
+    dst->is_pipe    = src->is_pipe;
+    dst->is_chr     = src->is_chr;
     dst->sock_idx   = src->sock_idx;
+    dst->pipe_ref   = src->pipe_ref;
+    dst->pipe_side  = src->pipe_side;
     dst->flags      = src->flags;
     dst->offset     = src->offset;
     for (int i = 0; i < OSNOS_PATH_MAX; i++) dst->path[i] = src->path[i];

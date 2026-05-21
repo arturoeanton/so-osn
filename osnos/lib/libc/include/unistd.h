@@ -41,6 +41,14 @@ int     dup (int fd);
 int     dup2(int oldfd, int newfd);
 
 /*
+ * Linux pipe(2). Allocates a fresh kernel pipe + two task-local fds.
+ * pipefd[0] = read end, pipefd[1] = write end. Returns 0 on success,
+ * -1 on failure with errno set (EMFILE if the fd table is full,
+ * ENFILE if the kernel pipe pool is empty, EFAULT for bad pointer).
+ */
+int     pipe(int pipefd[2]);
+
+/*
  * Linux brk(addr): set the program break to addr; returns the new
  * break, or the OLD break if the request was refused. sbrk(incr)
  * is a libc convenience that adjusts brk by incr and returns the

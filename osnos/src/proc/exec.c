@@ -1,6 +1,7 @@
 #include "exec.h"
 
 #include "../fs/vfs.h"
+#include "../include/osnos_fcntl.h"
 #include "../include/osnos_status.h"
 #include "../lib/string.h"
 #include "../micro/fd.h"
@@ -529,20 +530,24 @@ void proc_exit_current_user(int exit_code) {
      * shell server doesn't open fds (talks via IPC), so it's safe to
      * sweep every non-stdio entry on exit.
      */
-    for (int fd = 3; fd < OSNOS_MAX_FDS; fd++) {
-        osnos_fd_t *f = fd_get(t, fd);
-        if (!f) continue;
+    /* Sweep fd 0..MAX so pipe ends attached to stdin/stdout (via
+     * proc_execve_pipeline) also get released, not just regular
+     * fds 3+. is_special slots that were never overwritten with a
+     * pipe / socket are no-ops. */
+    for (int fd = 0; fd < OSNOS_MAX_FDS; fd++) {
+        osnos_fd_t *f = &t->fds[fd];
+        if (!f->used) continue;
         if (f->is_socket && f->sock_idx >= 0) {
             sock_close(f->sock_idx);
         }
-        fd_free(t, fd);
+        if (f->is_pipe && f->pipe_ref) {
+            if (f->pipe_side == 0) pipe_close_reader(f->pipe_ref);
+            else                   pipe_close_writer(f->pipe_ref);
+            f->pipe_ref = 0;
+            f->is_pipe  = false;
+        }
+        if (fd >= 3) fd_free(t, fd);
     }
-
-    /* Close any pipe endpoints the task held so the peer sees EOF
-     * (reader exit) or EPIPE (writer exit) and can make progress
-     * instead of looping on EAGAIN forever. */
-    if (t->pipe_out) { pipe_close_writer(t->pipe_out); t->pipe_out = 0; }
-    if (t->pipe_in)  { pipe_close_reader(t->pipe_in);  t->pipe_in  = 0; }
 
     /* mmap regions ride on the user pml4 we destroy below, so the
      * physical pages would already get freed by address_space_destroy.
@@ -714,10 +719,12 @@ int64_t proc_execve_pipeline(const char *const paths[],
     }
 
     /*
-     * Spawn each stage and wire its endpoints. proc_execve
-     * leaves the new task READY but not yet dispatched, so we can
-     * safely mutate its task_t.pipe_in/pipe_out before scheduler
-     * picks it up.
+     * Spawn each stage and wire its endpoints. proc_execve leaves the
+     * new task READY but not yet dispatched, so we can safely mutate
+     * its fd table before the scheduler picks it up. fd 0 = read end
+     * of the pipe behind this stage (i > 0); fd 1 = write end of the
+     * pipe ahead of this stage (i < n - 1). Both override the default
+     * `is_special` stdin/stdout slots installed by fd_init_for_task.
      */
     int64_t pids[MAX_PIPELINE_STAGES];
     for (int i = 0; i < n_stages; i++) pids[i] = -1;
@@ -725,14 +732,17 @@ int64_t proc_execve_pipeline(const char *const paths[],
     for (int i = 0; i < n_stages; i++) {
         pids[i] = proc_execve(paths[i], args[i], envp);
         if (pids[i] < 0) {
-            /* Partial failure: kill anything we already spawned
-             * (kill_pending fires at next scheduler dispatch), and
-             * release pipe refs so the slots return to the pool. */
+            /* Partial failure: detach pipe ends from already-spawned
+             * stages so their exit cleanup doesn't try to close pipes
+             * that we're about to close ourselves, then mark them
+             * to die and drain every pipe slot back to the pool. */
             for (int j = 0; j < i; j++) {
                 task_t *st = task_by_pid((uint64_t)pids[j]);
                 if (st) {
-                    st->pipe_in     = 0;
-                    st->pipe_out    = 0;
+                    osnos_fd_t *fin  = &st->fds[OSNOS_FD_STDIN];
+                    osnos_fd_t *fout = &st->fds[OSNOS_FD_STDOUT];
+                    fin->is_pipe   = false; fin->pipe_ref  = 0;
+                    fout->is_pipe  = false; fout->pipe_ref = 0;
                     st->kill_pending = 1;
                 }
             }
@@ -744,8 +754,24 @@ int64_t proc_execve_pipeline(const char *const paths[],
         }
         task_t *t = task_by_pid((uint64_t)pids[i]);
         if (t) {
-            if (i > 0)              t->pipe_in  = pipes[i - 1];
-            if (i < n_stages - 1)   t->pipe_out = pipes[i];
+            if (i > 0) {
+                osnos_fd_t *f = &t->fds[OSNOS_FD_STDIN];
+                f->used       = true;
+                f->is_special = false;
+                f->is_pipe    = true;
+                f->pipe_ref   = pipes[i - 1];
+                f->pipe_side  = 0;          /* read end */
+                f->flags      = O_RDONLY;
+            }
+            if (i < n_stages - 1) {
+                osnos_fd_t *f = &t->fds[OSNOS_FD_STDOUT];
+                f->used       = true;
+                f->is_special = false;
+                f->is_pipe    = true;
+                f->pipe_ref   = pipes[i];
+                f->pipe_side  = 1;          /* write end */
+                f->flags      = O_WRONLY;
+            }
         }
     }
 

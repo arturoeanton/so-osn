@@ -2,10 +2,13 @@
 
 #include <stdint.h>
 
-#define SERVER_KEYBOARD 1
-#define SERVER_SHELL    2
-#define SERVER_CONSOLE  3
-#define SERVER_FS       4
+#include "../include/osnos_ipc_abi.h"
+
+/*
+ * Service registry — maps a SERVER_* id to the pid currently
+ * implementing it. SERVER_* constants live in osnos_ipc_abi.h so
+ * ring-3 servers see the same numbers as the kernel.
+ */
 
 void service_register(uint64_t service_id, uint64_t pid);
 uint64_t service_get_pid(uint64_t service_id);

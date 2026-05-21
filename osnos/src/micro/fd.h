@@ -27,12 +27,18 @@
 #define OSNOS_FD_STDOUT  1
 #define OSNOS_FD_STDERR  2
 
+struct pipe;
+
 typedef struct {
     bool     used;
     bool     is_special;             /* stdin/stdout/stderr */
     bool     is_dir;                 /* opened a directory (for getdents) */
     bool     is_socket;              /* opened via sys_socket */
+    bool     is_pipe;                /* opened via sys_pipe / inherited from shell */
+    bool     is_chr;                 /* character device (/dev/fb0, /dev/input0, ...) */
     int      sock_idx;               /* index into net/socket table, when is_socket */
+    struct pipe *pipe_ref;           /* shared pipe object, when is_pipe */
+    int      pipe_side;              /* 0 = read end, 1 = write end (when is_pipe) */
     int      flags;                  /* O_RDONLY etc. */
     uint64_t offset;                 /* file position OR readdir cursor */
     char     path[OSNOS_PATH_MAX];

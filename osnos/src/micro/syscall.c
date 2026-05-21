@@ -7,6 +7,7 @@
 #include "../include/osnos_dirent.h"
 #include "../include/osnos_fcntl.h"
 #include "../include/osnos_status.h"
+#include "../include/osnos_taskinfo.h"
 #include "../lib/string.h"
 #include "../net/socket.h"
 #include "../net/tcp.h"
@@ -82,6 +83,10 @@ int64_t sys_open(const char *path, int flags, uint32_t mode) {
     f->flags  = flags;
     f->offset = 0;
     f->is_dir = is_dir;
+    /* Character devices need stream semantics — sys_read must NOT
+     * apply offset-based slicing because the backend produces fresh
+     * data on every call (keyboard event, fb scrollback, etc.). */
+    f->is_chr = exists && (st.type == VFS_NODE_CHR);
     return fd;
 }
 
@@ -95,6 +100,10 @@ int64_t sys_close(int fd) {
     if (f->is_special) return err(OSNOS_EBADF);
     if (f->is_socket && f->sock_idx >= 0) {
         sock_close(f->sock_idx);
+    }
+    if (f->is_pipe && f->pipe_ref) {
+        if (f->pipe_side == 0) pipe_close_reader(f->pipe_ref);
+        else                   pipe_close_writer(f->pipe_ref);
     }
     fd_free(task_current(), fd);
     return 0;
@@ -138,11 +147,16 @@ int64_t sys_write(int fd, const void *buf, size_t count) {
 
     if (fd == OSNOS_FD_STDOUT || fd == OSNOS_FD_STDERR) {
         task_t *cur = task_current();
-        /* Pipe takes priority over file redirect over console. */
-        if (cur && cur->pipe_out) {
-            int64_t r = pipe_write(cur->pipe_out, buf, count);
-            if (r < 0) return r;   /* already a -errno */
-            return r;
+        /* Pipe end attached to fd 1 (set by proc_execve_pipeline for
+         * upstream stages). Same logic as fd 0 above — moved off
+         * task_t.pipe_out into the per-task fd table. Note: only
+         * STDOUT (fd 1) carries the pipe ref; fd 2 (stderr) stays
+         * routed to the console even inside a pipeline, which is
+         * closer to POSIX than the previous "both go to the pipe"
+         * behaviour. */
+        osnos_fd_t *sout = cur ? fd_get(cur, fd) : 0;
+        if (sout && sout->is_pipe && sout->pipe_ref && sout->pipe_side == 1) {
+            return pipe_write(sout->pipe_ref, buf, count);
         }
         /* Redirected stdout (shell parsed `cmd > file` / `cmd >> file`). */
         if (cur && cur->stdout_redir[0] != 0) {
@@ -157,6 +171,13 @@ int64_t sys_write(int fd, const void *buf, size_t count) {
 
     osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f || f->is_special) return err(OSNOS_EBADF);
+
+    /* User-side pipe end via sys_pipe — short-circuit to the kernel
+     * pipe object. Only the write side is legal here. */
+    if (f->is_pipe) {
+        if (f->pipe_side != 1 || !f->pipe_ref) return err(OSNOS_EBADF);
+        return pipe_write(f->pipe_ref, buf, count);
+    }
 
     int access = f->flags & O_ACCMODE;
     if (access == O_RDONLY) return err(OSNOS_EBADF);
@@ -183,9 +204,14 @@ int64_t sys_write(int fd, const void *buf, size_t count) {
 
     vfs_stat_t st;
     size_t existing = 0;
+    bool is_chr = false;
     if (vfs_stat(f->path, &st) == OSNOS_OK) {
-        if (st.type != VFS_NODE_REG) return err(OSNOS_EISDIR);
-        existing = st.size;
+        if (st.type == VFS_NODE_DIR) return err(OSNOS_EISDIR);
+        is_chr   = (st.type == VFS_NODE_CHR);
+        /* Character devices are streams — size is meaningless; the
+         * RMW slow path doesn't apply. Force the fast-path "off ==
+         * existing" branch so bytes flow straight to the backend. */
+        existing = is_chr ? f->offset : st.size;
     }
 
     size_t off = f->offset;
@@ -236,10 +262,13 @@ int64_t sys_read(int fd, void *buf, size_t count) {
 
     if (fd == OSNOS_FD_STDIN) {
         task_t *cur = task_current();
-        /* Pipe takes priority over file redirect over TTY. */
-        if (cur && cur->pipe_in) {
-            int64_t r = pipe_read(cur->pipe_in, buf, count);
-            return r;  /* already EOF (0) / -EAGAIN / -errno */
+        /* Pipe end attached to fd 0 (set by proc_execve_pipeline for
+         * downstream stages). Takes priority over file redirect over
+         * TTY. The fd slot is the new home of what used to live in
+         * task_t.pipe_in — same kernel pipe object, same semantics. */
+        osnos_fd_t *sin = cur ? fd_get(cur, OSNOS_FD_STDIN) : 0;
+        if (sin && sin->is_pipe && sin->pipe_ref && sin->pipe_side == 0) {
+            return pipe_read(sin->pipe_ref, buf, count);
         }
         /* Redirected stdin (shell parsed `cmd < file`). */
         if (cur && cur->stdin_redir[0] != 0) {
@@ -276,6 +305,14 @@ int64_t sys_read(int fd, void *buf, size_t count) {
 
     osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f || f->is_special) return err(OSNOS_EBADF);
+
+    /* User-side pipe end via sys_pipe — short-circuit to the kernel
+     * pipe object. Only the read side is legal here. */
+    if (f->is_pipe) {
+        if (f->pipe_side != 0 || !f->pipe_ref) return err(OSNOS_EBADF);
+        return pipe_read(f->pipe_ref, buf, count);
+    }
+
     if (f->is_dir) return err(OSNOS_EISDIR);
 
     int access = f->flags & O_ACCMODE;
@@ -290,6 +327,17 @@ int64_t sys_read(int fd, void *buf, size_t count) {
     size_t got = 0;
     osnos_status_t s = vfs_read(f->path, tmp, sizeof(tmp), &got);
     if (s != OSNOS_OK) return err(s);
+
+    /* Character devices are streams — each backend call produces a
+     * fresh batch of bytes (one keyboard event, the current FB span,
+     * etc.). Bypass the offset-based slicing so the second read
+     * doesn't see "offset >= got" and report a spurious EOF. */
+    if (f->is_chr) {
+        size_t n = (count < got) ? count : got;
+        char *out = (char *)buf;
+        for (size_t i = 0; i < n; i++) out[i] = tmp[i];
+        return (int64_t)n;
+    }
 
     if (f->offset >= got) return 0;
 
@@ -1119,6 +1167,104 @@ int64_t sys_dup2(int oldfd, int newfd) {
     return r;
 }
 
+/* ------------------------------------------------------------------ */
+/* sys_taskinfo — read-only inspection of a task slot. Safe to expose */
+/* to ring 3: copies a small struct out, hides kernel-internal fields */
+/* like saved iret frames, kstacks, and pml4 pointers.                */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_taskinfo(size_t idx, struct osnos_taskinfo *out) {
+    if (!out) return err(OSNOS_EFAULT);
+
+    const task_t *t = task_slot(idx);
+    if (!t) return err(OSNOS_ENOENT);
+
+    osnos_taskinfo_t info;
+    for (size_t i = 0; i < sizeof(info); i++) ((char *)&info)[i] = 0;
+    info.pid        = t->pid;
+    info.is_user    = (t->pml4 != 0) ? 1 : 0;
+    info.dispatches = t->dispatches;
+    /* Map kernel task_state_t (numeric values may diverge from the
+     * ABI in the future — translate explicitly). */
+    switch (t->state) {
+        case TASK_UNUSED:  info.state = OSNOS_TASK_UNUSED;  break;
+        case TASK_READY:   info.state = OSNOS_TASK_READY;   break;
+        case TASK_RUNNING: info.state = OSNOS_TASK_RUNNING; break;
+        case TASK_BLOCKED: info.state = OSNOS_TASK_BLOCKED; break;
+        case TASK_STOPPED: info.state = OSNOS_TASK_STOPPED; break;
+        case TASK_DEAD:    info.state = OSNOS_TASK_DEAD;    break;
+        default:           info.state = OSNOS_TASK_UNUSED;  break;
+    }
+    if (t->name) {
+        size_t n = 0;
+        while (t->name[n] && n < OSNOS_TASKINFO_NAME_MAX - 1) {
+            info.name[n] = t->name[n];
+            n++;
+        }
+        info.name[n] = 0;
+    }
+
+    if (copy_to_user(out, &info, sizeof(info)) != OSNOS_OK) {
+        return err(OSNOS_EFAULT);
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_pipe — Linux pipe(2). Allocates a kernel pipe + two fds in the */
+/* caller's table: [0] = read end, [1] = write end.                   */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_pipe(int *pipefd) {
+    if (!pipefd) return err(OSNOS_EFAULT);
+
+    task_t *t = task_current();
+    if (!t) return err(OSNOS_ESRCH);
+
+    /* Grab a fresh pipe object from the kernel pool. */
+    pipe_t *p = pipe_create();
+    if (!p) return err(OSNOS_ENFILE);
+
+    /* Reserve two fd slots in the caller's table. If the second alloc
+     * fails after the first succeeded, roll back so the table stays
+     * consistent + the pipe gets freed. */
+    int rfd = fd_alloc(t);
+    if (rfd < 0) {
+        pipe_close_reader(p);
+        pipe_close_writer(p);
+        return err(OSNOS_EMFILE);
+    }
+    int wfd = fd_alloc(t);
+    if (wfd < 0) {
+        fd_free(t, rfd);
+        pipe_close_reader(p);
+        pipe_close_writer(p);
+        return err(OSNOS_EMFILE);
+    }
+
+    osnos_fd_t *rf = fd_get(t, rfd);
+    osnos_fd_t *wf = fd_get(t, wfd);
+    rf->is_pipe   = true;
+    rf->pipe_ref  = p;
+    rf->pipe_side = 0;   /* read end */
+    rf->flags     = O_RDONLY;
+    wf->is_pipe   = true;
+    wf->pipe_ref  = p;
+    wf->pipe_side = 1;   /* write end */
+    wf->flags     = O_WRONLY;
+
+    /* Copy [rfd, wfd] back to user. */
+    int kbuf[2] = { rfd, wfd };
+    if (copy_to_user(pipefd, kbuf, sizeof(kbuf)) != OSNOS_OK) {
+        fd_free(t, rfd);
+        fd_free(t, wfd);
+        pipe_close_reader(p);
+        pipe_close_writer(p);
+        return err(OSNOS_EFAULT);
+    }
+    return 0;
+}
+
 int64_t sys_fcntl(int fd, int cmd, int64_t arg) {
     osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f) return err(OSNOS_EBADF);
@@ -1514,6 +1660,12 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
         case SYS_DUP2:
             return pack(sys_dup2(
                 (int)frame->rdi, (int)frame->rsi));
+        case SYS_PIPE:
+            return pack(sys_pipe((int *)frame->rdi));
+        case SYS_TASKINFO:
+            return pack(sys_taskinfo(
+                (size_t)frame->rdi,
+                (struct osnos_taskinfo *)frame->rsi));
         case SYS_FCNTL:
             return pack(sys_fcntl(
                 (int)frame->rdi,

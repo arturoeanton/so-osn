@@ -149,16 +149,6 @@ typedef struct task {
     uint64_t  stdout_redir_off;  /* write cursor into stdout file */
 
     /*
-     * Pipe endpoints for `cmd1 | cmd2`. When the shell wires a
-     * pipeline, the producer gets pipe_out set; the consumer gets
-     * pipe_in. sys_write(1) / sys_read(0) consult these BEFORE the
-     * file-redirect path so the in-kernel pipe object short-
-     * circuits any TTY/console traffic. NULL = no pipe.
-     */
-    struct pipe *pipe_in;
-    struct pipe *pipe_out;
-
-    /*
      * Per-task FPU/SSE state for FXSAVE/FXRSTOR. The instruction
      * dumps/loads 512 bytes aligned to 16. We snapshot the dying
      * task's HW regs into here when task_run_next switches to a

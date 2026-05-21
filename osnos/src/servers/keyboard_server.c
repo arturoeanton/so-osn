@@ -1,6 +1,7 @@
 #include "keyboard_server.h"
 
 #include "../drivers/keyboard.h"
+#include "../fs/devfs.h"
 #include "../include/osnos_keys.h"
 #include "../micro/ipc.h"
 #include "../micro/tty.h"
@@ -15,6 +16,12 @@ void keyboard_server_tick(void) {
     if (!keyboard_poll(&ev)) {
         return;
     }
+
+    /* Fan out the raw event to the /dev/input0 ring so user tasks
+     * reading from that fd see every keystroke too. The TTY +
+     * IPC_KEY_EVENT fan-out below is unchanged — both paths are
+     * fed independently. */
+    devfs_input_push(ev);
 
     /*
      * Feed printable chars + newline + backspace into the TTY line

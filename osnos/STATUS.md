@@ -10,6 +10,10 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| FASE 10.0.d + 10.0.e ABI + kerntest | osnos_ipc_abi.h (ipc_msg_t/SERVER_*/opcodes) compartido kernel↔ring-3; service.h+ipc.h forwardean. Build add `-I src/include` a USER_CFLAGS para que ELFs vean los headers ABI. SYS_TASKINFO=265 + osnos_taskinfo.h. /bin/kerntest con 22 PASS sobre sys_taskinfo, /dev/fb0/input0, pipe roundtrip, dup-pipe-share, /sys/meminfo | 220 |
+| FASE 10.0.c /dev/fb0 + /dev/input0 | devfs char devices nuevos: fb0 (write → framebuffer via framebuffer_write_bytes) e input0 (read → keyboard_event_t via ring de 32). keyboard_server fan-outs a TTY + IPC + ring sin perder eventos. osnos_fd_t.is_chr para bypass de offset-slicing en streams; sys_write acepta CHR (antes EISDIR). /bin/fbtest + /bin/inputtest | 180 |
+| FASE 10.0.b pipe(2) syscall | SYS_PIPE=22 expuesto a userland; osnos_fd_t extendido (is_pipe/pipe_ref/pipe_side); sys_read/sys_write reconocen pipes via fd; pipeline migrado de task_t.pipe_in/pipe_out a fds; cleanup en exit barre fd 0..MAX; libc pipe() wrapper + /bin/pipetest (9/9 pass) | 240 |
+| FASE 10.0.a-1 per-task fd tables | `osnos_fd_t fds[16]` dentro de task_t; fd_get/alloc/free/dup* explícitos con `task_t *`; 36 call sites mecánicos; arregla Ctrl+Z-sobre-BLOCKED y kill-sobre-STOPPED; filtra control chars (<0x20) leak vía IPC_KEY_EVENT | 250 |
 | Ctrl+Z / fg / bg / jobs | TASK_STOPPED + stop_pending + VSUSP, shell job-control cmds | 250 |
 | mmap/munmap anónimo | SYS_MMAP/MUNMAP, bump-allocator en `0x20000000`, libc + sys/mman.h + 12 tests | 250 |
 | Pipes + redirects mezclados | `a < in.txt \| b \| c > out.txt`, middle-stage redir validado, `echo -e` shell builtin | 200 |
@@ -57,9 +61,8 @@ canonical/raw, /home persistente cross-reboot.
   terminales (job control real ya está)
 - Process groups + sessions POSIX-strict (hoy job control usa
   pid 1-to-1 vía fg_pid; pgid/sid no existen)
-- FASE 10 (servers a ring 3 en elfs/osn-server/)
+- FASE 10 (servers a ring 3 en elfs/osn-server/) — **en curso**, ver PLAN_FASE10.md (10.0 ENTERA cerrada: a/b/c/d/e; próxima sesión: 10.1 console_server ring-3). El port completo de cmd_test queda postergado a 10.4 (los checks kernel-internos se quedan en cmd_test del shell por ahora; /bin/kerntest cubre la cara user-visible)
 - fork() real (sin fork hoy)
-- pipe(2) syscall expuesto a user (necesita per-task fd tables)
 - Pipelines con más de 4 stages (hoy MAX_PIPELINE_STAGES=4)
 - Shell builtins (cat/ls/...) que respeten redirects sin
   short-circuit a ELF (echo ya lo hace via echo_unescape)
@@ -2434,21 +2437,37 @@ OK 9.4 /bin/top — viewer live — VERIFICADO en QEMU
      shell siguen vivos. Es la prueba visual de que preempt CPL=3
      + sleep real + IRQ delivery + bg jobs funcionan en conjunto.
 
-### FASE 10 — Microkernel real
-43. mover drivers a userspace
-44. mover servers a userspace
-45. IPC user/kernel real
-46. isolation por address spaces
+### FASE 10 — Servers a ring 3 (en curso, plan detallado en PLAN_FASE10.md)
+Pre-reqs cerrados (10.0 entera, sesión 2026-05-21):
+- 10.0.a per-task fd tables (osnos_fd_t fds[16] dentro de task_t)
+- 10.0.b pipe(2) syscall + pipeline migrado a fds reales
+- 10.0.c /dev/fb0 + /dev/input0 char devices
+- 10.0.d osnos_ipc_abi.h compartido kernel↔ring-3
+- 10.0.e SYS_TASKINFO + /bin/kerntest ELF
 
-### FASE 11 — TUI potente
-47. mini Norton Commander / mini-mc
-48. viewer
-ok editor **ovi simple vi**
-50. copy/move/delete visual
+Servers a migrar (próximas sesiones):
+43. 10.1 console_server → elfs/osn-server/consrv.c (lee IPC, escribe /dev/fb0)
+44. 10.2 keyboard_server → elfs/osn-server/kbdsrv.c (lee /dev/input0, escribe IPC)
+45. 10.3 fs_server: ELIMINAR (shell ring-3 usa syscalls directos)
+46. 10.4 shell_server → elfs/osn-server/shellsrv.c
+47. 10.5 cleanup + ARCH.md actualizado
 
-### FASE 12 — Gráfico
-51. window_server
-52. terminal window
-53. Chip-8 emulator
-54. mouse
-55. compositor simple
+### FASE 11 — Drivers a ring 3 (futuro, NO mezclar con 10)
+- IRQ delegation por IPC desde kernel-side handlers
+- MMIO mapping per-task con permisos especiales
+- Port-IO delegation (syscall whitelist o IOPB en TSS)
+- DMA bouncing via kernel-mediated buffer pool
+- Portar PS/2, framebuffer, ATA, RTL8139, PIT a elfs/osn-driver/
+
+### FASE 12 — TUI potente
+- mini Norton Commander / mini-mc
+- file viewer
+- ok editor **ovi simple vi**
+- copy/move/delete visual
+
+### FASE 13 — Gráfico
+- window_server
+- terminal window
+- Chip-8 emulator
+- mouse
+- compositor simple

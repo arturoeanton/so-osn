@@ -198,6 +198,10 @@ int dup2(int oldfd, int newfd) {
         osnos_syscall2(SYS_DUP2, oldfd, newfd));
 }
 
+int pipe(int pipefd[2]) {
+    return (int)set_errno(osnos_syscall1(SYS_PIPE, (long)pipefd));
+}
+
 int fcntl(int fd, int cmd, ...) {
     va_list ap;
     va_start(ap, cmd);

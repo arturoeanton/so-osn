@@ -30,6 +30,18 @@ void framebuffer_draw_string(
     uint32_t color
 );
 
+/*
+ * Write `n` raw bytes (NUL-tolerant). For /dev/fb0 — user code may
+ * write any byte sequence; we forward to draw_string in chunks via a
+ * NUL-terminated stack buffer. Embedded NULs are skipped so they
+ * don't terminate a chunk early.
+ */
+void framebuffer_write_bytes(
+    const char *buf,
+    size_t n,
+    uint32_t color
+);
+
 void framebuffer_backspace(void);
 
 /* Visible terminal area in CHARACTERS (after margins). Used by
