@@ -189,6 +189,23 @@ OK heap kernel real
     todo. Tests: 14 asserts KHEAP en `test` shell command (96 KiB
     big alloc, burst de 200 × 128 B, verifica baseline después de
     free-all, peak high-water-mark, grow_oom=0 bajo carga normal).
+  - **slab allocator** (Fase B — CERRADA): 8 buckets power-of-2
+    (16/32/64/128/256/512/1024/2048) con VA dedicada
+    SLAB_VIRT_BASE=0xffffc00100000000 (cap 4 MiB). Cada bucket
+    mantiene LIFO free list. Cuando vacío, pide 1 página al pmm,
+    pone slab_hdr_t {magic, bucket_idx} al inicio y trocea el
+    resto en slots del bucket size; todos van a la free list.
+    O(1) alloc/free. Detección slab vs first-fit por range check
+    sobre el ptr. kmalloc(N≤2048) → slab; N>2048 → first-fit.
+    Defense in depth: magic + bucket_idx en cada slab page rechaza
+    pointers ajenos en kfree. Counters per-bucket
+    (slots_used/total, alloc_total, free_total) + globales
+    (slab_used_bytes, pages, grow_events/oom). /sys/meminfo dump
+    compacto: `16:0/255 32:0/0 ... 2048:0/1`.
+    Tests: ~14 asserts SLAB en `test` shell command (dispatch
+    correcto en boundary 2048/2049, VA-range check, burst de 100
+    × 64 B verifica grow + slots_used, baseline restaurado tras
+    free-all, slab_grow_oom=0). Total: **603 tests pass / 0 fail**.
 OK address spaces por proceso
   - address_space_create: clona high-half de kernel_pml4, low-half vacío
   - address_space_destroy: walk low half + free user pages + intermediate tables + PML4

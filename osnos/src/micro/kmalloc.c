@@ -7,28 +7,34 @@
 #include "vmm.h"
 
 /*
- * Block layout: every block (free or allocated) starts with a header
- * followed by its payload. Blocks form a singly-linked list in
- * address order so we can coalesce on free. `size` is the payload
- * size, NOT including the header.
+ * Kernel heap.
  *
- *   | hdr | payload  | hdr | payload | hdr | free... |
+ * Two allocator paths share a single kmalloc / kfree front door:
  *
- * For an allocated block, the user receives `(uint8_t *)hdr + sizeof(hdr)`.
- * On kfree we step back by sizeof(hdr) to find the header.
+ *   - Slab (FASE B): 8 power-of-2 buckets (16, 32, 64, 128, 256, 512,
+ *     1024, 2048). Each bucket carves slabs (one 4 KiB page each) into
+ *     equal-sized slots; allocations are O(1) LIFO. Slabs live in a
+ *     dedicated virtual region (SLAB_VIRT_BASE) so kfree can detect
+ *     ownership with a single range check.
+ *   - First-fit free list (FASE A): everything > 2048 bytes plus
+ *     fallback when slab can't get a new page. Grows in 64 KiB chunks
+ *     up to KHEAP_MAX_BYTES.
  *
- * Coalesce on free: with the next block (cheap, hdr->next) and with the
- * previous block (O(n) walk from head; fine at our scale).
- *
- * Growth (FASE A): when kmalloc can't find a free block big enough, we
- * map more pages contiguous to the current heap end and append a new
- * free block. If that block is adjacent to the previous free tail it
- * merges so a series of small allocs that triggered growth can still
- * satisfy a single large request.
+ * Tracking:
+ *   - heap_used = first-fit payload in use.
+ *   - slab_used = bytes in live slab slots (sized by bucket).
+ *   - kheap_used_bytes() reports the sum.
+ *   - heap_peak tracks the high-water of the sum.
  */
 
+#define ALIGN_UP(x, a) (((x) + ((a) - 1)) & ~((a) - 1))
+
+/* ============================================================ */
+/* First-fit allocator (FASE A: growable)                       */
+/* ============================================================ */
+
 typedef struct kblock {
-    size_t        size;   /* payload bytes */
+    size_t        size;     /* payload bytes */
     bool          free;
     struct kblock *next;
 } kblock_t;
@@ -38,18 +44,18 @@ typedef struct kblock {
 #define KHEAP_GROW_PAGES  16
 #define KHEAP_MAX_BYTES   (4ULL * 1024 * 1024)   /* 4 MiB hard cap */
 
-#define ALIGN_UP(x, a) (((x) + ((a) - 1)) & ~((a) - 1))
-
 static kblock_t *heap_head;
 static size_t    heap_total;
-static size_t    heap_used;  /* bytes of payload currently allocated */
-static size_t    heap_peak;
+static size_t    heap_used;      /* first-fit live payload */
+static size_t    slab_used;      /* slab live slot bytes */
+static size_t    heap_peak;      /* peak of (heap_used + slab_used) */
 static size_t    grow_events;
 static size_t    grow_oom;
 
-static void account_alloc(size_t n) {
-    heap_used += n;
-    if (heap_used > heap_peak) heap_peak = heap_used;
+static void account_alloc(size_t n, size_t *bucket) {
+    *bucket += n;
+    size_t total = heap_used + slab_used;
+    if (total > heap_peak) heap_peak = total;
 }
 
 void kheap_init(void) {
@@ -57,15 +63,13 @@ void kheap_init(void) {
 
     for (size_t i = 0; i < KHEAP_INIT_PAGES; i++) {
         uint64_t phys = pmm_alloc_page();
-        if (!phys) return;  /* OOM at boot; nothing we can do */
-        vmm_map(pml4,
-                KHEAP_VIRT_BASE + i * PAGE_SIZE,
-                phys,
-                PTE_W);
+        if (!phys) return;
+        vmm_map(pml4, KHEAP_VIRT_BASE + i * PAGE_SIZE, phys, PTE_W);
     }
 
     heap_total  = KHEAP_INIT_PAGES * PAGE_SIZE;
     heap_used   = 0;
+    slab_used   = 0;
     heap_peak   = 0;
     grow_events = 0;
     grow_oom    = 0;
@@ -76,15 +80,6 @@ void kheap_init(void) {
     heap_head->next  = 0;
 }
 
-/*
- * Map `pages` more 4 KiB frames at the current heap end and splice the
- * region in as a new free block. Returns the newly created block, or
- * NULL on cap-reached / PMM-empty (in which case nothing is mapped).
- *
- * Page failures partway through unmap what we did and bail. We don't
- * try to recover the half-mapped region — at our scale a leak of one
- * or two pages on the path to OOM is academic.
- */
 static kblock_t *heap_grow(size_t pages) {
     if (pages == 0) pages = 1;
     if (heap_total + pages * PAGE_SIZE > KHEAP_MAX_BYTES) {
@@ -100,8 +95,6 @@ static kblock_t *heap_grow(size_t pages) {
     for (size_t i = 0; i < pages; i++) {
         uint64_t phys = pmm_alloc_page();
         if (!phys) {
-            /* PMM dry — back out: unmap what we added so the heap stays
-             * consistent. The pages we did alloc are released. */
             for (size_t j = 0; j < i; j++) {
                 vmm_unmap(pml4, start_va + j * PAGE_SIZE);
             }
@@ -113,22 +106,16 @@ static kblock_t *heap_grow(size_t pages) {
 
     size_t grew_bytes = pages * PAGE_SIZE;
 
-    /* Build a new free block over the new region. */
     kblock_t *nb = (kblock_t *)start_va;
     nb->size = grew_bytes - sizeof(kblock_t);
     nb->free = true;
     nb->next = 0;
 
-    /* Splice at the tail. The current tail is the last block reachable
-     * from head; if it's free, coalesce with the new region into one
-     * contiguous block. */
     kblock_t *tail = heap_head;
     while (tail->next) tail = tail->next;
 
     if (tail->free) {
-        /* Tail block free → merge: absorb our nb into tail. */
         tail->size += sizeof(kblock_t) + nb->size;
-        /* tail->next stays NULL. */
     } else {
         tail->next = nb;
     }
@@ -138,13 +125,10 @@ static kblock_t *heap_grow(size_t pages) {
     return nb;
 }
 
-/* Single-pass first-fit; returns NULL if no block fits. */
-static void *find_fit(size_t need) {
+static void *first_fit_alloc(size_t need) {
     for (kblock_t *b = heap_head; b; b = b->next) {
         if (!b->free || b->size < need) continue;
 
-        /* Split when the leftover can hold another header + a small
-         * payload. Otherwise hand out the whole block (slight waste). */
         if (b->size >= need + sizeof(kblock_t) + 16) {
             kblock_t *tail = (kblock_t *)((uint8_t *)b + sizeof(kblock_t) + need);
             tail->size = b->size - need - sizeof(kblock_t);
@@ -155,46 +139,22 @@ static void *find_fit(size_t need) {
         }
 
         b->free = false;
-        account_alloc(b->size);
+        account_alloc(b->size, &heap_used);
         return (uint8_t *)b + sizeof(kblock_t);
     }
     return 0;
 }
 
-void *kmalloc(size_t bytes) {
-    if (bytes == 0) return 0;
-
-    size_t need = ALIGN_UP(bytes, 8);
-
-    void *p = find_fit(need);
-    if (p) return p;
-
-    /* No fit — grow. Use at least KHEAP_GROW_PAGES, or whatever is
-     * needed to satisfy this request plus a fresh header. */
-    size_t need_bytes = need + sizeof(kblock_t);
-    size_t need_pages = (need_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
-    size_t pages      = (need_pages > KHEAP_GROW_PAGES) ? need_pages
-                                                         : KHEAP_GROW_PAGES;
-    if (!heap_grow(pages)) return 0;
-
-    /* Retry — the grown free region must now satisfy the request. */
-    return find_fit(need);
-}
-
-void kfree(void *ptr) {
-    if (!ptr) return;
-
+static void first_fit_free(void *ptr) {
     kblock_t *b = (kblock_t *)((uint8_t *)ptr - sizeof(kblock_t));
     b->free = true;
     heap_used -= b->size;
 
-    /* Coalesce with the next block if free. */
     if (b->next && b->next->free) {
         b->size += sizeof(kblock_t) + b->next->size;
         b->next  = b->next->next;
     }
 
-    /* Coalesce with the previous block if free. O(n) walk from head. */
     if (b != heap_head) {
         kblock_t *prev = heap_head;
         while (prev && prev->next != b) prev = prev->next;
@@ -205,8 +165,183 @@ void kfree(void *ptr) {
     }
 }
 
+/* ============================================================ */
+/* Slab allocator (FASE B)                                      */
+/* ============================================================ */
+
+#define SLAB_VIRT_BASE   0xffffc00100000000ULL
+#define SLAB_MAX_BYTES   (4ULL * 1024 * 1024)
+#define SLAB_BUCKETS     8
+#define SLAB_MAGIC       0x534F534C41423142ULL   /* "SOSLAB1B" */
+
+static const size_t bucket_sizes[SLAB_BUCKETS] = {
+    16, 32, 64, 128, 256, 512, 1024, 2048
+};
+
+typedef struct slot_node {
+    struct slot_node *next;
+} slot_node_t;
+
+typedef struct {
+    slot_node_t *free_head;
+    size_t       slots_total;
+    size_t       slots_used;
+    size_t       pages;
+    uint64_t     alloc_total;
+    uint64_t     free_total;
+} bucket_t;
+
+typedef struct {
+    uint64_t magic;
+    uint32_t bucket_idx;
+    uint32_t _pad;
+} slab_hdr_t;
+
+static bucket_t buckets[SLAB_BUCKETS];
+static uint64_t slab_next_va = SLAB_VIRT_BASE;
+static size_t   slab_pages_total;
+static size_t   slab_grow_events;
+static size_t   slab_grow_oom;
+
+static int size_to_bucket(size_t bytes) {
+    for (int i = 0; i < SLAB_BUCKETS; i++) {
+        if (bytes <= bucket_sizes[i]) return i;
+    }
+    return -1;
+}
+
+/* Map one new page at the next slab VA and slice it into slots for
+ * `bidx`. Returns false on cap-reached / PMM-empty. */
+static bool slab_grow(int bidx) {
+    if (slab_next_va + PAGE_SIZE > SLAB_VIRT_BASE + SLAB_MAX_BYTES) {
+        slab_grow_oom++;
+        return false;
+    }
+    uint64_t phys = pmm_alloc_page();
+    if (!phys) { slab_grow_oom++; return false; }
+    vmm_map(vmm_kernel_pml4(), slab_next_va, phys, PTE_W);
+
+    slab_hdr_t *hdr = (slab_hdr_t *)slab_next_va;
+    hdr->magic      = SLAB_MAGIC;
+    hdr->bucket_idx = (uint32_t)bidx;
+
+    bucket_t *b     = &buckets[bidx];
+    size_t   size   = bucket_sizes[bidx];
+    size_t   start  = ALIGN_UP(sizeof(slab_hdr_t), 16);
+    size_t   n      = (PAGE_SIZE - start) / size;
+
+    /* Thread the new slots into the bucket's free list (LIFO push). */
+    for (size_t i = 0; i < n; i++) {
+        slot_node_t *node =
+            (slot_node_t *)(slab_next_va + start + i * size);
+        node->next = b->free_head;
+        b->free_head = node;
+    }
+
+    b->slots_total   += n;
+    b->pages         += 1;
+    slab_pages_total += 1;
+    slab_grow_events += 1;
+    slab_next_va     += PAGE_SIZE;
+    return true;
+}
+
+static void *slab_alloc(size_t bytes) {
+    int bidx = size_to_bucket(bytes);
+    if (bidx < 0) return 0;
+
+    bucket_t *b = &buckets[bidx];
+    if (!b->free_head) {
+        if (!slab_grow(bidx)) return 0;
+    }
+
+    slot_node_t *node = b->free_head;
+    b->free_head      = node->next;
+    b->slots_used    += 1;
+    b->alloc_total   += 1;
+    account_alloc(bucket_sizes[bidx], &slab_used);
+    return (void *)node;
+}
+
+static bool slab_owns(const void *ptr) {
+    uint64_t p = (uint64_t)ptr;
+    return p >= SLAB_VIRT_BASE && p < slab_next_va;
+}
+
+static void slab_free(void *ptr) {
+    uint64_t page = (uint64_t)ptr & ~((uint64_t)PAGE_SIZE - 1);
+    slab_hdr_t *hdr = (slab_hdr_t *)page;
+    /* Defense in depth: bad magic = silently drop. The page-aligned
+     * check + range check make false positives extremely unlikely. */
+    if (hdr->magic != SLAB_MAGIC) return;
+    if (hdr->bucket_idx >= SLAB_BUCKETS) return;
+
+    bucket_t *b = &buckets[hdr->bucket_idx];
+    slot_node_t *node = (slot_node_t *)ptr;
+    node->next   = b->free_head;
+    b->free_head = node;
+    b->slots_used -= 1;
+    b->free_total += 1;
+    slab_used     -= bucket_sizes[hdr->bucket_idx];
+}
+
+/* ============================================================ */
+/* Public API                                                   */
+/* ============================================================ */
+
+void *kmalloc(size_t bytes) {
+    if (bytes == 0) return 0;
+
+    /* Small allocations go through slab. If slab is wedged (cap or
+     * PMM dry), fall back to first-fit which has its own grow path. */
+    if (bytes <= bucket_sizes[SLAB_BUCKETS - 1]) {
+        void *p = slab_alloc(bytes);
+        if (p) return p;
+    }
+
+    size_t need = ALIGN_UP(bytes, 8);
+    void *p = first_fit_alloc(need);
+    if (p) return p;
+
+    /* Out of free blocks — try to grow. */
+    size_t need_bytes = need + sizeof(kblock_t);
+    size_t need_pages = (need_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    size_t pages = (need_pages > KHEAP_GROW_PAGES) ? need_pages
+                                                    : KHEAP_GROW_PAGES;
+    if (!heap_grow(pages)) return 0;
+    return first_fit_alloc(need);
+}
+
+void kfree(void *ptr) {
+    if (!ptr) return;
+    if (slab_owns(ptr)) {
+        slab_free(ptr);
+        return;
+    }
+    first_fit_free(ptr);
+}
+
 size_t kheap_total_bytes(void) { return heap_total; }
-size_t kheap_used_bytes(void)  { return heap_used;  }
+size_t kheap_used_bytes(void)  { return heap_used + slab_used; }
 size_t kheap_peak_bytes(void)  { return heap_peak;  }
 size_t kheap_grow_events(void) { return grow_events; }
 size_t kheap_grow_oom(void)    { return grow_oom;    }
+
+/* Slab introspection (FASE B). */
+size_t kheap_slab_used_bytes (void) { return slab_used; }
+size_t kheap_slab_pages      (void) { return slab_pages_total; }
+size_t kheap_slab_grow_events(void) { return slab_grow_events; }
+size_t kheap_slab_grow_oom   (void) { return slab_grow_oom; }
+size_t kheap_slab_slots_used (int bucket_idx) {
+    if (bucket_idx < 0 || bucket_idx >= SLAB_BUCKETS) return 0;
+    return buckets[bucket_idx].slots_used;
+}
+size_t kheap_slab_slots_total(int bucket_idx) {
+    if (bucket_idx < 0 || bucket_idx >= SLAB_BUCKETS) return 0;
+    return buckets[bucket_idx].slots_total;
+}
+size_t kheap_slab_bucket_size(int bucket_idx) {
+    if (bucket_idx < 0 || bucket_idx >= SLAB_BUCKETS) return 0;
+    return bucket_sizes[bucket_idx];
+}
+int    kheap_slab_bucket_count(void) { return SLAB_BUCKETS; }

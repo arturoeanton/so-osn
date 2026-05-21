@@ -140,6 +140,30 @@ static void gen_meminfo(char *out, size_t out_size) {
     os_strlcat(out, " / ", out_size);
     os_format_u64(kheap_grow_oom(), num, sizeof(num));
     os_strlcat(out, num, out_size);
+    os_strlcat(out, "\nslab used   B: ", out_size);
+    os_format_u64(kheap_slab_used_bytes(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\nslab pages   : ", out_size);
+    os_format_u64(kheap_slab_pages(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, " (grow ", out_size);
+    os_format_u64(kheap_slab_grow_events(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, " / oom ", out_size);
+    os_format_u64(kheap_slab_grow_oom(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, ")\nslab buckets : ", out_size);
+    for (int i = 0; i < kheap_slab_bucket_count(); i++) {
+        if (i > 0) os_strlcat(out, " ", out_size);
+        os_format_u64(kheap_slab_bucket_size(i), num, sizeof(num));
+        os_strlcat(out, num, out_size);
+        os_strlcat(out, ":", out_size);
+        os_format_u64(kheap_slab_slots_used(i), num, sizeof(num));
+        os_strlcat(out, num, out_size);
+        os_strlcat(out, "/", out_size);
+        os_format_u64(kheap_slab_slots_total(i), num, sizeof(num));
+        os_strlcat(out, num, out_size);
+    }
     os_strlcat(out, "\nexceptions  : ", out_size);
     os_format_u64(idt_exception_count(), num, sizeof(num));
     os_strlcat(out, num, out_size);

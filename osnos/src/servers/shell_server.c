@@ -1993,6 +1993,68 @@ static void cmd_test(const char *args) {
               "KHEAP: kfree(NULL) doesn't move used");
     }
 
+    /*
+     * ===== Slab allocator tests (FASE B) =====
+     * Verify dispatch: small allocs → slab, large → first-fit. Burst
+     * fill one bucket, confirm slot accounting, free everything, then
+     * confirm baseline restored.
+     */
+    {
+        size_t baseline_used = kheap_used_bytes();
+        size_t baseline_slab = kheap_slab_used_bytes();
+
+        /* 16 B → bucket 0. */
+        void *s16 = kmalloc(8);   /* rounds up to 16 */
+        CHECK(s16 != 0, "SLAB: 8 B alloc succeeds");
+        CHECK(((uintptr_t)s16 >> 32) == 0xffffc001,
+              "SLAB: 8 B pointer in slab VA range");
+        CHECK(kheap_slab_used_bytes() == baseline_slab + 16,
+              "SLAB: bucket 0 charge = 16 B");
+        kfree(s16);
+        CHECK(kheap_slab_used_bytes() == baseline_slab,
+              "SLAB: bucket 0 returns to baseline");
+
+        /* 2048 B → bucket 7 (boundary). */
+        void *s2k = kmalloc(2048);
+        CHECK(s2k != 0, "SLAB: 2048 B alloc succeeds");
+        CHECK(((uintptr_t)s2k >> 32) == 0xffffc001,
+              "SLAB: 2048 B still in slab range");
+        kfree(s2k);
+
+        /* 2049 B → first-fit (out of slab range). */
+        void *p_big = kmalloc(2049);
+        CHECK(p_big != 0, "SLAB: 2049 B alloc succeeds");
+        CHECK(((uintptr_t)p_big >> 32) == 0xffffc000,
+              "SLAB: 2049 B falls through to first-fit");
+        kfree(p_big);
+
+        /* Burst: 100 × 64 B → bucket 2. Confirms bucket grow + slot
+         * counting. */
+        size_t before_used_b2 = kheap_slab_slots_used(2);
+        enum { BURST = 100 };
+        static void *bag64[BURST];
+        for (int i = 0; i < BURST; i++) {
+            bag64[i] = kmalloc(64);
+            CHECK(bag64[i] != 0, "SLAB: burst alloc 64 B");
+            if (!bag64[i]) break;
+        }
+        CHECK(kheap_slab_slots_used(2) == before_used_b2 + BURST,
+              "SLAB: bucket 2 slots_used += BURST");
+        for (int i = 0; i < BURST; i++) kfree(bag64[i]);
+        CHECK(kheap_slab_slots_used(2) == before_used_b2,
+              "SLAB: bucket 2 slots_used back");
+
+        CHECK(kheap_used_bytes() == baseline_used,
+              "SLAB: full sweep — used returns to baseline");
+        CHECK(kheap_slab_grow_oom() == 0,
+              "SLAB: no slab OOM under normal load");
+
+        /* Sanity: bucket sizes match power-of-2 series. */
+        CHECK(kheap_slab_bucket_size(0)  == 16,    "SLAB: bucket[0] = 16");
+        CHECK(kheap_slab_bucket_size(7)  == 2048,  "SLAB: bucket[7] = 2048");
+        CHECK(kheap_slab_bucket_count() == 8,      "SLAB: 8 buckets total");
+    }
+
     /* cleanup */
     vfs_unlink("/test/syscall.txt");
     vfs_rmdir("/test");
