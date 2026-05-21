@@ -10,8 +10,9 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
-| /bin/ovi | editor modal vim-style (hjkl, i/a/o, x/dd, :w/:q/:wq) + VT100 mínimo + TIOCGWINSZ + SGR reverse | 500 |
-| libc path resolve | relativos resueltos vs `$PWD` en open/mkdir/rmdir/unlink/rename | 50 |
+| Arrow keys + getcwd/chdir | keyboard_server → ESC[A-D al TTY; SYS_GETCWD/CHDIR per-task | 120 |
+| /bin/ovi | editor modal vim-style (hjkl + flechas, i/a/o, x/dd, :w/:q/:wq) + VT100 mínimo + TIOCGWINSZ + SGR reverse | 500 |
+| libc path resolve | relativos resueltos vs cwd kernel (getcwd) — fallback $PWD | 50 |
 | Shell rc + history | `.history`, `.oshrc` con guard anti-recursión | 100 |
 | /home alias | aliasfs (bind-mount VFS) → `/home`=`/sd/home` | 200 |
 | libc exec family | execv/execve/execvp con PATH walk | 80 |
@@ -1587,6 +1588,45 @@ OK .history (historial persistente) + .oshrc (startup script)
      Tipo en un boot, recuperá con flecha ↑ tras reboot. .oshrc
      queda como el lugar natural para "cd a tu workdir" o
      "export VARS" automáticos.
+
+### FASE Arrow keys + getcwd/chdir — CERRADA
+OK Keycode passthrough: arrow keys via TTY como VT100 CSI
+   - **keyboard_server**: cuando llega un keycode != 0 (special key),
+     traduce a `ESC [ A/B/C/D` (3 bytes) y los pushea a `tty_input`
+     en orden atómico. KEY_UP→A, KEY_DOWN→B, KEY_RIGHT→C, KEY_LEFT→D.
+   - El shell sigue recibiendo IPC_KEY_EVENT (su history nav usa
+     keycodes directos via IPC, no via TTY). Cuando un user ELF es
+     fg, el shell descarta IPC_KEY_EVENT (FASE shell rc) y los
+     bytes ESC fluyen via TTY al ELF.
+   - **/bin/ovi**: nuevo helper `peek_byte_nonblock` usa
+     `select(stdin, timeout=0)` antes de leer el byte siguiente
+     después de un ESC. Sin esto, ESC solo (sin follow-up) bloquearía
+     esperando. Con peek: detecta ESC + [ + letter atómicamente
+     (keyboard_server los empuja juntos), o cae a "ESC solo →
+     NORMAL" si no hay bytes pendientes.
+   - Flechas funcionan tanto en NORMAL (mapeadas a hjkl uniformemente)
+     como en INSERT (sin abandonar el modo).
+
+OK SYS_GETCWD (#79) + SYS_CHDIR (#80) — per-task cwd
+   - **task_t** agrega `char cwd[OSNOS_PATH_MAX]`. Default tras
+     `task_clear`: "" (vacío). Cero-overhead para kernel tasks que
+     no lo usan.
+   - **task_create_user_elf** ahora walka envp buscando "PWD=" al
+     spawn y siembra `t->cwd` con ese valor; sino, "/". Eso preserva
+     herencia POSIX-like del cwd vía la env var clásica.
+   - **sys_getcwd(buf, size)**: copia `t->cwd` a userland via
+     `copy_to_user`. Retorna `len + 1` (incluye NUL, como Linux).
+     ERANGE si `size <= len`. EFAULT si pointer inválido.
+   - **sys_chdir(path)**: copy_from_user, vfs_stat, verifica
+     `type == VFS_NODE_DIR`. ENOTDIR si archivo regular, ENOENT
+     si no existe. Si OK, `os_strlcpy` a `t->cwd`.
+   - **libc** wrappers: `getcwd(buf, size)` y `chdir(path)`.
+   - **libc resolve_path** ahora prefiere getcwd; fallback getenv("PWD")
+     si syscall falla (kernels viejos); fallback final "/".
+   - Resultado: `ovi .oshrc` desde cualquier cwd resuelve correcto.
+     `chdir` dentro de un user task afecta al cwd persistentemente
+     hasta el exit del task.
+   - **ERANGE = 34** agregado al status enum.
 
 ### FASE /bin/ovi — Editor modal vim-style — CERRADA
 OK /bin/ovi — primer editor visual de osnos

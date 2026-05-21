@@ -21,6 +21,8 @@
 #define SYS_GETPID   39
 #define SYS_EXIT     60
 #define SYS_KILL     62
+#define SYS_GETCWD   79
+#define SYS_CHDIR    80
 #define SYS_RENAME   82
 #define SYS_MKDIR    83
 #define SYS_RMDIR    84
@@ -141,6 +143,12 @@ int64_t sys_rmdir   (const char *path);
 int64_t sys_unlink  (const char *path);
 int64_t sys_rename  (const char *oldpath, const char *newpath);
 int64_t sys_getdents(int fd, void *buf, size_t buf_size);
+
+/* POSIX-ish cwd. getcwd returns the byte count INCLUDING the NUL
+ * (matches Linux's behaviour, which returns the buffer length used).
+ * chdir refuses anything that doesn't resolve to a directory. */
+int64_t sys_getcwd  (char *buf, size_t size);
+int64_t sys_chdir   (const char *path);
 
 /*
  * Linux socket layer. Only AF_INET (2) + SOCK_DGRAM (2) lit up for now;

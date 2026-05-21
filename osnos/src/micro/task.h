@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "../include/osnos_limits.h"
+
 #define MAX_TASKS 16
 
 typedef void (*task_entry_t)(void);
@@ -110,6 +112,12 @@ typedef struct {
     uint64_t  saved_r13;
     uint64_t  saved_r14;
     uint64_t  saved_r15;
+
+    /* Per-task current working directory. Used by sys_getcwd /
+     * sys_chdir so user programs can resolve relative paths without
+     * the libc having to know $PWD. Kernel tasks (servers) ignore
+     * this field; only user tasks read it. */
+    char      cwd[OSNOS_PATH_MAX];
 } task_t;
 
 void task_init(void);

@@ -45,6 +45,7 @@ typedef enum {
     OSNOS_ENETDOWN       = 100,
     OSNOS_ECONNRESET     = 104,
     OSNOS_ENOTTY         = 25,  /* not a typewriter (bad ioctl) */
+    OSNOS_ERANGE         = 34,  /* result too large (getcwd buffer) */
     OSNOS_ETIMEDOUT      = 110,
     OSNOS_ECONNREFUSED   = 111,
     OSNOS_EINPROGRESS    = 115  /* connect() still negotiating */

@@ -466,6 +466,20 @@ static int64_t task_create_user_elf(
     t->heap_start        = USER_HEAP_BASE;
     t->heap_brk          = USER_HEAP_BASE;
 
+    /* Seed cwd from envp's PWD entry, falling back to "/". Lets the
+     * child resolve relative paths via getcwd() without the libc
+     * having to consult $PWD. */
+    os_strlcpy(t->cwd, "/", OSNOS_PATH_MAX);
+    if (envp) {
+        for (int i = 0; envp[i]; i++) {
+            const char *e = envp[i];
+            if (os_strncmp(e, "PWD=", 4) == 0) {
+                os_strlcpy(t->cwd, e + 4, OSNOS_PATH_MAX);
+                break;
+            }
+        }
+    }
+
     return pid;
 }
 

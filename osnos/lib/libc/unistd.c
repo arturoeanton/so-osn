@@ -38,31 +38,48 @@ ssize_t write(int fd, const void *buf, size_t n) {
         osnos_syscall3(SYS_WRITE, fd, (long)buf, (long)n));
 }
 
+char *getcwd(char *buf, size_t size) {
+    if (!buf || size == 0) { errno = EINVAL; return 0; }
+    long r = osnos_syscall2(SYS_GETCWD, (long)buf, (long)size);
+    if (r < 0) { errno = (int)(-r); return 0; }
+    return buf;
+}
+
+int chdir(const char *path) {
+    return (int)set_errno(osnos_syscall1(SYS_CHDIR, (long)path));
+}
+
 /*
- * Resolve a relative path against $PWD into `out`. The osnos kernel
- * VFS only accepts absolute paths (returns EINVAL otherwise), so
- * every libc syscall that takes a path runs through here first.
+ * Resolve a relative path against the per-task cwd into `out`. The
+ * osnos kernel VFS only accepts absolute paths (returns EINVAL
+ * otherwise), so every libc syscall that takes a path runs through
+ * here first.
  *
  *   "/sd/foo"   -> "/sd/foo"               (unchanged)
- *   "foo"       -> "$PWD/foo"              (relative)
- *   "../bar"    -> "$PWD/../bar"           (kept verbatim today —
- *                                            no normalisation yet)
+ *   "foo"       -> "<cwd>/foo"             (relative)
  *
- * Returns `out`, or `path` if `out` would overflow (the kernel will
- * then surface the original error path). Note this is purely a libc
- * shim — there's no per-task cwd in the kernel today.
+ * Falls back to $PWD when getcwd fails, and finally to "/" so the
+ * original error path still surfaces a useful errno.
  */
 static const char *resolve_path(const char *path,
                                   char *out, size_t out_size) {
     if (!path || path[0] == '/') return path;
-    const char *pwd = getenv("PWD");
-    if (!pwd || !*pwd) pwd = "/";
-    size_t plen = 0; while (pwd[plen]) plen++;
+
+    char cwd_buf[256];
+    const char *base = 0;
+    if (getcwd(cwd_buf, sizeof(cwd_buf))) {
+        base = cwd_buf;
+    } else {
+        base = getenv("PWD");
+    }
+    if (!base || !*base) base = "/";
+
+    size_t plen = 0; while (base[plen]) plen++;
     size_t flen = 0; while (path[flen]) flen++;
-    int need_slash = (plen > 0 && pwd[plen - 1] != '/');
+    int need_slash = (plen > 0 && base[plen - 1] != '/');
     if (plen + (need_slash ? 1 : 0) + flen + 1 > out_size) return path;
     size_t w = 0;
-    for (size_t i = 0; i < plen; i++) out[w++] = pwd[i];
+    for (size_t i = 0; i < plen; i++) out[w++] = base[i];
     if (need_slash) out[w++] = '/';
     for (size_t i = 0; i < flen; i++) out[w++] = path[i];
     out[w] = 0;

@@ -57,6 +57,16 @@ int          kill  (pid_t pid, int sig);
 pid_t        getpid(void);
 
 /*
+ * POSIX cwd. getcwd writes the absolute path into `buf` (NUL
+ * terminated) and returns `buf`, or NULL with errno on failure
+ * (ERANGE if `size` too small). chdir adopts `path` as the new
+ * cwd — must point at an existing directory, else ENOENT/ENOTDIR.
+ * Per-task; children inherit the parent's cwd at exec via PWD.
+ */
+char *getcwd(char *buf, size_t size);
+int   chdir (const char *path);
+
+/*
  * exec family. POSIX semantics: replace the current process image with
  * the program at `path`. argv / envp are NULL-terminated arrays of
  * pointers. On success the call does not return.

@@ -27,6 +27,8 @@
 #define SYS_GETPID    39
 #define SYS_EXIT      60
 #define SYS_KILL      62
+#define SYS_GETCWD    79
+#define SYS_CHDIR     80
 #define SYS_RENAME    82
 #define SYS_MKDIR     83
 #define SYS_RMDIR     84

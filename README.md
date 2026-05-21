@@ -257,7 +257,8 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | TTY line discipline POSIX (termios canonical/raw, ISIG, ioctl) | ✅ |
 | Shell con history persistente + `.oshrc` + env (PATH/HOME/PWD) | ✅ |
 | `/home` alias a `/sd/home` vía aliasfs (bind-mount VFS) | ✅ |
-| `/bin/ovi` editor modal vim-style (hjkl, i/a/o, :w/:q) | ✅ |
+| `/bin/ovi` editor modal vim-style (hjkl + flechas, i/a/o, :w/:q) | ✅ |
+| `getcwd` / `chdir` syscalls + per-task cwd (POSIX) | ✅ |
 | Servers en ring 3 (hoy todos ring 0) | ⏳ (fase 10) |
 | `fork` / `exec` real | ❌ |
 | Multi-core (SMP) | ❌ |
@@ -417,10 +418,16 @@ lejano y muy difícil de debuggear. Están repetidas en
 
 Cerrado recientemente:
 
+- **Arrow keys + `getcwd`/`chdir`**: `keyboard_server` traduce arrow
+  keycodes a `ESC [ A/B/C/D` y los empuja al TTY, así programas raw
+  (ovi) navegan con flechas además de hjkl. `SYS_GETCWD` (#79) y
+  `SYS_CHDIR` (#80) per-task — `task_t.cwd` se siembra al exec desde
+  `PWD=` del envp. `libc resolve_path` ahora consulta `getcwd` y cae
+  a `$PWD` si falla.
 - **`/bin/ovi` + VT100 mínimo + TIOCGWINSZ**: editor modal vim-flavour
-  (hjkl, i/a/o/O, x/dd, gg/G, $/0, :w/:q/:wq/:q!). El framebuffer ahora
-  parsea `ESC[2J`, `ESC[H`, `ESC[r;cH`, `ESC[K`, `ESC[7m` (reverse).
-  Libc resuelve paths relativos vs `$PWD` (`ovi .oshrc` funciona).
+  (hjkl + flechas, i/a/o/O, x/dd, gg/G, $/0, :w/:q/:wq/:q!). El
+  framebuffer ahora parsea `ESC[2J`, `ESC[H`, `ESC[r;cH`, `ESC[K`,
+  `ESC[7m` (reverse).
 - **Shell rc + history persistente**: `/home/.oshrc` se ejecuta al boot
   (con guard anti-recursión, en silencio); `/home/.history` carga al
   inicio y se appendea por comando. Soporta env: PATH/HOME/PWD/TERM/
@@ -450,9 +457,9 @@ Las próximas fases grandes:
 2. **fork/exec** real (hoy `exec` reemplaza la task actual, no hay
    `fork`).
 3. **TUI potente** (FASE 11): mini Norton Commander, viewer, editor
-   con flechas (ya tenemos `/bin/ovi` con hjkl como base) — el VT100
-   parser y TIOCGWINSZ están listos, falta keycode passthrough
-   (arrow-keys vía `ESC[A/B/C/D`) y multi-pane split.
+   con flechas — `/bin/ovi` ya tiene hjkl + flechas funcionando, el
+   VT100 parser, TIOCGWINSZ y keycode passthrough están listos.
+   Falta: multi-pane split, file browser, mouse, syntax highlighting.
 4. **Gráfico** (FASE 12): window server + terminal en ventana + mouse.
 5. **SMP** (mucho después).
 

@@ -729,6 +729,49 @@ static bool fd_readable(int fd) {
 }
 
 /*
+ * sys_getcwd — copy the current task's cwd into `buf`. Returns the
+ * byte count INCLUDING the trailing NUL (matches Linux). -ERANGE if
+ * the caller's buffer is too small; -EFAULT on bad pointer.
+ */
+int64_t sys_getcwd(char *buf, size_t size) {
+    task_t *t = task_current();
+    if (!t || !t->pml4) return err(OSNOS_ESRCH);
+    if (!buf && size > 0) return err(OSNOS_EFAULT);
+
+    const char *src = t->cwd[0] ? t->cwd : "/";
+    size_t len = 0;
+    while (src[len]) len++;
+    if (size <= len) return err(OSNOS_ERANGE);
+
+    if (copy_to_user(buf, src, len + 1) != OSNOS_OK) return err(OSNOS_EFAULT);
+    return (int64_t)(len + 1);
+}
+
+/*
+ * sys_chdir — change the current task's cwd. Validates that the path
+ * exists and is a directory before adopting it.
+ */
+int64_t sys_chdir(const char *path) {
+    task_t *t = task_current();
+    if (!t || !t->pml4) return err(OSNOS_ESRCH);
+    if (!path) return err(OSNOS_EFAULT);
+
+    char kpath[OSNOS_PATH_MAX];
+    if (copy_from_user(kpath, path, OSNOS_PATH_MAX) != OSNOS_OK) {
+        return err(OSNOS_EFAULT);
+    }
+    kpath[OSNOS_PATH_MAX - 1] = 0;
+
+    vfs_stat_t st;
+    osnos_status_t s = vfs_stat(kpath, &st);
+    if (s != OSNOS_OK) return err(s);
+    if (st.type != VFS_NODE_DIR) return err(OSNOS_ENOTDIR);
+
+    os_strlcpy(t->cwd, kpath, OSNOS_PATH_MAX);
+    return 0;
+}
+
+/*
  * Today the only ioctl device is the controlling TTY at fd 0/1/2.
  * Anything else returns -ENOTTY. termios I/O goes via copy_*_user so
  * a faulting pointer becomes EFAULT, not a kernel panic.
@@ -1067,6 +1110,13 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
                 (int)frame->rdi,
                 (uint64_t)frame->rsi,
                 (void *)frame->rdx));
+        case SYS_GETCWD:
+            return pack(sys_getcwd(
+                (char *)frame->rdi,
+                (size_t)frame->rsi));
+        case SYS_CHDIR:
+            return pack(sys_chdir(
+                (const char *)frame->rdi));
         case SYS_ACCEPT:
             return pack(sys_accept(
                 (int)frame->rdi,
