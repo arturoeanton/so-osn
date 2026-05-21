@@ -26,6 +26,7 @@
 #define SYS_IPC_RECV          261
 #define SYS_SERVICE_REGISTER  262
 #define SYS_SERVICE_LOOKUP    263
+#define SYS_TTY_INPUT         264
 #endif
 
 /*
@@ -84,4 +85,16 @@ static inline long ipc_service_lookup(int sid) {
     long r = osnos_syscall1(SYS_SERVICE_LOOKUP, sid);
     if (r < 0) { errno = (int)(-r); return -1; }
     return r;
+}
+
+/*
+ * Feed a single byte to the kernel TTY line discipline. Restricted
+ * to the task currently registered as SERVER_KEYBOARD (see
+ * sys_tty_input in src/micro/syscall.c). Used by ring-3 kbdsrv to
+ * forward keystrokes into canonical / ISIG processing.
+ */
+static inline long ipc_tty_input(int c) {
+    long r = osnos_syscall1(SYS_TTY_INPUT, c);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return 0;
 }

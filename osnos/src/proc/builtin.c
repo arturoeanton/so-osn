@@ -146,6 +146,7 @@ DECLARE_ELF(fbtest);
 DECLARE_ELF(inputtest);
 DECLARE_ELF(kerntest);
 DECLARE_ELF(consrv);
+DECLARE_ELF(kbdsrv);
 
 #undef DECLARE_ELF
 
@@ -213,6 +214,7 @@ static const builtin_t builtins[] = {
     ELF(inputtest,    "read 5 keystrokes from /dev/input0 (FASE 10.0.c)"),
     ELF(kerntest,     "FASE 10 ABI userland tests (sys_taskinfo, dev, pipe, dup)"),
     ELF(consrv,       "console server ring-3 (FASE 10.1) — spawned by kmain"),
+    ELF(kbdsrv,       "keyboard policy server ring-3 (FASE 10.2) — spawned by kmain"),
 };
 
 #undef USER

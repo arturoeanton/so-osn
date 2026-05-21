@@ -56,6 +56,7 @@
 #define SYS_IPC_RECV          261
 #define SYS_SERVICE_REGISTER  262
 #define SYS_SERVICE_LOOKUP    263
+#define SYS_TTY_INPUT         264
 #define SYS_TASKINFO          265
 
 /*
@@ -246,6 +247,14 @@ int64_t sys_ipc_send         (const ipc_msg_t *user_msg);
 int64_t sys_ipc_recv         (ipc_msg_t *user_out, int blocking);
 int64_t sys_service_register (int sid);
 int64_t sys_service_lookup   (int sid);
+
+/*
+ * SYS_TTY_INPUT — feed a single character into the kernel TTY line
+ * discipline. Restricted to the task currently holding SERVER_KEYBOARD
+ * in the service registry (i.e. the ring-3 kbdsrv from FASE 10.2);
+ * other callers get -EPERM so a random ELF can't inject keystrokes.
+ */
+int64_t sys_tty_input(int c);
 
 /*
  * Minimal fcntl(2). Supported cmds:

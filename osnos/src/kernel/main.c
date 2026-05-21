@@ -140,24 +140,36 @@ void kmain(void) {
     bootstrap_fs();
 
     int fs_pid = task_create("fs", fs_server_tick);
+    /*
+     * Kernel-side "keyboard" task is now a hardware-poll feeder only
+     * (FASE 10.2): every tick it drains keyboard_poll into the
+     * /dev/input0 ring. The user-visible policy layer (TTY feed +
+     * IPC_KEY_EVENT) moved to the ring-3 kbdsrv ELF spawned below.
+     * The kernel task does NOT register against SERVER_KEYBOARD;
+     * that ID belongs to kbdsrv (sys_tty_input enforces it).
+     */
     int keyboard_pid = task_create("keyboard", keyboard_server_tick);
+    (void)keyboard_pid;
     int shell_pid = task_create("shell", shell_server_tick);
 
     service_register(SERVER_FS, fs_pid);
-    service_register(SERVER_KEYBOARD, keyboard_pid);
     service_register(SERVER_SHELL, shell_pid);
 
     /*
-     * Console server now runs as a ring-3 ELF (FASE 10.1). Spawn it
-     * via proc_execve and pre-register SERVER_CONSOLE so any IPC
-     * sent by shell_server_init below (banner / prompt) lands on
-     * the new task's queue before the scheduler ever dispatches it.
-     * The ELF also self-registers via sys_service_register on its
-     * first dispatch — idempotent, lands on the same pid.
+     * Console + keyboard policy servers run as ring-3 ELFs (FASE
+     * 10.1 + 10.2). proc_execve creates the task in READY state; we
+     * pre-register their service IDs so any IPC sent before the
+     * scheduler dispatches them lands on the right queue. The ELFs
+     * also self-register via sys_service_register on first run —
+     * idempotent, same pid lands twice.
      */
     int64_t consrv_pid = proc_execve("/bin/consrv", "", 0);
     if (consrv_pid > 0) {
         service_register(SERVER_CONSOLE, (uint64_t)consrv_pid);
+    }
+    int64_t kbdsrv_pid = proc_execve("/bin/kbdsrv", "", 0);
+    if (kbdsrv_pid > 0) {
+        service_register(SERVER_KEYBOARD, (uint64_t)kbdsrv_pid);
     }
 
     fs_server_init();

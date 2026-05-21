@@ -1240,6 +1240,22 @@ int64_t sys_service_lookup(int sid) {
 }
 
 /* ------------------------------------------------------------------ */
+/* sys_tty_input — feed one byte into the kernel TTY line discipline. */
+/* Restricted: only the task currently holding SERVER_KEYBOARD in the */
+/* registry (the ring-3 kbdsrv from FASE 10.2) may call. Other tasks  */
+/* get -EPERM so a random ELF can't impersonate keystrokes.           */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_tty_input(int c) {
+    task_t *t = task_current();
+    if (!t) return err(OSNOS_ESRCH);
+    uint64_t kbd_pid = service_get_pid(SERVER_KEYBOARD);
+    if (kbd_pid == 0 || t->pid != kbd_pid) return err(OSNOS_EPERM);
+    tty_input((char)c);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* sys_taskinfo — read-only inspection of a task slot. Safe to expose */
 /* to ring 3: copies a small struct out, hides kernel-internal fields */
 /* like saved iret frames, kstacks, and pml4 pointers.                */
@@ -1743,6 +1759,8 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
             return pack(sys_service_register((int)frame->rdi));
         case SYS_SERVICE_LOOKUP:
             return pack(sys_service_lookup((int)frame->rdi));
+        case SYS_TTY_INPUT:
+            return pack(sys_tty_input((int)frame->rdi));
         case SYS_TASKINFO:
             return pack(sys_taskinfo(
                 (size_t)frame->rdi,

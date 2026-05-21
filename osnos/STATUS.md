@@ -77,6 +77,48 @@ canonical/raw, /home persistente cross-reboot.
 
 ---
 
+### Inventario ring 0 vs ring 3 (snapshot 2026-05-21)
+
+**Ring 0 — código C linkeado dentro de `build/kernel`:**
+
+| Capa | Archivos / módulos |
+|------|--------------------|
+| Boot + entry | `src/kernel/main.c`, `panic.c` |
+| Micro core | `src/micro/`: scheduler, ipc, task, fd, fpu, pmm, vmm, kmalloc, pipe, idt, gdt, tss, extable, uaccess, reaper, service, timer, tty, syscall(+entry/msr/int80) |
+| Drivers | `src/drivers/`: framebuffer, keyboard (PS/2), block_ata, pci, pic, lapic, rtl8139 |
+| VFS + backends | `src/fs/`: vfs, ramfs, ramfs_vfs, fat, fat_vfs, devfs, sysfs, binfs, bootstrap, aliasfs |
+| Network stack | `src/net/`: eth, arp, ip, icmp, udp, tcp, socket |
+| Process lifecycle | `src/proc/`: builtin, elf (loader), exec |
+| Lib freestanding | `src/lib/`: memory, printf, string |
+| **Servers ring-0 (a migrar)** | `src/servers/`: fs_server, keyboard_server, shell_server (+ console_server.c sin uso, queda hasta 10.5 cleanup) |
+
+**Ring 3 — ELFs separados embebidos en el kernel vía objcopy:**
+
+| Categoría | ELFs | Cantidad | Detalle |
+|-----------|------|----------|---------|
+| 🆕 Servers | `consrv` | **1** | console server, FASE 10.1 — único server que ya migró |
+| Shell script | `osh` | 1 | intérprete de scripts |
+| Tools (coreutils-like) | hello, true, false, init, cat, touch, mkdir, rmdir, rm, mv, cp, ls, echo, calc, sleep, kill, top, ovi, tcc, head | 20 | en `/bin/` |
+| Net | tcpclient, udptest, echotcp, selecttest, selectserver, httpd | 6 | clientes/servidores TCP/UDP |
+| Tests | hello_libc, libctest, ttytest, envtest, fptest, mmaptest, pipetest, fbtest, inputtest, kerntest, user_hello (bare) | 11 | sanidad + ABI |
+| **Total ELFs** | | **39** | |
+
+**Distinción clave**: de los 39 ELFs, solo `consrv` es un *server* (long-running daemon spawneado al boot por kmain). Los otros 38 son programas one-shot que el usuario invoca desde el shell.
+
+**Lo que falta migrar a ring 3 (FASE 10.2+):**
+- `keyboard_server.c` → próxima sesión, ELF `kbdsrv`
+- `fs_server.c` → eliminar entero (shell hace syscalls directos en 10.4)
+- `shell_server.c` → ELF `shellsrv` (el más grande, ~3375 LOC sin cmd_test)
+
+**Lo que NO migra en FASE 10 (queda ring 0, futuro FASE 11):**
+- Todos los drivers (framebuffer pixels, PS/2 hardware, ATA PIO, RTL8139, PIT, LAPIC)
+- Todo el VFS core + backends
+- IPC + scheduler + task + paging + ELF loader
+- Network stack
+- libc kernel (src/lib/)
+
+---
+
 ### Boot + drivers
 OK boot con Limine + QEMU
 OK framebuffer + font bitmap
