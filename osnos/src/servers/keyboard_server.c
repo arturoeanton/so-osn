@@ -1,6 +1,7 @@
 #include "keyboard_server.h"
 
 #include "../drivers/keyboard.h"
+#include "../include/osnos_keys.h"
 #include "../micro/ipc.h"
 #include "../micro/tty.h"
 
@@ -18,11 +19,24 @@ void keyboard_server_tick(void) {
     /*
      * Feed printable chars + newline + backspace into the TTY line
      * discipline (canonical edit / signals / echo per termios).
-     * Special keys (arrows, ctrl combos) skip stdin since their
-     * semantics aren't ASCII — only the shell wants them.
+     * Arrow keys become 3-byte VT100 sequences (ESC [ A/B/C/D) so
+     * TUI programs in raw mode (e.g. /bin/ovi) receive them.
      */
     if (ev.ascii != 0 && ev.keycode == 0) {
         tty_input((char)ev.ascii);
+    } else if (ev.keycode != 0) {
+        char final = 0;
+        switch (ev.keycode) {
+            case OSNOS_KEY_UP:    final = 'A'; break;
+            case OSNOS_KEY_DOWN:  final = 'B'; break;
+            case OSNOS_KEY_RIGHT: final = 'C'; break;
+            case OSNOS_KEY_LEFT:  final = 'D'; break;
+        }
+        if (final) {
+            tty_input(0x1B);
+            tty_input('[');
+            tty_input(final);
+        }
     }
 
     ipc_msg_t msg;

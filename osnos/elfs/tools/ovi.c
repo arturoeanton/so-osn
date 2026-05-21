@@ -39,7 +39,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/select.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -337,6 +339,24 @@ static int read_byte(void) {
     return (unsigned char)c;
 }
 
+/*
+ * Non-blocking peek: returns -1 immediately if stdin has nothing.
+ * Used right after seeing ESC so we can distinguish a real Escape
+ * keypress (NO follow-up byte) from an arrow-key CSI sequence (the
+ * `[` arrives in the same atomic keyboard_server push).
+ */
+static int peek_byte_nonblock(void) {
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(0, &rfds);
+    struct timeval tv = { 0, 0 };
+    int r = select(1, &rfds, 0, 0, &tv);
+    if (r <= 0) return -1;
+    char c;
+    if (read(0, &c, 1) != 1) return -1;
+    return (unsigned char)c;
+}
+
 /* ---- command-mode handler ---- */
 
 static int run_command_line(void) {
@@ -401,6 +421,27 @@ int main(int argc, char **argv) {
             if (c != 'g') pending_g = 0;
             if (c != 'd') pending_d = 0;
 
+            /* Arrow keys arrive as ESC [ A/B/C/D from the TTY in a
+             * single atomic push from keyboard_server. We peek
+             * without blocking so a real lone-Escape doesn't hang
+             * waiting for follow-up bytes that never come. */
+            if (c == 0x1B) {
+                int b1 = peek_byte_nonblock();
+                if (b1 == '[') {
+                    int b2 = peek_byte_nonblock();
+                    switch (b2) {
+                    case 'A': c = 'k'; break;   /* up    */
+                    case 'B': c = 'j'; break;   /* down  */
+                    case 'C': c = 'l'; break;   /* right */
+                    case 'D': c = 'h'; break;   /* left  */
+                    default:  render(); continue;
+                    }
+                } else {
+                    render();
+                    continue;
+                }
+            }
+
             switch (c) {
             case 'h': if (cur_col > 0) cur_col--;                       break;
             case 'l': if (cur_col < line_len[cur_row]) cur_col++;        break;
@@ -450,7 +491,29 @@ int main(int argc, char **argv) {
             default: break;
             }
         } else if (mode_str[0] == 'I') {
-            if (c == 27) {                  /* Esc → back to Normal */
+            /* In INSERT mode, an ESC followed by '[X' is an arrow key
+             * — handle navigation without leaving INSERT. A lone ESC
+             * (no '[' after) returns to NORMAL mode. The peek is
+             * non-blocking so the common "press Esc → go to NORMAL"
+             * case doesn't hang waiting for follow-up bytes. */
+            if (c == 27) {
+                int b1 = peek_byte_nonblock();
+                if (b1 == '[') {
+                    int b2 = peek_byte_nonblock();
+                    switch (b2) {
+                    case 'A': if (cur_row > 0) cur_row--;
+                              if (cur_col > line_len[cur_row]) cur_col = line_len[cur_row];
+                              break;
+                    case 'B': if (cur_row < nlines - 1) cur_row++;
+                              if (cur_col > line_len[cur_row]) cur_col = line_len[cur_row];
+                              break;
+                    case 'C': if (cur_col < line_len[cur_row]) cur_col++; break;
+                    case 'D': if (cur_col > 0) cur_col--; break;
+                    default: break;
+                    }
+                    render();
+                    continue;
+                }
                 mode_str = "NORMAL";
                 if (cur_col > 0 && cur_col >= line_len[cur_row] &&
                     line_len[cur_row] > 0) cur_col--;
