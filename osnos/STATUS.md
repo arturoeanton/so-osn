@@ -10,6 +10,8 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| O_NONBLOCK runtime | libc cachea O_NONBLOCK per-fd; read() respeta sin syscall extra | 50 |
+| Multi-stage pipes | `a \| b \| c \| d` (hasta 4) — proc_execve_pipeline + shell N-split | 180 |
 | FXSAVE/FXRSTOR per-task | 512 B fpu_state aligned 16 en task_t, save/restore en task_run_next, printf %f | 120 |
 | Shell pipes `a \| b` | pipe ring-buffer kernel object (4 KiB × 16), task pipe_in/out, concurrent stages, /bin/head ELF | 350 |
 | Shell redirection | `cmd > file`, `>>`, `< file` parser + proc_execve_redir + per-task stdin/stdout paths | 250 |
@@ -51,15 +53,13 @@ canonical/raw, /home persistente cross-reboot.
 - TTY 3+ (PTY pairs, sessions, process groups)
 - FASE 10 (servers a ring 3 en elfs/osn-server/)
 - fork() real (sin fork hoy)
-- Multi-stage pipes (`a | b | c`) — hoy solo 2-stage
 - pipe(2) syscall expuesto a user (necesita per-task fd tables)
+- Pipelines con más de 4 stages (hoy MAX_PIPELINE_STAGES=4)
 - Mezclar pipes con redirects: `a < in.txt | b > out.txt`
 - Shell builtins (cat/ls/echo/...) que respeten redirects (hoy
   solo los ELFs los honran; el short-circuit en run_command salta
   al ELF cuando hay `<`/`>` / `|`)
 - Open file description shared offsets para dup POSIX-strict
-- O_NONBLOCK runtime real (hoy fcntl lo almacena pero sys_read/write
-  no lo respetan)
 - tmpfile unlink-on-close (necesita anonymous FD layer)
 - RTC real (hoy time/clock_gettime = segundos desde boot)
 - mmap/munmap (muchos programas modernos lo asumen)
@@ -1612,6 +1612,37 @@ OK .history (historial persistente) + .oshrc (startup script)
      Tipo en un boot, recuperá con flecha ↑ tras reboot. .oshrc
      queda como el lugar natural para "cd a tu workdir" o
      "export VARS" automáticos.
+
+### FASE Multi-stage pipes + O_NONBLOCK runtime — CERRADA
+OK `proc_execve_pipeline(paths[], args[], n, envp, pids_out)` kernel
+   - Reemplaza `proc_execve_pipe` (2-stage) por versión N-stage
+     hasta MAX_PIPELINE_STAGES=4. Crea N-1 pipes, spawnea N tasks
+     en orden, wira pipe_in/pipe_out por slot. Partial-failure
+     teardown: kill_pending para los ya spawneados, close ambas
+     refs de pipes creados.
+
+OK Shell parser N-stage en run_pipeline
+   - Reemplaza el split bipartito por NUL-separation de la línea
+     completa en cada `|`. Tokeniza cada stage (cmd + args), valida
+     que cada cmd resuelva a un ELF (mensaje claro con el nombre
+     fallando), y llama proc_execve_pipeline.
+   - `pipeline_upstream_pids[MAX-1]` reemplaza el `pipeline_lpid`
+     scalar — `pipeline_owns_upstream(pid)` chequea contra el array
+     en el IPC_PROC_EXITED handler para swallow silencioso.
+
+OK O_NONBLOCK runtime real (libc-side, sin syscall extra)
+   - `lib/libc/unistd.c`: array static `_libc_nonblock[32]`. open()
+     setea según flag; fcntl(F_SETFL) actualiza; close() limpia.
+   - read() chequea el bit ANTES de loopear en EAGAIN. Si está
+     set, sale al primer EAGAIN con errno=EAGAIN. Si no, loop
+     con nanosleep como antes.
+   - write() no loopea — ya devuelve EAGAIN directo del kernel,
+     que el caller maneja.
+   - Caveat: el cache vive en libc del task. Si dos tasks
+     comparten el mismo fd global (que pasa hoy), cada uno tiene
+     su cache independiente. Real per-task flags están en
+     osnos_fd_t.flags; el cache es una optimización para evitar
+     fcntl(F_GETFL) en cada read.
 
 ### FASE FXSAVE/FXRSTOR per-task — CERRADA
 OK Task struct field — task_t.fpu_state[512] aligned 16

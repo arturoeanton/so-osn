@@ -660,49 +660,75 @@ int64_t proc_exec(const char *path, const char *args) {
  * runs. Since proc_execve returns immediately with the child in
  * READY state, we can mutate task_by_pid(pid) safely.
  */
-int64_t proc_execve_pipe(const char *left_path,  const char *left_args,
-                          const char *right_path, const char *right_args,
-                          const char *const *envp,
-                          int64_t *left_pid_out)
+int64_t proc_execve_pipeline(const char *const paths[],
+                              const char *const args[],
+                              int n_stages,
+                              const char *const *envp,
+                              int64_t pids_out[])
 {
-    if (left_pid_out) *left_pid_out = -1;
-
-    pipe_t *pipe = pipe_create();
-    if (!pipe) return -(int64_t)OSNOS_ENOMEM;
-    /* pipe_create starts with ref_w=ref_r=1 — those references
-     * belong to the two tasks we're about to spawn. Each task's
-     * exit handler drops the relevant side. */
-
-    /* Spawn LEFT — writer. */
-    int64_t lpid = proc_execve(left_path, left_args, envp);
-    if (lpid < 0) {
-        /* Pipe never attached; drop both refs to free the slot. */
-        pipe_close_writer(pipe);
-        pipe_close_reader(pipe);
-        return lpid;
+    if (n_stages < 2 || n_stages > MAX_PIPELINE_STAGES) {
+        return -(int64_t)OSNOS_EINVAL;
     }
-    task_t *lt = task_by_pid((uint64_t)lpid);
-    if (lt) lt->pipe_out = pipe;
 
-    /* Spawn RIGHT — reader. */
-    int64_t rpid = proc_execve(right_path, right_args, envp);
-    if (rpid < 0) {
-        /* Tear down left: it'll discover EPIPE when it tries to
-         * write, or just exit normally if it doesn't write much.
-         * Either way we can't run the pipeline. Free our refs. */
-        if (lt) {
-            lt->pipe_out = 0;
-            lt->kill_pending = 1;
+    /*
+     * Allocate the N-1 pipes that sit between adjacent stages. If
+     * the pool runs out partway through, close what we've created
+     * and bail.
+     */
+    pipe_t *pipes[MAX_PIPELINE_STAGES - 1] = {0};
+    int pipes_created = 0;
+    for (int i = 0; i < n_stages - 1; i++) {
+        pipes[i] = pipe_create();
+        if (!pipes[i]) {
+            for (int j = 0; j < pipes_created; j++) {
+                pipe_close_writer(pipes[j]);
+                pipe_close_reader(pipes[j]);
+            }
+            return -(int64_t)OSNOS_ENOMEM;
         }
-        pipe_close_writer(pipe);
-        pipe_close_reader(pipe);
-        return rpid;
+        pipes_created++;
     }
-    task_t *rt = task_by_pid((uint64_t)rpid);
-    if (rt) rt->pipe_in = pipe;
 
-    if (left_pid_out) *left_pid_out = lpid;
-    return rpid;
+    /*
+     * Spawn each stage and wire its endpoints. proc_execve
+     * leaves the new task READY but not yet dispatched, so we can
+     * safely mutate its task_t.pipe_in/pipe_out before scheduler
+     * picks it up.
+     */
+    int64_t pids[MAX_PIPELINE_STAGES];
+    for (int i = 0; i < n_stages; i++) pids[i] = -1;
+
+    for (int i = 0; i < n_stages; i++) {
+        pids[i] = proc_execve(paths[i], args[i], envp);
+        if (pids[i] < 0) {
+            /* Partial failure: kill anything we already spawned
+             * (kill_pending fires at next scheduler dispatch), and
+             * release pipe refs so the slots return to the pool. */
+            for (int j = 0; j < i; j++) {
+                task_t *st = task_by_pid((uint64_t)pids[j]);
+                if (st) {
+                    st->pipe_in     = 0;
+                    st->pipe_out    = 0;
+                    st->kill_pending = 1;
+                }
+            }
+            for (int j = 0; j < pipes_created; j++) {
+                pipe_close_writer(pipes[j]);
+                pipe_close_reader(pipes[j]);
+            }
+            return pids[i];
+        }
+        task_t *t = task_by_pid((uint64_t)pids[i]);
+        if (t) {
+            if (i > 0)              t->pipe_in  = pipes[i - 1];
+            if (i < n_stages - 1)   t->pipe_out = pipes[i];
+        }
+    }
+
+    if (pids_out) {
+        for (int i = 0; i < n_stages; i++) pids_out[i] = pids[i];
+    }
+    return pids[n_stages - 1];
 }
 
 int64_t proc_execve_redir(const char *path, const char *args,

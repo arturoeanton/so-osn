@@ -42,25 +42,30 @@ int64_t proc_execve_redir(const char *path, const char *args,
                            int stdout_append);
 
 /*
- * Two-stage pipeline: spawn `left | right`. Both tasks run
- * concurrently. The kernel-side pipe ring shuttles bytes from
- * left's stdout to right's stdin; the shell tracks both pids via
- * a side table so the prompt only redraws after the LAST one
- * exits.
+ * N-stage pipeline: spawn `s0 | s1 | ... | s(n-1)`. All tasks run
+ * concurrently with N-1 kernel pipes shuttling stdout → stdin
+ * between adjacent stages. The shell tracks every pid so the
+ * prompt only redraws after the DOWNSTREAM-most one exits.
  *
- *   left_*  = command on the LHS of the `|`.
- *   right_* = command on the RHS.
- *   *_envp  = environment passed to each (same array for both is
- *             the common case; the shell snapshot does that).
+ *   paths    = array of N absolute paths (one per stage).
+ *   args     = array of N argv-tails (the bytes after the cmd).
+ *   n_stages = 2..MAX_PIPELINE_STAGES.
+ *   envp     = shared environment for all stages.
+ *   pids_out = optional [n_stages] array; receives each stage's
+ *              pid on success (downstream is pids_out[n-1]).
  *
- * Returns the pid of the RIGHT (downstream) task on success — that's
- * the one whose exit "ends" the pipeline. Negative on failure; both
- * tasks are torn down on partial-failure.
+ * Returns the pid of the LAST stage (the one whose exit ends the
+ * pipeline) on success. Negative on failure; partial state is
+ * torn down (created pipes closed, already-spawned upstream tasks
+ * flagged kill_pending). pids_out is left undefined on failure.
  */
-int64_t proc_execve_pipe(const char *left_path,  const char *left_args,
-                          const char *right_path, const char *right_args,
-                          const char *const *envp,
-                          int64_t *left_pid_out);
+#define MAX_PIPELINE_STAGES 4
+
+int64_t proc_execve_pipeline(const char *const paths[],
+                              const char *const args[],
+                              int n_stages,
+                              const char *const *envp,
+                              int64_t pids_out[]);
 
 /*
  * Kill the currently-running ring-3 task: tear down its address space,

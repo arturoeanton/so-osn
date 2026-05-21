@@ -20,14 +20,39 @@ static long set_errno(long r) {
     return r;
 }
 
+/*
+ * Per-fd O_NONBLOCK cache. read() defaults to blocking (loop on
+ * EAGAIN with a short nanosleep) because most user code expects
+ * "real" blocking semantics. fcntl(F_SETFL, O_NONBLOCK) and
+ * open(.., O_NONBLOCK) flip the corresponding bit here; once set,
+ * read() bails on the first EAGAIN instead of looping. write()
+ * doesn't loop today so the cache only affects reads.
+ *
+ * 32 slots matches OSNOS_MAX_FDS (cap for the global fd table).
+ * Higher fds are treated as blocking — safe default.
+ */
+#define _LIBC_NONBLOCK_CACHE_SZ 32
+static unsigned char _libc_nonblock[_LIBC_NONBLOCK_CACHE_SZ];
+
+static void _libc_mark_nonblock(int fd, int yes) {
+    if (fd < 0 || fd >= _LIBC_NONBLOCK_CACHE_SZ) return;
+    _libc_nonblock[fd] = yes ? 1 : 0;
+}
+static int  _libc_is_nonblock(int fd) {
+    if (fd < 0 || fd >= _LIBC_NONBLOCK_CACHE_SZ) return 0;
+    return _libc_nonblock[fd];
+}
+
 ssize_t read(int fd, void *buf, size_t n) {
+    int nonblock = _libc_is_nonblock(fd);
     for (;;) {
         long r = osnos_syscall3(SYS_READ, fd, (long)buf, (long)n);
         if (r >= 0) return (ssize_t)r;
         if (-r != EAGAIN) { errno = (int)(-r); return -1; }
-        /* Block: nanosleep yields to the scheduler so the keyboard
-         * server can land bytes in the TTY, then we retry. 20 ms
-         * matches what select/accept/recv use. */
+        if (nonblock) { errno = EAGAIN; return -1; }
+        /* Blocking path: nanosleep yields to the scheduler so the
+         * keyboard server / pipe writer can produce data, then we
+         * retry. 20 ms matches what select/accept/recv use. */
         struct timespec ts = { 0, 20 * 1000000 };
         nanosleep(&ts, 0);
     }
@@ -96,11 +121,14 @@ int open(const char *path, int flags, ...) {
     }
     char abs_buf[256];
     const char *abs_path = resolve_path(path, abs_buf, sizeof(abs_buf));
-    return (int)set_errno(
+    int fd = (int)set_errno(
         osnos_syscall3(SYS_OPEN, (long)abs_path, flags, (long)mode));
+    if (fd >= 0) _libc_mark_nonblock(fd, (flags & O_NONBLOCK) != 0);
+    return fd;
 }
 
 int close(int fd) {
+    _libc_mark_nonblock(fd, 0);    /* drop cache slot */
     return (int)set_errno(osnos_syscall1(SYS_CLOSE, fd));
 }
 
@@ -175,8 +203,15 @@ int fcntl(int fd, int cmd, ...) {
     va_start(ap, cmd);
     long arg = va_arg(ap, long);
     va_end(ap);
-    return (int)set_errno(
+    int r = (int)set_errno(
         osnos_syscall3(SYS_FCNTL, fd, cmd, arg));
+    /* Keep the local O_NONBLOCK cache in sync so subsequent
+     * read()s honour the flag. F_SETFL replaces the bit; F_GETFL
+     * doesn't change anything. */
+    if (r >= 0 && cmd == F_SETFL) {
+        _libc_mark_nonblock(fd, (arg & O_NONBLOCK) != 0);
+    }
+    return r;
 }
 
 /*

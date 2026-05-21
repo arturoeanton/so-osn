@@ -2871,76 +2871,126 @@ static void resolve_bin(const char *name, char *out, size_t out_size) {
 }
 
 /*
- * Parse and dispatch `cmd1 | cmd2`. Both stages run concurrently
- * via proc_execve_pipe. The shell tracks the downstream pid as
- * fg_pid; the prompt redraws when it exits. The upstream pid is
- * tracked in pipeline_lpid so we can ignore its IPC_PROC_EXITED
- * without printing a "[pid] done" line. Only 2-stage pipelines
- * for now; `a | b | c` reports an error.
+ * Active pipeline state. fg_pid points at the LAST (downstream)
+ * stage; pipeline_upstream_pids holds the others. When ANY of the
+ * upstream pids reports IPC_PROC_EXITED we silently drop the
+ * notification (no "[pid] done" noise); the prompt only redraws
+ * when fg_pid exits. MAX_PIPELINE_STAGES-1 upstream slots cover
+ * the deepest pipeline the kernel helper accepts.
  */
-static uint64_t pipeline_lpid = 0;   /* upstream pid of an active pipeline */
+static uint64_t pipeline_upstream_pids[MAX_PIPELINE_STAGES - 1];
+static int      pipeline_upstream_n;
 
-static void run_pipeline(const char *left_raw, const char *right_raw) {
-    /* Trim leading/trailing whitespace from both sides. */
-    while (*left_raw == ' ' || *left_raw == '\t') left_raw++;
-    while (*right_raw == ' ' || *right_raw == '\t') right_raw++;
+/*
+ * Reset between pipelines. Called both when a fresh pipeline
+ * starts and when one finishes (fg's IPC_PROC_EXITED).
+ */
+static void pipeline_clear(void) {
+    pipeline_upstream_n = 0;
+    for (int i = 0; i < MAX_PIPELINE_STAGES - 1; i++) {
+        pipeline_upstream_pids[i] = 0;
+    }
+}
 
-    if (left_raw[0] == 0 || right_raw[0] == 0) {
-        shell_send_console_color("\npipe: empty stage\n", 0xff5555);
+/*
+ * Return 1 if `pid` is one of the upstream pids of an active
+ * pipeline (so its exit notification can be silently swallowed).
+ */
+static int pipeline_owns_upstream(uint64_t pid) {
+    for (int i = 0; i < pipeline_upstream_n; i++) {
+        if (pipeline_upstream_pids[i] == pid) {
+            /* Mark consumed so a stale match later doesn't fire. */
+            pipeline_upstream_pids[i] = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Parse and dispatch `a | b | c | d` (up to MAX_PIPELINE_STAGES).
+ * All stages run concurrently — pipes carry stdout→stdin between
+ * adjacent ones. Each stage must be a registered ELF; if any one
+ * isn't we abort without spawning anything.
+ */
+static void run_pipeline(char *stages_buf, int n_stages) {
+    if (n_stages < 2) {
+        shell_send_console_color("\npipe: need >= 2 stages\n", 0xff5555);
+        prompt();
+        return;
+    }
+    if (n_stages > MAX_PIPELINE_STAGES) {
+        shell_send_console_color("\npipe: too many stages\n", 0xff5555);
         prompt();
         return;
     }
 
-    /* Each side: first whitespace-delimited token is the cmd, rest
-     * the args. resolve_bin maps "cat" → "/bin/cat". */
-    char  left_tok[OSNOS_PATH_MAX];
-    char right_tok[OSNOS_PATH_MAX];
-    size_t li = 0, ri = 0;
-    while (left_raw[li]  && left_raw[li]  != ' ' && li + 1 < sizeof(left_tok))  {
-        left_tok[li] = left_raw[li];  li++;
-    }
-    left_tok[li] = 0;
-    while (right_raw[ri] && right_raw[ri] != ' ' && ri + 1 < sizeof(right_tok)) {
-        right_tok[ri] = right_raw[ri]; ri++;
-    }
-    right_tok[ri] = 0;
+    /* Tokenise: for each stage, split off the leading word as the
+     * command name and keep the rest as args. resolve_bin maps
+     * "cat" → "/bin/cat". */
+    static char  stage_paths_buf[MAX_PIPELINE_STAGES][OSNOS_PATH_MAX];
+    const char  *stage_paths[MAX_PIPELINE_STAGES];
+    const char  *stage_args [MAX_PIPELINE_STAGES];
 
-    const char *left_args  = left_raw  + li;  while (*left_args  == ' ') left_args++;
-    const char *right_args = right_raw + ri;  while (*right_args == ' ') right_args++;
+    /* Walk through stages_buf. `stages_buf` is a writable buffer
+     * with each stage NUL-separated already (the caller did the
+     * splitting on `|`). For each stage, trim leading whitespace,
+     * isolate the cmd token by NUL-terminating after the first
+     * whitespace, and remember the args as the tail. */
+    char *cursor = stages_buf;
+    for (int i = 0; i < n_stages; i++) {
+        while (*cursor == ' ' || *cursor == '\t') cursor++;
+        if (*cursor == 0) {
+            shell_send_console_color("\npipe: empty stage\n", 0xff5555);
+            prompt();
+            return;
+        }
+        char *cmd_start = cursor;
+        while (*cursor && *cursor != ' ' && *cursor != '\t') cursor++;
+        int had_args = (*cursor != 0);
+        if (had_args) { *cursor = 0; cursor++; }
+        char *args_start = cursor;
+        while (*args_start == ' ' || *args_start == '\t') args_start++;
 
-    if (!builtin_find(left_tok[0] == '/' ? left_tok + 5 : left_tok) ||
-        !builtin_find(right_tok[0] == '/' ? right_tok + 5 : right_tok)) {
-        shell_send_console_color("\npipe: at least one stage is not an ELF\n",
-                                  0xff5555);
-        prompt();
-        return;
+        /* Validate the cmd resolves to an ELF before resolve_bin
+         * so typos are caught with a clear message. */
+        const char *base = cmd_start;
+        if (base[0] == '/' && os_strncmp(base, "/bin/", 5) == 0) base += 5;
+        if (!builtin_find(base)) {
+            shell_send_console_color("\npipe: stage is not an ELF: ", 0xff5555);
+            shell_send_console_color(cmd_start, 0xff5555);
+            shell_send_console("\n");
+            prompt();
+            return;
+        }
+        resolve_bin(cmd_start, stage_paths_buf[i], OSNOS_PATH_MAX);
+        stage_paths[i] = stage_paths_buf[i];
+        stage_args [i] = args_start;
+
+        /* Advance cursor past the rest of this stage to the next
+         * NUL separator (placed by the splitter). */
+        while (*cursor) cursor++;
+        cursor++;   /* step over the NUL separator */
     }
-
-    char left_path [OSNOS_PATH_MAX];
-    char right_path[OSNOS_PATH_MAX];
-    resolve_bin(left_tok,  left_path,  sizeof(left_path));
-    resolve_bin(right_tok, right_path, sizeof(right_path));
 
     const char *env_snapshot[SHELL_ENV_MAX + 1];
     shell_env_snapshot(env_snapshot);
 
-    int64_t lpid = -1;
-    int64_t rpid = proc_execve_pipe(left_path, left_args,
-                                     right_path, right_args,
-                                     env_snapshot, &lpid);
-    if (rpid < 0) {
+    int64_t pids[MAX_PIPELINE_STAGES];
+    int64_t last_pid = proc_execve_pipeline(stage_paths, stage_args,
+                                              n_stages, env_snapshot, pids);
+    if (last_pid < 0) {
         shell_send_console_color("\npipe: spawn failed\n", 0xff5555);
         prompt();
         return;
     }
 
-    /* fg_pid = downstream task. When it exits, the pipeline is
-     * done from the user's POV (the upstream may already have
-     * exited or be just trailing). pipeline_lpid lets the
-     * IPC_PROC_EXITED handler silently drop the upstream's
-     * exit notification. */
-    pipeline_lpid = (uint64_t)lpid;
-    fg_pid        = (uint64_t)rpid;
+    /* Track upstream pids so their IPC_PROC_EXITED gets swallowed. */
+    pipeline_clear();
+    for (int i = 0; i < n_stages - 1; i++) {
+        pipeline_upstream_pids[pipeline_upstream_n++] = (uint64_t)pids[i];
+    }
+    fg_pid = (uint64_t)last_pid;
     shell_send_console("\n");
 }
 
@@ -3162,20 +3212,25 @@ static void run_command(const char *cmd) {
     }
 
     /*
-     * Pipe short-circuit: a `|` splits the line into two ELF stages
-     * that run concurrently with a kernel pipe shuttling stdout →
-     * stdin. Only 2-stage pipelines today (`a | b`; `a | b | c`
-     * would need a multi-stage scheduler). The split is greedy on
-     * the FIRST '|' so `a | b | c` reports "not an ELF" later.
+     * Pipe short-circuit: split the line on every '|' and hand
+     * off to run_pipeline as N-stage. Up to MAX_PIPELINE_STAGES.
+     * Each stage gets the bytes in between the bars (without the
+     * bar itself); run_pipeline tokenises into cmd + args.
      */
     {
-        char buf_p[OSNOS_INPUT_MAX];
-        os_strlcpy(buf_p, cmd, sizeof(buf_p));
-        char *bar = 0;
-        for (char *p = buf_p; *p; p++) if (*p == '|') { bar = p; break; }
-        if (bar) {
-            *bar = 0;
-            run_pipeline(buf_p, bar + 1);
+        int has_pipe = 0;
+        for (const char *p = cmd; *p; p++) if (*p == '|') { has_pipe = 1; break; }
+        if (has_pipe) {
+            static char buf_p[OSNOS_INPUT_MAX];
+            os_strlcpy(buf_p, cmd, sizeof(buf_p));
+            /* Replace every '|' with NUL so each stage is a clean
+             * sub-string. run_pipeline walks stages by stepping
+             * over the separators. */
+            int stages = 1;
+            for (char *p = buf_p; *p; p++) {
+                if (*p == '|') { *p = 0; stages++; }
+            }
+            run_pipeline(buf_p, stages);
             return;
         }
     }
@@ -3311,15 +3366,15 @@ void shell_server_tick(void) {
      *     The next keystroke / Enter will scroll naturally.
      */
     if (msg.type == IPC_PROC_EXITED) {
-        /* Upstream of a 2-stage pipeline: silently swallow. The
-         * downstream's exit triggers the prompt. */
-        if (pipeline_lpid && msg.arg1 == pipeline_lpid) {
-            pipeline_lpid = 0;
+        /* Upstream of an active pipeline: swallow silently. The
+         * downstream's exit (matched against fg_pid below) is the
+         * one that closes the pipeline and redraws the prompt. */
+        if (pipeline_owns_upstream(msg.arg1)) {
             return;
         }
         if (msg.arg1 == fg_pid) {
             fg_pid = 0;
-            pipeline_lpid = 0;   /* clear in case downstream died first */
+            pipeline_clear();   /* in case downstream died first */
             prompt();
         } else {
             char num[16];
