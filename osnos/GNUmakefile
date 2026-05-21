@@ -116,7 +116,8 @@ USER_ELF_LIBC_SRCS := \
     elfs/net/httpd.c \
     elfs/tests/hello_libc.c \
     elfs/tests/libctest.c \
-    elfs/tests/ttytest.c
+    elfs/tests/ttytest.c \
+    elfs/tests/envtest.c
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS))

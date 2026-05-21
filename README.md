@@ -18,6 +18,16 @@ mini-libc propia para programas de usuario en ring 3.
    /home > # reboot
    /home > cat /sd/note
    persistente
+   /home > env
+   PATH=/bin
+   HOME=/home
+   PWD=/home
+   SHELL=/bin/osh
+   TERM=osnos
+   /home > httpd &              # auto-exec /bin/httpd
+   [3]
+   /home > # desde otro host:
+   /home > # curl http://localhost:8080/
 ```
 
 > **TL;DR para reentrar al proyecto después de meses:** instalar Limine

@@ -41,13 +41,17 @@ void *bsearch(const void *key, const void *base, size_t nmemb,
               int (*compar)(const void *, const void *));
 
 /*
- * Environment — there's no envp wired through proc_exec yet, so
- * getenv always returns NULL and setenv/unsetenv are no-ops that
- * return 0. Real env support lands when the kernel passes envp.
+ * Environment. crt0 publishes the kernel-passed envp[] as the global
+ * `environ` pointer; getenv walks that table. setenv / unsetenv /
+ * putenv mutate a heap-resident copy (the initial array lives on the
+ * stack so the first mutation duplicates it).
  */
+extern char **environ;
+
 char *getenv  (const char *name);
 int   setenv  (const char *name, const char *value, int overwrite);
 int   unsetenv(const char *name);
+int   putenv  (char *kv);
 
 /*
  * atexit — registers a function to run on exit(). Up to 32 slots,

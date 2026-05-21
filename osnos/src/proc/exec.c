@@ -265,12 +265,30 @@ static int64_t task_create_user(
  * Returns the new RSP, or 0 if the block doesn't fit.
  */
 #define MAX_ARGV 16
-#define ARGV_BLOCK_MAX 1024
+#define MAX_ENVP 32
+#define ARGV_BLOCK_MAX 2048
 
+/*
+ * Build the Linux init protocol on the user stack: argc, argv[],
+ * envp[], plus the backing strings. _start (crt0.S) reads:
+ *   argc        at (%rsp)
+ *   argv[]      at %rsp + 8                          (NULL-terminated)
+ *   envp[]      at %rsp + 8 + (argc + 1) * 8         (NULL-terminated)
+ *
+ * Layout in memory (low → high):
+ *   [argc] [argv[0..argc-1] NULL] [envp[0..envc-1] NULL] [strings...]
+ *   ^-- RSP                                              ^-- user_stack_top
+ *
+ * `envp` is a NULL-terminated array of "KEY=VAL" strings, or NULL for
+ * an empty environment.
+ *
+ * Returns the new RSP (argc address), or 0 if the block doesn't fit.
+ */
 static uint64_t build_argv_block(uint64_t   *pml4,
                                  uint64_t    user_stack_top,
                                  const char *prog_name,
-                                 const char *args)
+                                 const char *args,
+                                 const char *const *envp)
 {
     const char *tokens[MAX_ARGV];
     size_t      token_lens[MAX_ARGV];
@@ -308,14 +326,29 @@ static uint64_t build_argv_block(uint64_t   *pml4,
         argc++;
     }
 
-    /* Total bytes for the strings (each NUL-terminated). */
+    /* Snapshot envp[] pointers + lengths. envp may be NULL. */
+    const char *envs[MAX_ENVP];
+    size_t      env_lens[MAX_ENVP];
+    int         envc = 0;
+    if (envp) {
+        while (envp[envc] && envc < MAX_ENVP) {
+            envs[envc]     = envp[envc];
+            env_lens[envc] = os_strlen(envp[envc]);
+            envc++;
+        }
+    }
+
+    /* Total bytes for ALL strings (argv + envp), each NUL-terminated. */
     size_t strings_total = 0;
     for (int i = 0; i < argc; i++) strings_total += token_lens[i] + 1;
+    for (int i = 0; i < envc; i++) strings_total += env_lens[i] + 1;
 
     /* Stay well inside the 4 KiB user stack page. */
     size_t block_size =
-        8 /* argc */ + 8 * (size_t)(argc + 1) /* argv + NULL */ +
-        8 /* envp NULL */ + ((strings_total + 7) & ~(size_t)7);
+        8 /* argc */ +
+        8 * (size_t)(argc + 1) /* argv + NULL */ +
+        8 * (size_t)(envc + 1) /* envp + NULL */ +
+        ((strings_total + 7) & ~(size_t)7);
     if (block_size > ARGV_BLOCK_MAX) return 0;
 
     /* HHDM mapping for the stack page so we can write user virt
@@ -329,14 +362,16 @@ static uint64_t build_argv_block(uint64_t   *pml4,
     uint64_t strings_base_virt =
         (user_stack_top - strings_total) & ~(uint64_t)7;
 
-    /* Pointer area lives below the strings region. */
+    /* Pointer area: envp_null, envp[envc-1..0], argv_null, argv[argc-1..0], argc. */
     uint64_t envp_null_virt = strings_base_virt - 8;
-    uint64_t argv_null_virt = envp_null_virt    - 8;
+    uint64_t envp0_virt     = envp_null_virt    - 8 * (uint64_t)envc;
+    uint64_t argv_null_virt = envp0_virt        - 8;
     uint64_t argv0_virt     = argv_null_virt    - 8 * (uint64_t)argc;
     uint64_t argc_virt      = argv0_virt        - 8;
 
     /* Copy strings, recording the virt address of each. */
     uint64_t arg_ptrs[MAX_ARGV];
+    uint64_t env_ptrs[MAX_ENVP];
     uint64_t cursor = strings_base_virt;
     for (int i = 0; i < argc; i++) {
         arg_ptrs[i] = cursor;
@@ -347,9 +382,22 @@ static uint64_t build_argv_block(uint64_t   *pml4,
         page[off + token_lens[i]] = 0;
         cursor += token_lens[i] + 1;
     }
+    for (int i = 0; i < envc; i++) {
+        env_ptrs[i] = cursor;
+        size_t off = cursor - page_virt;
+        for (size_t j = 0; j < env_lens[i]; j++) {
+            page[off + j] = (uint8_t)envs[i][j];
+        }
+        page[off + env_lens[i]] = 0;
+        cursor += env_lens[i] + 1;
+    }
 
     /* Write the pointer block. */
     *(uint64_t *)(page + (envp_null_virt - page_virt)) = 0;
+    for (int i = 0; i < envc; i++) {
+        *(uint64_t *)(page + (envp0_virt + 8 * (uint64_t)i - page_virt)) =
+            env_ptrs[i];
+    }
     *(uint64_t *)(page + (argv_null_virt - page_virt)) = 0;
     for (int i = 0; i < argc; i++) {
         *(uint64_t *)(page + (argv0_virt + 8 * (uint64_t)i - page_virt)) =
@@ -375,7 +423,8 @@ static int64_t task_create_user_elf(
     const char    *name,
     const uint8_t *elf_data,
     size_t         elf_size,
-    const char    *args
+    const char    *args,
+    const char *const *envp
 ) {
     uint64_t *user_pml4   = 0;
     uint64_t  entry       = 0;
@@ -389,7 +438,7 @@ static int64_t task_create_user_elf(
      * the user stack page. The trampoline iretq's with RSP = address
      * of argc; crt0.S reads everything from there.
      */
-    uint64_t init_rsp = build_argv_block(user_pml4, stack_top, name, args);
+    uint64_t init_rsp = build_argv_block(user_pml4, stack_top, name, args, envp);
     if (init_rsp == 0) {
         address_space_destroy(user_pml4);
         return -(int64_t)OSNOS_E2BIG;
@@ -490,7 +539,8 @@ void proc_exit_current_user(int exit_code) {
 /* proc_exec — dispatches user blob vs user ELF                     */
 /* ---------------------------------------------------------------- */
 
-int64_t proc_exec(const char *path, const char *args) {
+int64_t proc_execve(const char *path, const char *args,
+                     const char *const *envp) {
     if (!path) return -(int64_t)OSNOS_EFAULT;
     if (!os_strstarts(path, "/bin/")) return -(int64_t)OSNOS_ENOENT;
 
@@ -509,7 +559,8 @@ int64_t proc_exec(const char *path, const char *args) {
         return task_create_user_elf(b->name,
                                     b->elf_start,
                                     (size_t)(b->elf_end - b->elf_start),
-                                    args);
+                                    args,
+                                    envp);
     }
 
     /* Flat user blob — map bytes verbatim into one page, spawn task. */
@@ -519,4 +570,11 @@ int64_t proc_exec(const char *path, const char *args) {
     }
 
     return -(int64_t)OSNOS_ENOENT;
+}
+
+/* Legacy wrapper — proc_exec is now proc_execve with an empty
+ * environment. Callers that want PATH/HOME/PWD should switch to
+ * proc_execve and pass their own envp. */
+int64_t proc_exec(const char *path, const char *args) {
+    return proc_execve(path, args, 0);
 }

@@ -54,6 +54,60 @@ static uint64_t fg_pid = 0;
 
 static char current_path[OSNOS_PATH_MAX] = "/home";
 
+/*
+ * Shell environment block. Each entry is "KEY=VAL" (no equals → still
+ * legal but getenv returns "" for it). Updated by cmd_export / cmd_unset
+ * and snapshotted as char** for proc_execve at spawn time.
+ *
+ * Size budget: 16 vars × 128 bytes = 2 KiB BSS. Plenty for now; bump
+ * the limit when we get a config-reading shell.
+ */
+#define SHELL_ENV_MAX     16
+#define SHELL_ENV_LINE    128
+static char  shell_env[SHELL_ENV_MAX][SHELL_ENV_LINE];
+static int   shell_env_count = 0;
+
+/* Find the index of a "KEY=..." entry, or -1 if not present. */
+static int shell_env_find(const char *key) {
+    size_t klen = 0;
+    while (key[klen] && key[klen] != '=') klen++;
+    for (int i = 0; i < shell_env_count; i++) {
+        const char *e = shell_env[i];
+        if (os_strncmp(e, key, klen) == 0 && e[klen] == '=') return i;
+    }
+    return -1;
+}
+
+/* Set or replace "KEY=VAL". `kv` must contain '='. */
+static int shell_env_set(const char *kv) {
+    if (os_strlen(kv) >= SHELL_ENV_LINE) return -1;
+    int slot = shell_env_find(kv);
+    if (slot < 0) {
+        if (shell_env_count >= SHELL_ENV_MAX) return -1;
+        slot = shell_env_count++;
+    }
+    os_strlcpy(shell_env[slot], kv, SHELL_ENV_LINE);
+    return 0;
+}
+
+static int shell_env_unset(const char *key) {
+    int slot = shell_env_find(key);
+    if (slot < 0) return -1;
+    for (int i = slot; i < shell_env_count - 1; i++) {
+        os_strlcpy(shell_env[i], shell_env[i + 1], SHELL_ENV_LINE);
+    }
+    shell_env_count--;
+    return 0;
+}
+
+/* Build a char *[] view of shell_env, NULL-terminated. Lives on the
+ * caller's stack and points into shell_env[] so it's only valid until
+ * the next exec finishes the build_argv_block copy. */
+static void shell_env_snapshot(const char *out[SHELL_ENV_MAX + 1]) {
+    for (int i = 0; i < shell_env_count; i++) out[i] = shell_env[i];
+    out[shell_env_count] = 0;
+}
+
 static char history[HISTORY_MAX][OSNOS_INPUT_MAX];
 static size_t history_count = 0;
 static size_t history_pos = HISTORY_NONE;
@@ -318,6 +372,9 @@ static void cmd_help(const char *args);
 static void cmd_clear(const char *args);
 static void cmd_pwd(const char *args);
 static void cmd_cd(const char *args);
+static void cmd_env_print(const char *args);
+static void cmd_export(const char *args);
+static void cmd_unset(const char *args);
 static void cmd_ls(const char *args);
 static void cmd_cat(const char *args);
 static void cmd_touch(const char *args);
@@ -363,6 +420,9 @@ static const shell_command_t commands[] = {
     ALIAS("cls",   cmd_clear),
     CMD("pwd",     cmd_pwd,     "pwd"),
     CMD("cd",      cmd_cd,      "cd [PATH]"),
+    CMD("env",     cmd_env_print, "list environment variables"),
+    CMD("export",  cmd_export,  "export KEY=VAL"),
+    CMD("unset",   cmd_unset,   "unset KEY"),
     CMD("ls",      cmd_ls,      "ls [PATH]"),
     CMD("tree",    cmd_tree,    "tree [PATH]"),
     CMD("cat",     cmd_cat,     "cat FILE"),
@@ -437,7 +497,51 @@ static void cmd_cd(const char *args) {
         }
         os_strlcpy(current_path, tmp, sizeof(current_path));
     }
+    /* Keep $PWD in sync — children spawned afterwards see the new cwd. */
+    char pwd_line[SHELL_ENV_LINE];
+    os_strlcpy(pwd_line, "PWD=", sizeof(pwd_line));
+    os_strlcat(pwd_line, current_path, sizeof(pwd_line));
+    shell_env_set(pwd_line);
     shell_send_console("\n");
+    prompt();
+}
+
+static void cmd_env_print(const char *args) {
+    (void)args;
+    /* One IPC per line is fine for the small number of vars we hold. */
+    shell_send_console("\n");
+    for (int i = 0; i < shell_env_count; i++) {
+        shell_send_console(shell_env[i]);
+        shell_send_console("\n");
+    }
+    prompt();
+}
+
+static void cmd_export(const char *args) {
+    if (args[0] == 0 || !os_strchr(args, '=')) {
+        shell_send_console_color("\nusage: export KEY=VAL\n", 0xff5555);
+        prompt();
+        return;
+    }
+    if (shell_env_set(args) != 0) {
+        shell_send_console_color("\nexport: full or too long\n", 0xff5555);
+    } else {
+        shell_send_console("\n");
+    }
+    prompt();
+}
+
+static void cmd_unset(const char *args) {
+    if (args[0] == 0) {
+        shell_send_console_color("\nusage: unset KEY\n", 0xff5555);
+        prompt();
+        return;
+    }
+    if (shell_env_unset(args) != 0) {
+        shell_send_console_color("\nunset: not set\n", 0xff5555);
+    } else {
+        shell_send_console("\n");
+    }
     prompt();
 }
 
@@ -2473,7 +2577,9 @@ static void cmd_exec(const char *args) {
         os_strlcpy(fullpath, path, sizeof(fullpath));
     }
 
-    int64_t pid = proc_exec(fullpath, rest);
+    const char *env_snapshot[SHELL_ENV_MAX + 1];
+    shell_env_snapshot(env_snapshot);
+    int64_t pid = proc_execve(fullpath, rest, env_snapshot);
     if (pid < 0) {
         shell_send_console_color("\nexec failed\n", 0xff5555);
         prompt();
@@ -2660,6 +2766,14 @@ void shell_server_init(void) {
     history_pos = HISTORY_NONE;
     history_scratch[0] = 0;
     os_strlcpy(current_path, "/home", sizeof(current_path));
+
+    /* Seed the default environment passed to every exec'd ELF. */
+    shell_env_count = 0;
+    shell_env_set("PATH=/bin");
+    shell_env_set("HOME=/home");
+    shell_env_set("PWD=/home");
+    shell_env_set("SHELL=/bin/osh");
+    shell_env_set("TERM=osnos");
 
     shell_send_console_color("osnos microkernel shell\n", 0xffffff);
     shell_send_console_color("type help\n\n", 0xaaaaaa);

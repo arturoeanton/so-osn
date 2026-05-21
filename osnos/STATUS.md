@@ -1459,6 +1459,46 @@ OK TTY layer (src/micro/tty.{c,h}) — VERIFICADO en QEMU
      4) Ctrl+C durante raw → ISIG entrega SIGINT, task muere.
      5) Restaura termios original.
 
+### FASE env passing + PATH — CERRADA
+OK Auto /bin/ prefix + ELF fallback en el shell
+   - cmd_exec: si path no empieza con '/', prepende "/bin/".
+     `exec httpd` = `exec /bin/httpd`. Path absoluto sigue
+     funcionando.
+   - run_command: si no matchea un comando builtin, chequea
+     builtin_find(first_token); si es un ELF registrado, auto-exec
+     (`httpd<Enter>` corre `/bin/httpd`). Typos siguen mostrando
+     "unknown command".
+
+OK envp end-to-end (kernel + libc + shell)
+   - **Kernel**: build_argv_block extendido para empaquetar argc /
+     argv[] / envp[] / strings en la user stack (Linux SysV init
+     layout). MAX_ENVP=32, total block cap 2 KiB. proc_execve
+     (nuevo) toma `const char *const *envp`; proc_exec wrapper
+     pasa NULL.
+   - **Shell**: shell_env[16] static array de "KEY=VAL" lines.
+     Defaults seteados en shell_server_init: PATH=/bin,
+     HOME=/home, PWD=/home, SHELL=/bin/osh, TERM=osnos. cmd_cd
+     ahora actualiza PWD. shell_env_snapshot() arma char**
+     NULL-terminado en la stack para pasar a proc_execve.
+   - **Shell commands**: `env` (lista todas), `export KEY=VAL`,
+     `unset KEY`.
+   - **crt0.S**: lee envp del stack (rsp+16+8*argc), lo asigna al
+     global `environ` con `movq %rdx, environ(%rip)` ANTES de
+     llamar main. La global vive en .data inicializada a NULL.
+   - **libc**: `extern char **environ;` declarado en stdlib.h.
+     - getenv(name): walk de environ, busca match "name=", devuelve
+       el puntero a value.
+     - setenv(name, value, overwrite): malloc'a "KEY=VAL", llama
+       putenv.
+     - putenv(kv): on first mutation hace `env_takeover` (malloc
+       un array fresco, dup todos los strings del kernel-supplied
+       envp). Luego inserta o reemplaza.
+     - unsetenv(name): shift down (sin free para no liberar memoria
+       de origen incierto, fuera del scope hoy).
+   - **elfs/tests/envtest.c**: dump environ + setenv/unsetenv smoke
+     test. `envtest PATH` imprime "PATH=/bin". `envtest` solo lista
+     todo lo inherited.
+
 ### Reorganización elfs/ (desde tests/)
    tests/ se renombró a elfs/ con subcategorías:
      elfs/shell/     osh

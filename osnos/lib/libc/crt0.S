@@ -25,6 +25,10 @@ _start:
     leaq    8(%rsp), %rsi                  /* argv = rsp + 8        */
     leaq    16(%rsp,%rdi,8), %rdx          /* envp = rsp + 16 + 8*argc */
 
+    /* Publish envp as the global `environ` so getenv() / putenv()
+     * can find it without the caller having to thread the pointer. */
+    movq    %rdx, environ(%rip)
+
     /*
      * Align RSP to a 16-byte boundary immediately before the call.
      * SysV requires RSP & 15 == 0 at the call site (callee sees +8).
@@ -44,3 +48,11 @@ _start:
 1:  int3
     jmp     1b
     .size   _start, . - _start
+
+    .section .data
+    .global environ
+    .type   environ, @object
+    .align  8
+environ:
+    .quad   0
+    .size   environ, . - environ

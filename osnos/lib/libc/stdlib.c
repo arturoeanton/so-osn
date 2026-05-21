@@ -284,19 +284,117 @@ void *bsearch(const void *key, const void *base, size_t nmemb,
 /* Environment stubs (no envp wiring yet)                            */
 /* ---------------------------------------------------------------- */
 
+/* `environ` is published by crt0.S — it initially points at the
+ * envp array on the user stack. The first mutation (setenv/unsetenv/
+ * putenv) replaces it with a malloc'd table that we own. `env_owned`
+ * tracks whether we've moved off the kernel-supplied array yet. */
+static int     env_owned = 0;
+static size_t  env_capacity = 0;
+
+static size_t env_count(void) {
+    if (!environ) return 0;
+    size_t n = 0;
+    while (environ[n]) n++;
+    return n;
+}
+
+static int env_takeover(void) {
+    if (env_owned) return 0;
+    size_t n = env_count();
+    size_t cap = n + 8;
+    char **fresh = (char **)malloc(sizeof(char *) * (cap + 1));
+    if (!fresh) return -1;
+    for (size_t i = 0; i < n; i++) {
+        size_t len = 0;
+        while (environ[i][len]) len++;
+        char *dup = (char *)malloc(len + 1);
+        if (!dup) { /* leaked partial table — best-effort. */ return -1; }
+        for (size_t j = 0; j <= len; j++) dup[j] = environ[i][j];
+        fresh[i] = dup;
+    }
+    fresh[n] = 0;
+    environ = fresh;
+    env_capacity = cap;
+    env_owned = 1;
+    return 0;
+}
+
+static int env_find(const char *name) {
+    if (!environ) return -1;
+    size_t klen = 0;
+    while (name[klen] && name[klen] != '=') klen++;
+    for (size_t i = 0; environ[i]; i++) {
+        const char *e = environ[i];
+        size_t j = 0;
+        while (j < klen && e[j] && e[j] == name[j]) j++;
+        if (j == klen && e[j] == '=') return (int)i;
+    }
+    return -1;
+}
+
 char *getenv(const char *name) {
-    (void)name;
+    int idx = env_find(name);
+    if (idx < 0) return 0;
+    size_t klen = 0;
+    while (name[klen] && name[klen] != '=') klen++;
+    return environ[idx] + klen + 1;     /* skip "KEY=" */
+}
+
+int putenv(char *kv) {
+    /* POSIX semantics: the caller's buffer becomes part of environ. */
+    if (!kv) return -1;
+    int has_eq = 0;
+    for (size_t i = 0; kv[i]; i++) if (kv[i] == '=') { has_eq = 1; break; }
+    if (!has_eq) return -1;
+
+    if (env_takeover() != 0) return -1;
+
+    int idx = env_find(kv);
+    if (idx >= 0) {
+        environ[idx] = kv;
+        return 0;
+    }
+    size_t n = env_count();
+    if (n + 1 >= env_capacity) {
+        size_t newcap = env_capacity * 2 + 4;
+        char **bigger = (char **)malloc(sizeof(char *) * (newcap + 1));
+        if (!bigger) return -1;
+        for (size_t i = 0; i < n; i++) bigger[i] = environ[i];
+        bigger[n] = 0;
+        environ = bigger;
+        env_capacity = newcap;
+    }
+    environ[n] = kv;
+    environ[n + 1] = 0;
     return 0;
 }
 
 int setenv(const char *name, const char *value, int overwrite) {
-    (void)name; (void)value; (void)overwrite;
-    /* Pretend success — real env table arrives with envp wiring. */
-    return 0;
+    if (!name || !value || !*name) return -1;
+    int existing = env_find(name);
+    if (existing >= 0 && !overwrite) return 0;
+
+    /* Compose "KEY=VAL" into a malloc'd buffer that putenv adopts. */
+    size_t nlen = 0; while (name[nlen]) nlen++;
+    size_t vlen = 0; while (value[vlen]) vlen++;
+    char *kv = (char *)malloc(nlen + 1 + vlen + 1);
+    if (!kv) return -1;
+    for (size_t i = 0; i < nlen; i++) kv[i] = name[i];
+    kv[nlen] = '=';
+    for (size_t i = 0; i < vlen; i++) kv[nlen + 1 + i] = value[i];
+    kv[nlen + 1 + vlen] = 0;
+    return putenv(kv);
 }
 
 int unsetenv(const char *name) {
-    (void)name;
+    if (env_takeover() != 0) return -1;
+    int idx = env_find(name);
+    if (idx < 0) return 0;
+    /* Shift the tail down — we don't free the slot because we don't
+     * know whether it was malloc'd by setenv or a static putenv buf. */
+    size_t i = (size_t)idx;
+    while (environ[i + 1]) { environ[i] = environ[i + 1]; i++; }
+    environ[i] = 0;
     return 0;
 }
 

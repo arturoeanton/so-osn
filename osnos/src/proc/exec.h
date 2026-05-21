@@ -18,6 +18,15 @@
 int64_t proc_exec(const char *path, const char *args);
 
 /*
+ * Same as proc_exec but with an environment block. `envp` is a
+ * NULL-terminated array of "KEY=VAL" strings, or NULL for no env.
+ * The strings are copied onto the new task's user stack so the
+ * caller is free to dispose of them after this returns.
+ */
+int64_t proc_execve(const char *path, const char *args,
+                     const char *const *envp);
+
+/*
  * Kill the currently-running ring-3 task: tear down its address space,
  * notify the shell, and long-jump back to scheduler_loop. Never returns.
  *
