@@ -1935,6 +1935,64 @@ static void cmd_test(const char *args) {
         (void)r0; (void)r1;
     }
 
+    /*
+     * ===== kheap growth tests (FASE A) =====
+     * Force the kheap past its initial 64 KiB so we exercise heap_grow.
+     * After the storm we kfree everything and verify heap_used returns
+     * to its pre-test baseline so we don't leak silently.
+     */
+    {
+        size_t baseline_used  = kheap_used_bytes();
+        size_t baseline_total = kheap_total_bytes();
+        size_t baseline_grow  = kheap_grow_events();
+
+        /* Block 1: single large alloc (>= initial heap). Forces a grow
+         * unless we already grew earlier. */
+        const size_t big = 96 * 1024;     /* 96 KiB > 64 KiB initial */
+        void *p_big = kmalloc(big);
+        CHECK(p_big != 0, "KHEAP: 96 KiB alloc succeeds (growth)");
+        if (p_big) {
+            uint8_t *q = (uint8_t *)p_big;
+            for (size_t i = 0; i < big; i += 4096) q[i] = (uint8_t)i;
+            CHECK(q[0] == 0, "KHEAP: 96 KiB block writable @0");
+            CHECK(q[big - 1] == 0 || q[big - 1] != 0xAA, "KHEAP: writable end");
+        }
+        CHECK(kheap_total_bytes() > baseline_total,
+              "KHEAP: total grew past baseline");
+        CHECK(kheap_grow_events() > baseline_grow,
+              "KHEAP: grow_events incremented");
+
+        /* Block 2: many small allocs, freed in reverse — exercises the
+         * splitter + free-list coalesce. */
+        enum { N = 200 };
+        static void *bag[N];
+        for (int i = 0; i < N; i++) {
+            bag[i] = kmalloc(128);
+            CHECK(bag[i] != 0, "KHEAP: 128 B alloc in burst");
+            if (!bag[i]) break;
+        }
+        for (int i = N - 1; i >= 0; i--) kfree(bag[i]);
+
+        /* Block 3: free the big one too. */
+        kfree(p_big);
+
+        /* used must be back to baseline (no leaks in the test). peak
+         * should be at least the size of the big alloc. */
+        CHECK(kheap_used_bytes() == baseline_used,
+              "KHEAP: used returns to baseline after free");
+        CHECK(kheap_peak_bytes() >= baseline_used + big,
+              "KHEAP: peak tracks the high-water mark");
+        CHECK(kheap_grow_oom() == 0,
+              "KHEAP: no OOM under normal load");
+
+        /* kmalloc(0) is a documented no-op returning NULL. */
+        CHECK(kmalloc(0) == 0, "KHEAP: kmalloc(0) → NULL");
+        /* free(NULL) is a libc-convention no-op. */
+        kfree(0);
+        CHECK(kheap_used_bytes() == baseline_used,
+              "KHEAP: kfree(NULL) doesn't move used");
+    }
+
     /* cleanup */
     vfs_unlink("/test/syscall.txt");
     vfs_rmdir("/test");

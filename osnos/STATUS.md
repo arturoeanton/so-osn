@@ -181,7 +181,14 @@ OK heap kernel real
   - free-list singly-linked first-fit con split + coalesce con next/prev
   - kmalloc 8-byte aligned; kfree(NULL) y kmalloc(0) edge cases
   - /sys/meminfo expone kheap total/used B
-  - TODO growth: hoy si te quedás sin 64KB, kmalloc devuelve NULL
+  - **kheap growth** (Fase A — CERRADA): cuando find-fit falla, mapea
+    más páginas al final del heap (chunks de 16 = 64 KB, o lo que
+    pida la request si es más grande), construye un free block en la
+    región nueva, coalesce con el tail si quedó libre. Cap a 4 MiB.
+    Tracking: grow_events, grow_oom, peak_used. /sys/meminfo expone
+    todo. Tests: 14 asserts KHEAP en `test` shell command (96 KiB
+    big alloc, burst de 200 × 128 B, verifica baseline después de
+    free-all, peak high-water-mark, grow_oom=0 bajo carga normal).
 OK address spaces por proceso
   - address_space_create: clona high-half de kernel_pml4, low-half vacío
   - address_space_destroy: walk low half + free user pages + intermediate tables + PML4

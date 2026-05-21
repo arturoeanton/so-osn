@@ -6,9 +6,11 @@
  * Kernel heap.
  *
  * Single-linked free list with first-fit allocation, coalescing on free.
- * Built on PMM + VMM: initial heap is 16 pages (64 KiB) mapped at
- * KHEAP_VIRT_BASE. Growth is TODO — for our current sizes this is
- * plenty. OOM returns NULL.
+ * Initial mapping is 16 pages (64 KiB) at KHEAP_VIRT_BASE; on a failed
+ * find-fit kmalloc maps more pages and appends them to the free list
+ * (FASE A — kheap growth). Hard cap at KHEAP_MAX_BYTES so a leak
+ * doesn't drain the physical pool. OOM (cap reached or PMM empty)
+ * returns NULL.
  *
  *   void *p = kmalloc(128);
  *   ... use p ...
@@ -21,5 +23,8 @@ void   kheap_init(void);
 void  *kmalloc(size_t bytes);
 void   kfree(void *ptr);
 
-size_t kheap_total_bytes(void);
-size_t kheap_used_bytes(void);
+size_t kheap_total_bytes(void);  /* current mapped heap size */
+size_t kheap_used_bytes(void);   /* live allocation bytes */
+size_t kheap_peak_bytes(void);   /* max used bytes ever observed */
+size_t kheap_grow_events(void);  /* number of successful grow extensions */
+size_t kheap_grow_oom(void);     /* grow attempts that failed (cap or PMM) */

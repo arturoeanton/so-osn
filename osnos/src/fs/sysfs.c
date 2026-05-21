@@ -131,6 +131,15 @@ static void gen_meminfo(char *out, size_t out_size) {
     os_strlcat(out, "\nkheap used  B: ", out_size);
     os_format_u64(kheap_used_bytes(), num, sizeof(num));
     os_strlcat(out, num, out_size);
+    os_strlcat(out, "\nkheap peak  B: ", out_size);
+    os_format_u64(kheap_peak_bytes(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\nkheap grow / oom: ", out_size);
+    os_format_u64(kheap_grow_events(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, " / ", out_size);
+    os_format_u64(kheap_grow_oom(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
     os_strlcat(out, "\nexceptions  : ", out_size);
     os_format_u64(idt_exception_count(), num, sizeof(num));
     os_strlcat(out, num, out_size);
