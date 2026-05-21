@@ -1499,6 +1499,24 @@ OK envp end-to-end (kernel + libc + shell)
      test. `envtest PATH` imprime "PATH=/bin". `envtest` solo lista
      todo lo inherited.
 
+OK libc exec family + execvp PATH walk
+   - **lib/libc/unistd.h**: declara `execv`, `execve`, `execvp` con
+     la signatura POSIX.
+   - **lib/libc/unistd.c**:
+     - `execve(path, argv, envp)` → SYS_EXECVE (#59). Hoy el kernel
+       no dispatcha esa syscall así que retorna -ENOSYS, pero la
+       surface API queda lista para cuando el syscall aterrice.
+     - `execv(path, argv)` envuelve execve con `environ`.
+     - `execvp(file, argv)`: si `file` tiene '/' va directo. Sino,
+       walkea `getenv("PATH")` (default "/bin") colon-separated y
+       prueba execve en cada "<dir>/<file>". POSIX: el primer error
+       != ENOENT gana.
+   - **TODO sys_execve real**: necesita coordinación con el
+     fg_pid tracking del shell (mantener el mismo pid al
+     reemplazar la imagen). Postponed — no bloquea nada inmediato
+     porque el shell ya hace proc_execve kernel-internal para
+     spawn de niños.
+
 ### Reorganización elfs/ (desde tests/)
    tests/ se renombró a elfs/ con subcategorías:
      elfs/shell/     osh

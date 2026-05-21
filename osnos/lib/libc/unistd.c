@@ -156,3 +156,58 @@ int kill(pid_t pid, int sig) {
 pid_t getpid(void) {
     return (pid_t)osnos_syscall0(SYS_GETPID);
 }
+
+/* ---- exec family ----
+ *
+ * Each variant ultimately routes to SYS_EXECVE. The kernel currently
+ * returns -ENOSYS for that number (real "exec-in-place" needs a chunk
+ * of work coupling with the shell's fg_pid tracking, postponed). The
+ * libc surface still walks $PATH so user code is written against the
+ * real POSIX contract from day one. */
+
+#include <stdlib.h>   /* environ */
+
+int execve(const char *path, char *const argv[], char *const envp[]) {
+    long r = osnos_syscall3(SYS_EXECVE,
+                              (long)path, (long)argv, (long)envp);
+    errno = (int)(-r);
+    return -1;
+}
+
+int execv(const char *path, char *const argv[]) {
+    return execve(path, argv, environ);
+}
+
+int execvp(const char *file, char *const argv[]) {
+    /* Slash in name → literal path, no PATH search (POSIX). */
+    int has_slash = 0;
+    for (const char *p = file; *p; p++) if (*p == '/') { has_slash = 1; break; }
+    if (has_slash) return execve(file, argv, environ);
+
+    const char *path = getenv("PATH");
+    if (!path || !*path) path = "/bin";
+
+    char attempt[256];
+    int  last_errno = ENOENT;
+    while (*path) {
+        const char *colon = path;
+        while (*colon && *colon != ':') colon++;
+        size_t dlen = (size_t)(colon - path);
+
+        if (dlen > 0 && dlen + 1 + 64 < sizeof(attempt)) {
+            size_t w = 0;
+            for (size_t i = 0; i < dlen; i++) attempt[w++] = path[i];
+            if (w > 0 && attempt[w - 1] != '/') attempt[w++] = '/';
+            for (size_t i = 0; file[i] && w + 1 < sizeof(attempt); i++) {
+                attempt[w++] = file[i];
+            }
+            attempt[w] = 0;
+
+            execve(attempt, argv, environ);
+            if (errno != ENOENT) last_errno = errno;
+        }
+        path = (*colon == ':') ? colon + 1 : colon;
+    }
+    errno = last_errno;
+    return -1;
+}

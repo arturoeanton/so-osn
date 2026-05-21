@@ -55,3 +55,23 @@ int          kill  (pid_t pid, int sig);
 
 /* getpid — the calling task's pid. Always non-zero in user context. */
 pid_t        getpid(void);
+
+/*
+ * exec family. POSIX semantics: replace the current process image with
+ * the program at `path`. argv / envp are NULL-terminated arrays of
+ * pointers. On success the call does not return.
+ *
+ *   execv (path, argv)            -> uses caller's environ
+ *   execve(path, argv, envp)      -> explicit env
+ *   execvp(file, argv)            -> walks $PATH if file has no '/',
+ *                                    inherits environ
+ *
+ * Today the kernel side (SYS_EXECVE) is not yet wired: all three
+ * propagate -ENOSYS until the syscall lands (real "exec-in-place"
+ * needs careful coupling with the shell's fg_pid tracking). The libc
+ * surface is here so user code can be written against the real POSIX
+ * contract — it'll just fail at runtime for now.
+ */
+int execv (const char *path, char *const argv[]);
+int execve(const char *path, char *const argv[], char *const envp[]);
+int execvp(const char *file, char *const argv[]);
