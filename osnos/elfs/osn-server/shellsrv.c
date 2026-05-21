@@ -91,6 +91,8 @@ static void build_prompt(void) {
     prompt_visible_len = v;
 }
 
+static int render_first = 1;     /* set by read_line at every entry */
+
 static void render_line(const char *buf, int len, int cursor) {
     /* Move cursor to column 0, clear to EOL, re-print prompt + line,
      * with the char under the logical cursor highlighted via SGR
@@ -106,7 +108,24 @@ static void render_line(const char *buf, int len, int cursor) {
      *   ESC[27m                      — reverse off
      *   buf[cursor+1..len]           — plain tail
      */
-    printf("\r\x1b[K\x1b[38;2;0;255;102m%s\x1b[39m", prompt_buf);
+    /* First render of a new read_line cycle: emit a `%`-style EOL
+     * marker (zsh-style) on the CURRENT line if the previous output
+     * didn't end with \n, then drop to a fresh line. Subsequent
+     * renders (after each keystroke) use \r ESC[K to redraw in
+     * place. We can't observe the framebuffer cursor, so we
+     * unconditionally print "\n" only on truly partial output —
+     * approximated as "first render" but with no leading \r ESC[K
+     * so any incomplete output stays visible. */
+    if (render_first) {
+        /* Don't \r — that would clobber unterminated stdout from the
+         * previous command. Just print the prompt at the current
+         * position (will jam against any partial output, which is
+         * the standard way bash/sh show "missing newline"). */
+        printf("\x1b[38;2;0;255;102m%s\x1b[39m", prompt_buf);
+        render_first = 0;
+    } else {
+        printf("\r\x1b[K\x1b[38;2;0;255;102m%s\x1b[39m", prompt_buf);
+    }
     if (cursor > 0) fwrite(buf, 1, (size_t)cursor, stdout);
 
     printf("\x1b[7m");
@@ -202,6 +221,7 @@ static int read_line(char *out, size_t cap) {
     int   cur = 0;
     buf[0] = 0;
     history_pos = history_count;
+    render_first = 1;     /* first render: keep partial output visible */
 
     render_line(buf, len, cur);
 
@@ -836,11 +856,71 @@ cleanup:
     for (int k = 0; k < npids; k++) wait_pid(pids[k]);
 }
 
+/* ---- env-var expansion ---- */
+
+/* Walk `in`, copying to `out` while substituting $VAR / ${VAR}
+ * with getenv("VAR") (empty if unset). Single-quoted regions are
+ * passed through verbatim; double-quoted regions still expand
+ * (POSIX). Backslash-escape \$ disables expansion. */
+static void expand_vars(const char *in, char *out, size_t cap) {
+    size_t op = 0;
+    int  in_single = 0;
+    while (*in && op + 1 < cap) {
+        char c = *in;
+        if (c == '\\' && in[1] == '$' && !in_single) {
+            out[op++] = '$';
+            in += 2;
+            continue;
+        }
+        if (c == '\'') {
+            in_single = !in_single;
+            out[op++] = c;     /* keep the quote for build_argv_block */
+            in++;
+            continue;
+        }
+        if (c == '$' && !in_single) {
+            in++;
+            int braces = 0;
+            if (*in == '{') { braces = 1; in++; }
+            char name[64];
+            int  nn = 0;
+            while (*in &&
+                   ((*in >= 'a' && *in <= 'z') ||
+                    (*in >= 'A' && *in <= 'Z') ||
+                    (*in >= '0' && *in <= '9') ||
+                    *in == '_') &&
+                   nn + 1 < (int)sizeof(name)) {
+                name[nn++] = *in++;
+            }
+            name[nn] = 0;
+            if (braces && *in == '}') in++;
+            if (nn == 0) {
+                /* Bare `$` — pass through. */
+                if (op + 1 < cap) out[op++] = '$';
+                continue;
+            }
+            const char *val = getenv(name);
+            if (val) {
+                while (*val && op + 1 < cap) out[op++] = *val++;
+            }
+            continue;
+        }
+        out[op++] = *in++;
+    }
+    out[op] = 0;
+}
+
 /* ---- dispatch ---- */
 
-static void dispatch(char *line) {
-    /* Preserve a printable copy of the original line for the `jobs`
-     * builtin (split_args mutates `line` in place). */
+static void dispatch(char *line_in) {
+    /* Expand $VAR / ${VAR} BEFORE parsing, so children see the
+     * resolved arguments and pipes/redirects parse correctly. */
+    char line_buf[LINE_MAX_LEN];
+    expand_vars(line_in, line_buf, sizeof(line_buf));
+    char *line = line_buf;
+
+    /* Preserve a printable copy of the (expanded) line for the
+     * `jobs` builtin (split_args mutates `line` in place). */
     char line_copy[LINE_MAX_LEN];
     safe_copy(line_copy, line, sizeof(line_copy));
 

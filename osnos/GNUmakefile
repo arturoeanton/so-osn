@@ -135,6 +135,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/tools/uniq.c \
     elfs/tools/cut.c \
     elfs/tools/tr.c \
+    elfs/tools/banner.c \
     elfs/net/udptest.c \
     elfs/net/echotcp.c \
     elfs/net/selecttest.c \

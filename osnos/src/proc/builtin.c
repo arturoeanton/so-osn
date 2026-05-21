@@ -166,6 +166,7 @@ DECLARE_ELF(sort);
 DECLARE_ELF(uniq);
 DECLARE_ELF(cut);
 DECLARE_ELF(tr);
+DECLARE_ELF(banner);
 
 #undef DECLARE_ELF
 
@@ -253,6 +254,7 @@ static const builtin_t builtins[] = {
     ELF(uniq,         "dedupe consecutive identical lines"),
     ELF(cut,          "extract fields from each line"),
     ELF(tr,           "translate / delete characters"),
+    ELF(banner,       "print the osnos welcome banner"),
 };
 
 #undef USER

@@ -68,13 +68,16 @@ void bootstrap_fs(void) {
         seed_if_absent("/home/README.TXT",
             "Welcome to osnos.\nYour home lives on FAT16 — files persist across reboots.\n");
         seed_if_absent("/home/HELLO.TXT", "Hello from FAT-backed /home!\n");
-        /* Sample shell rc — user-editable. shell_server_init looks
-         * for /home/.oshrc and replays each line at boot. */
+        /* Sample shell rc — user-editable. shellsrv replays each
+         * line at boot (FASE 10.4). Default seeds a useful env so
+         * scripts that read $HOME / $PATH / $SHELL work out of box. */
         seed_if_absent("/home/.oshrc",
-            "# osnos shell startup\n"
-            "# Lines run silently at every shell boot. Edit me!\n"
-            "# export FOO=bar\n"
-            "# cd /sd\n");
+            "# osnos shell startup — runs at every shellsrv boot.\n"
+            "# Edit to add your own commands / env vars.\n"
+            "export PATH=/bin\n"
+            "export HOME=/home\n"
+            "export SHELL=/bin/shellsrv\n"
+            "export OSNAME=osnos\n");
     } else {
         /* Diskless: same ramfs-backed /home as before. */
         vfs_mkdir("/home");
@@ -82,6 +85,10 @@ void bootstrap_fs(void) {
             "Welcome to osnos.\nThis is a tiny RAM filesystem (no disk attached).\n");
         seed_file("/home/HELLO.TXT", "Hello from ramfs!\n");
         seed_file("/home/.oshrc",
-            "# osnos shell startup (RAM-only — won't persist across reboots)\n");
+            "# osnos shell startup (RAM-only — won't persist across reboots)\n"
+            "export PATH=/bin\n"
+            "export HOME=/home\n"
+            "export SHELL=/bin/shellsrv\n"
+            "export OSNAME=osnos\n");
     }
 }
