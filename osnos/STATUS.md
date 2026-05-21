@@ -43,6 +43,10 @@ canonical/raw, /home persistente cross-reboot.
 - TTY 3+ (PTY pairs, sessions, process groups)
 - FASE 10 (servers a ring 3 en elfs/osn-server/)
 - fork() real (sin fork hoy)
+- write con offset real (hoy sys_write→vfs_append; lseek+write no
+  reescribe a mitad de archivo — requiere `vfs_write_at` por backend)
+- dup/dup2, fcntl (F_GETFL/F_SETFL/F_DUPFD), mkstemp/tmpfile
+- RTC real (hoy time/clock_gettime = segundos desde boot)
 - IPv6, TLS, DHCP (en ROADMAP_APENDICE.md)
 
 ---
@@ -1592,6 +1596,74 @@ OK .history (historial persistente) + .oshrc (startup script)
      Tipo en un boot, recuperá con flecha ↑ tras reboot. .oshrc
      queda como el lugar natural para "cd a tu workdir" o
      "export VARS" automáticos.
+
+### FASE Libc gaps 1+2+3 — CERRADA
+OK strerror completo (33 entries)
+   - **lib/libc/string.c**: agregados 16 cases nuevos al switch:
+     EINTR, E2BIG, EBUSY, ENFILE, ENOTTY, ERANGE, ENAMETOOLONG,
+     ENOTSOCK, EPROTONOSUPPORT, EAFNOSUPPORT, EADDRINUSE,
+     EADDRNOTAVAIL, ENETDOWN, ECONNRESET, ETIMEDOUT, ECONNREFUSED,
+     EINPROGRESS.
+   - **lib/libc/include/errno.h**: agregados EINTR (4), ENOTTY (25),
+     ERANGE (34) que faltaban.
+   - Fallback "errno=N" itoa para códigos desconocidos sigue intacto.
+
+OK stat(path) + access — Linux syscalls #4 y #21
+   - **SYS_STAT (#4)**: `sys_stat(const char *path, void *out)` —
+     mismo flujo que sys_fstat pero recibe path. copy_from_user
+     del path, vfs_stat, llena osnos_stat_t con type|mode/size/
+     blocks, copy_to_user. Devuelve 0 / -ENOENT / -EFAULT.
+   - **SYS_ACCESS (#21)**: `sys_access(path, mode)` — wrap thin de
+     vfs_stat. Mode argument (R_OK/W_OK/X_OK/F_OK) aceptado pero
+     ignorado (no enforcement de perms aún). Solo distingue
+     "existe" vs ENOENT.
+   - **libc**: `stat(path, struct stat *out)` y `access(path, mode)`
+     en unistd.c. Ambos usan resolve_path para relativos.
+     `unistd.h` define F_OK / R_OK / W_OK / X_OK.
+
+OK time(NULL) + clock_gettime — Linux syscalls #201 y #228
+   - **SYS_TIME (#201)**: `sys_time(int64_t *t)` — retorna
+     `timer_ms() / 1000`. Si `t != NULL`, copia el mismo valor ahí
+     vía copy_to_user. Sin RTC: segundos desde boot, no desde epoch.
+   - **SYS_CLOCK_GETTIME (#228)**: `sys_clock_gettime(clk_id, void *tp)` —
+     acepta CLOCK_REALTIME=0 y CLOCK_MONOTONIC=1 (ambos devuelven
+     timer_ms hoy; sin RTC). Otros clk_id → -EINVAL. Llena
+     `struct osnos_timespec {tv_sec, tv_nsec}` con tv_sec=ms/1000
+     y tv_nsec=(ms%1000)*1000000.
+   - **libc/time.c** (nuevo): `time(t)` y `clock_gettime(clk_id, tp)`
+     wrappers thin.
+   - **CLOCK_REALTIME=0 / CLOCK_MONOTONIC=1** en time.h.
+   - **SYS_ISATTY** movido de 201 → **250** (osnos-only) porque
+     colisionaba con Linux SYS_TIME=201.
+
+OK Fix de ABI nlink_t — bug oculto que afectaba stat real
+   - **sys/types.h**: `nlink_t` de `uint32_t` → **`uint64_t`** para
+     matchear `osnos_stat_t.st_nlink` (Linux x86_64 layout).
+   - Antes: libc struct stat tenía nlink en 4 bytes, kernel en 8 →
+     `st_mode` quedaba 4 bytes desalineado → S_ISREG retornaba false
+     siempre.
+
+OK Fix uaccess para kernel callers — habilita tests internos
+   - **src/micro/uaccess.c**: `copy_from_user` / `copy_to_user` ahora
+     detectan caller kernel (`task_current()->pml4 == 0`) y saltean
+     el chequeo de rango. Antes, syscalls que usaban copy_*_user
+     fallaban con EFAULT cuando se invocaban desde el shell
+     (kernel task) con string literals (que viven en high half).
+   - Esto es un workaround para los tests integrados; user tasks
+     siguen pasando por la validación completa.
+
+OK Test suite ampliado a 615 + idempotente
+   - **cmd_test (kernel)**: 12 nuevos checks (STAT existing/missing,
+     mode regular, ACCESS, TIME positive + out-param, CLOCK
+     REALTIME/MONOTONIC + sane + bogus id).
+   - **elfs/tests/libctest.c**: 23 nuevos checks user-side
+     (strerror×11, stat×3, access×2, time×2, clock_gettime×4,
+     fallback errno=N).
+   - **Fix idempotencia**: KHEAP "total grew past baseline" y
+     "grow_events incremented" eran one-shot. Ahora son `>=`
+     (monotonically non-decreasing) → el comando `test` se puede
+     correr N veces seguidas. Anteriormente la 2da corrida
+     reportaba 2 falsos negativos.
 
 ### FASE Arrow keys + getcwd/chdir — CERRADA
 OK Keycode passthrough: arrow keys via TTY como VT100 CSI
