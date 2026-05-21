@@ -28,6 +28,10 @@ mini-libc propia para programas de usuario en ring 3.
    [3]
    /home > # desde otro host:
    /home > # curl http://localhost:8080/
+   /home > ovi .oshrc           # editor modal estilo vim
+   # i = insert, Esc = normal, hjkl = move,
+   # 0/$ = inicio/fin línea, gg/G = inicio/fin archivo,
+   # x = del char, dd = del línea, :w = save, :q = quit
 ```
 
 > **TL;DR para reentrar al proyecto después de meses:** instalar Limine
@@ -250,6 +254,10 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | Sockets POSIX (socket/bind/listen/accept/connect/send/recv/select) | ✅ |
 | DNS resolver + getaddrinfo (vía slirp 10.0.2.3) | ✅ |
 | `/bin/httpd` sirviendo FAT16 sobre HTTP; `selectserver.c` de Beej verbatim | ✅ |
+| TTY line discipline POSIX (termios canonical/raw, ISIG, ioctl) | ✅ |
+| Shell con history persistente + `.oshrc` + env (PATH/HOME/PWD) | ✅ |
+| `/home` alias a `/sd/home` vía aliasfs (bind-mount VFS) | ✅ |
+| `/bin/ovi` editor modal vim-style (hjkl, i/a/o, :w/:q) | ✅ |
 | Servers en ring 3 (hoy todos ring 0) | ⏳ (fase 10) |
 | `fork` / `exec` real | ❌ |
 | Multi-core (SMP) | ❌ |
@@ -409,6 +417,21 @@ lejano y muy difícil de debuggear. Están repetidas en
 
 Cerrado recientemente:
 
+- **`/bin/ovi` + VT100 mínimo + TIOCGWINSZ**: editor modal vim-flavour
+  (hjkl, i/a/o/O, x/dd, gg/G, $/0, :w/:q/:wq/:q!). El framebuffer ahora
+  parsea `ESC[2J`, `ESC[H`, `ESC[r;cH`, `ESC[K`, `ESC[7m` (reverse).
+  Libc resuelve paths relativos vs `$PWD` (`ovi .oshrc` funciona).
+- **Shell rc + history persistente**: `/home/.oshrc` se ejecuta al boot
+  (con guard anti-recursión, en silencio); `/home/.history` carga al
+  inicio y se appendea por comando. Soporta env: PATH/HOME/PWD/TERM/
+  SHELL, con `env`/`export`/`unset`. Auto-prefix `/bin/`. `getenv` /
+  `setenv` / `execvp` en libc.
+- **`/home` como alias de `/sd/home`** vía aliasfs (bind-mount VFS):
+  con disco las ediciones a `/home/...` persisten cross-reboot.
+- **TTY 1+2** (line discipline + termios ABI Linux): canonical / raw,
+  ISIG (Ctrl+C → SIGINT), ioctl TCGETS/TCSETS/TIOCGWINSZ.
+- **kheap robusto**: growth dinámico (cap 4 MiB) + slab allocator
+  power-of-2 (16…2048) + 28 tests SOCK/KHEAP/SLAB. 603/603 pass.
 - **FASE 8.5 — Networking completo**: driver RTL8139 + Ethernet/ARP +
   IPv4/ICMP + UDP + TCP completo (handshake, data, close, listen+accept
   multi-cliente, connect outbound, retransmisión RTO 500 ms) + DNS
@@ -426,8 +449,10 @@ Las próximas fases grandes:
    como procesos de usuario con IPC kernel-mediated.
 2. **fork/exec** real (hoy `exec` reemplaza la task actual, no hay
    `fork`).
-3. **TUI potente** (FASE 11): mini Norton Commander, viewer, editor —
-   ahora que FAT da archivos persistentes vale la pena editar.
+3. **TUI potente** (FASE 11): mini Norton Commander, viewer, editor
+   con flechas (ya tenemos `/bin/ovi` con hjkl como base) — el VT100
+   parser y TIOCGWINSZ están listos, falta keycode passthrough
+   (arrow-keys vía `ESC[A/B/C/D`) y multi-pane split.
 4. **Gráfico** (FASE 12): window server + terminal en ventana + mouse.
 5. **SMP** (mucho después).
 

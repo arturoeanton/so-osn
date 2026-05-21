@@ -108,6 +108,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/tools/sleep.c \
     elfs/tools/kill.c \
     elfs/tools/top.c \
+    elfs/tools/ovi.c \
     elfs/net/udptest.c \
     elfs/net/echotcp.c \
     elfs/net/selecttest.c \

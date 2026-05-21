@@ -31,3 +31,8 @@ void framebuffer_draw_string(
 );
 
 void framebuffer_backspace(void);
+
+/* Visible terminal area in CHARACTERS (after margins). Used by
+ * /bin/ovi and other TUIs via ioctl(TIOCGWINSZ). */
+unsigned short framebuffer_cols(void);
+unsigned short framebuffer_rows(void);

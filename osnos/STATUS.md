@@ -10,6 +10,8 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| /bin/ovi | editor modal vim-style (hjkl, i/a/o, x/dd, :w/:q/:wq) + VT100 mínimo + TIOCGWINSZ + SGR reverse | 500 |
+| libc path resolve | relativos resueltos vs `$PWD` en open/mkdir/rmdir/unlink/rename | 50 |
 | Shell rc + history | `.history`, `.oshrc` con guard anti-recursión | 100 |
 | /home alias | aliasfs (bind-mount VFS) → `/home`=`/sd/home` | 200 |
 | libc exec family | execv/execve/execvp con PATH walk | 80 |
@@ -1585,6 +1587,46 @@ OK .history (historial persistente) + .oshrc (startup script)
      Tipo en un boot, recuperá con flecha ↑ tras reboot. .oshrc
      queda como el lugar natural para "cd a tu workdir" o
      "export VARS" automáticos.
+
+### FASE /bin/ovi — Editor modal vim-style — CERRADA
+OK /bin/ovi — primer editor visual de osnos
+   - **Framebuffer VT100 extendido**:
+     - `ESC[2J` / `ESC[J` — clear screen.
+     - `ESC[H` — cursor home.
+     - `ESC[<row>;<col>H` — cursor positioning (1-based).
+     - `ESC[K` — clear from cursor to EOL.
+     - `ESC[7m` / `ESC[27m` / `ESC[0m` — SGR reverse video / reset
+       (usado por ovi para pintar el cursor sobre la celda actual).
+   - **Dimensiones terminal expuestas**:
+     - `framebuffer_cols()` / `framebuffer_rows()` — área usable en
+       chars (descuenta márgenes).
+     - `ioctl(TIOCGWINSZ=0x5413, &struct winsize)` syscall — ovi y
+       futuros TUIs leen el tamaño real al boot.
+   - **/bin/ovi** (elfs/tools/ovi.c, ~500 LOC):
+     - 3 modos: NORMAL (default) / INSERT / COMMAND.
+     - Normal: `hjkl` navegación, `0`/`$` line-start/end, `gg`/`G`
+       file-start/end, `i`/`a`/`o`/`O` insert variants, `x` delete
+       char, `dd` delete line, `:` enter command mode.
+     - Insert: tipear inserta, `Esc` vuelve a Normal, `\b` borra.
+     - Command: `:w` save, `:q` quit (refusa si dirty), `:wq` save+
+       quit, `:q!` force quit.
+     - Buffer: 4096 líneas × 1024 cols en BSS (4 MiB).
+     - Cursor visible: render() pinta el char bajo el cursor con
+       SGR reverse on. Sin parpadeo pero sí destacado.
+     - Status line con `[MODE] file *  row/total  col N` + mensajes
+       transitorios (cargo / guardado / errno).
+     - Lee termios al boot, switch a raw + ECHO off + ISIG off (Ctrl+C
+       lo matamos vía save → no, sigue funcionando ISIG porque
+       tcsetattr no la apaga). Restaura al exit.
+   - **libc path resolution** (lib/libc/unistd.c):
+     - `resolve_path(in, out)` helper estático: si `in` empieza con
+       `/`, copia tal cual; sino, antepone `$PWD` (con `/`
+       intermedio si hace falta).
+     - `open`, `mkdir`, `rmdir`, `unlink`, `rename` ahora resuelven
+       paths relativos antes de la syscall.
+     - Sin esto, `ovi .oshrc` desde `/home` fallaba con EINVAL (el
+       kernel VFS rechaza paths no-absolutos). A futuro: getcwd/
+       chdir syscalls per-task para POSIX-correctness.
 
 ### FASE /home alias — CERRADA
 OK aliasfs (bind-mount VFS backend) + /home → /sd/home

@@ -760,6 +760,15 @@ int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
         tty_clear();      /* TCSETSF also drops pending input */
         return 0;
     }
+    case TTY_TIOCGWINSZ: {
+        struct osnos_winsize ws;
+        ws.ws_row    = framebuffer_rows();
+        ws.ws_col    = framebuffer_cols();
+        ws.ws_xpixel = 0;
+        ws.ws_ypixel = 0;
+        if (copy_to_user(arg, &ws, sizeof(ws)) != OSNOS_OK) return err(OSNOS_EFAULT);
+        return 0;
+    }
     default:
         return -(int64_t)OSNOS_ENOTTY;
     }

@@ -111,6 +111,11 @@ void framebuffer_putpixel(
     fb[y * fb_pitch + x] = color;
 }
 
+/* SGR state: when reverse is on, draw_char fills the cell with the
+ * caller-supplied color and renders the glyph in the background
+ * color. Used as the editor cursor highlight. */
+static int sgr_reverse = 0;
+
 void framebuffer_draw_char(
     char c,
     size_t x,
@@ -122,6 +127,23 @@ void framebuffer_draw_char(
     }
 
     const uint8_t *glyph = font8x8_basic[(uint8_t)c];
+
+    if (sgr_reverse) {
+        /* Solid fg block, glyph in bg color. */
+        for (size_t row = 0; row < CHAR_HEIGHT; row++) {
+            for (size_t col = 0; col < CHAR_WIDTH; col++) {
+                framebuffer_putpixel(x + col, y + row, color);
+            }
+        }
+        for (size_t row = 0; row < GLYPH_HEIGHT; row++) {
+            for (size_t col = 0; col < CHAR_WIDTH; col++) {
+                if (glyph[row] & (1 << (7 - col))) {
+                    framebuffer_putpixel(x + col, y + row, bg_color);
+                }
+            }
+        }
+        return;
+    }
 
     framebuffer_clear_cell(x, y);
 
@@ -144,30 +166,60 @@ void framebuffer_draw_string(
 ) {
     while (*s) {
         /*
-         * Minimal ANSI CSI handling. Supports:
-         *   ESC [ 2 J   — clear screen, cursor to home
-         *   ESC [ J     — same as above (param defaults to 2)
-         *   ESC [ H     — cursor to home (top-left margin)
-         *   ESC [ row ; col H — ignored; treated as plain home today
+         * Minimal ANSI CSI handling — enough to drive a TUI editor.
+         * Supports:
+         *   ESC [ 2 J         — clear screen, cursor unchanged
+         *   ESC [ J           — same as 2 J (legacy)
+         *   ESC [ H           — cursor to home (top-left margin)
+         *   ESC [ row ; col H — cursor positioning, 1-based
+         *   ESC [ K           — clear from cursor to end of line
          * Anything else after ESC [ is silently consumed up to the
-         * final letter. Just enough for /bin/top to redraw in place.
+         * final letter.
          */
         if (*s == 0x1b && s[1] == '[') {
             s += 2;
-            int param = 0;
-            int have_param = 0;
+            int p1 = 0, p2 = 0;
+            int have_p1 = 0, have_p2 = 0;
             while (*s >= '0' && *s <= '9') {
-                param = param * 10 + (*s - '0');
-                have_param = 1;
+                p1 = p1 * 10 + (*s - '0');
+                have_p1 = 1;
                 s++;
             }
-            while (*s == ';' || (*s >= '0' && *s <= '9')) s++;
+            if (*s == ';') {
+                s++;
+                while (*s >= '0' && *s <= '9') {
+                    p2 = p2 * 10 + (*s - '0');
+                    have_p2 = 1;
+                    s++;
+                }
+            }
             char cmd = *s ? *s++ : 0;
-            if (cmd == 'J' && (!have_param || param == 2)) {
+            if (cmd == 'J' && (!have_p1 || p1 == 2)) {
                 framebuffer_clear(bg_color);
             } else if (cmd == 'H') {
-                cursor_x = TERM_MARGIN_X;
-                cursor_y = TERM_MARGIN_Y;
+                if (have_p1 && have_p2) {
+                    /* 1-based row/col → pixel coords. */
+                    size_t row = (p1 > 0) ? (size_t)(p1 - 1) : 0;
+                    size_t col = (p2 > 0) ? (size_t)(p2 - 1) : 0;
+                    cursor_x = TERM_MARGIN_X + col * CHAR_WIDTH;
+                    cursor_y = TERM_MARGIN_Y + row * CHAR_HEIGHT;
+                } else {
+                    cursor_x = TERM_MARGIN_X;
+                    cursor_y = TERM_MARGIN_Y;
+                }
+            } else if (cmd == 'K') {
+                /* Clear from cursor_x to right edge, on current row. */
+                int prev = sgr_reverse;
+                sgr_reverse = 0;
+                for (size_t x = cursor_x; x + CHAR_WIDTH < fb_width;
+                                                  x += CHAR_WIDTH) {
+                    framebuffer_draw_char(' ', x, cursor_y, color);
+                }
+                sgr_reverse = prev;
+            } else if (cmd == 'm') {
+                /* SGR: only reverse (7) / reset (0 or 27) handled. */
+                if (have_p1 && p1 == 7)              sgr_reverse = 1;
+                else if (!have_p1 || p1 == 0 || p1 == 27) sgr_reverse = 0;
             }
             continue;
         }
@@ -239,4 +291,14 @@ void framebuffer_backspace(void) {
     }
 
     framebuffer_clear_cell(cursor_x, cursor_y);
+}
+
+unsigned short framebuffer_cols(void) {
+    if (fb_width <= 2 * TERM_MARGIN_X) return 0;
+    return (unsigned short)((fb_width - 2 * TERM_MARGIN_X) / CHAR_WIDTH);
+}
+
+unsigned short framebuffer_rows(void) {
+    if (fb_height <= 2 * TERM_MARGIN_Y) return 0;
+    return (unsigned short)((fb_height - 2 * TERM_MARGIN_Y) / CHAR_HEIGHT);
 }

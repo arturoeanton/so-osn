@@ -81,10 +81,20 @@ struct osnos_termios {
 #define TTY_VSTOP   9
 
 /* ioctl request numbers (asm-generic/ioctls.h) */
-#define TTY_TCGETS  0x5401u
-#define TTY_TCSETS  0x5402u
-#define TTY_TCSETSW 0x5403u
-#define TTY_TCSETSF 0x5404u
+#define TTY_TCGETS    0x5401u
+#define TTY_TCSETS    0x5402u
+#define TTY_TCSETSW   0x5403u
+#define TTY_TCSETSF   0x5404u
+#define TTY_TIOCGWINSZ 0x5413u
+
+/* struct winsize — Linux layout. Used by TIOCGWINSZ to expose
+ * terminal dimensions to TUI programs (e.g. /bin/ovi). */
+struct osnos_winsize {
+    unsigned short ws_row;
+    unsigned short ws_col;
+    unsigned short ws_xpixel;   /* unused, kept for ABI shape */
+    unsigned short ws_ypixel;
+};
 
 /* ---- Public API ---- */
 

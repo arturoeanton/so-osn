@@ -1,9 +1,10 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
+#include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <stdarg.h>
 
 #include "syscall.h"
 
@@ -37,6 +38,37 @@ ssize_t write(int fd, const void *buf, size_t n) {
         osnos_syscall3(SYS_WRITE, fd, (long)buf, (long)n));
 }
 
+/*
+ * Resolve a relative path against $PWD into `out`. The osnos kernel
+ * VFS only accepts absolute paths (returns EINVAL otherwise), so
+ * every libc syscall that takes a path runs through here first.
+ *
+ *   "/sd/foo"   -> "/sd/foo"               (unchanged)
+ *   "foo"       -> "$PWD/foo"              (relative)
+ *   "../bar"    -> "$PWD/../bar"           (kept verbatim today —
+ *                                            no normalisation yet)
+ *
+ * Returns `out`, or `path` if `out` would overflow (the kernel will
+ * then surface the original error path). Note this is purely a libc
+ * shim — there's no per-task cwd in the kernel today.
+ */
+static const char *resolve_path(const char *path,
+                                  char *out, size_t out_size) {
+    if (!path || path[0] == '/') return path;
+    const char *pwd = getenv("PWD");
+    if (!pwd || !*pwd) pwd = "/";
+    size_t plen = 0; while (pwd[plen]) plen++;
+    size_t flen = 0; while (path[flen]) flen++;
+    int need_slash = (plen > 0 && pwd[plen - 1] != '/');
+    if (plen + (need_slash ? 1 : 0) + flen + 1 > out_size) return path;
+    size_t w = 0;
+    for (size_t i = 0; i < plen; i++) out[w++] = pwd[i];
+    if (need_slash) out[w++] = '/';
+    for (size_t i = 0; i < flen; i++) out[w++] = path[i];
+    out[w] = 0;
+    return out;
+}
+
 int open(const char *path, int flags, ...) {
     mode_t mode = 0;
     if (flags & O_CREAT) {
@@ -45,8 +77,10 @@ int open(const char *path, int flags, ...) {
         mode = (mode_t)va_arg(ap, int);
         va_end(ap);
     }
+    char abs_buf[256];
+    const char *abs_path = resolve_path(path, abs_buf, sizeof(abs_buf));
     return (int)set_errno(
-        osnos_syscall3(SYS_OPEN, (long)path, flags, (long)mode));
+        osnos_syscall3(SYS_OPEN, (long)abs_path, flags, (long)mode));
 }
 
 int close(int fd) {
@@ -70,21 +104,30 @@ int fstat(int fd, struct stat *out) {
 }
 
 int mkdir(const char *path, mode_t mode) {
+    char abs_buf[256];
+    const char *abs_path = resolve_path(path, abs_buf, sizeof(abs_buf));
     return (int)set_errno(
-        osnos_syscall2(SYS_MKDIR, (long)path, (long)mode));
+        osnos_syscall2(SYS_MKDIR, (long)abs_path, (long)mode));
 }
 
 int rmdir(const char *path) {
-    return (int)set_errno(osnos_syscall1(SYS_RMDIR, (long)path));
+    char abs_buf[256];
+    const char *abs_path = resolve_path(path, abs_buf, sizeof(abs_buf));
+    return (int)set_errno(osnos_syscall1(SYS_RMDIR, (long)abs_path));
 }
 
 int unlink(const char *path) {
-    return (int)set_errno(osnos_syscall1(SYS_UNLINK, (long)path));
+    char abs_buf[256];
+    const char *abs_path = resolve_path(path, abs_buf, sizeof(abs_buf));
+    return (int)set_errno(osnos_syscall1(SYS_UNLINK, (long)abs_path));
 }
 
 int rename(const char *oldpath, const char *newpath) {
+    char old_buf[256], new_buf[256];
+    const char *abs_old = resolve_path(oldpath, old_buf, sizeof(old_buf));
+    const char *abs_new = resolve_path(newpath, new_buf, sizeof(new_buf));
     return (int)set_errno(
-        osnos_syscall2(SYS_RENAME, (long)oldpath, (long)newpath));
+        osnos_syscall2(SYS_RENAME, (long)abs_old, (long)abs_new));
 }
 
 /*
