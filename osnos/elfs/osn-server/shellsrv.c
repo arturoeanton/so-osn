@@ -326,7 +326,11 @@ typedef struct { const char *name; cmd_fn fn; const char *help; } cmd_t;
 
 static int  do_test(int argc, char **argv);
 static int  do_jobs(int argc, char **argv);
-static void wait_pid(long pid);     /* defined alongside the pipeline runner */
+static int  do_fg  (int argc, char **argv);
+static int  do_bg  (int argc, char **argv);
+static int  do_kill(int argc, char **argv);
+static void wait_pid(long pid);
+static int  wait_pid_or_stop(long pid);
 
 /* Background-job tracking. shellsrv adds an entry every time the
  * user appends `&` to a pipeline; `jobs` enumerates the live ones. */
@@ -356,6 +360,9 @@ static const cmd_t COMMANDS[] = {
     { "history", do_hist, "show command history"        },
     { "test",    do_test, "run /bin/kerntest ABI suite" },
     { "jobs",    do_jobs, "list background tasks"       },
+    { "fg",      do_fg,   "fg <pid>: resume stopped task in foreground" },
+    { "bg",      do_bg,   "bg <pid>: resume stopped task in background" },
+    { "kill",    do_kill, "kill <pid>"                  },
 };
 
 static int should_exit = 0;
@@ -473,6 +480,57 @@ static int do_jobs(int argc, char **argv) {
     return 0;
 }
 
+static long parse_pid_arg(int argc, char **argv) {
+    if (argc < 2) {
+        if (n_bg_jobs > 0) return bg_jobs[n_bg_jobs - 1].pid;
+        return -1;
+    }
+    long v = 0;
+    for (const char *p = argv[1]; *p; p++) {
+        if (*p < '0' || *p > '9') return -1;
+        v = v * 10 + (*p - '0');
+    }
+    return v;
+}
+
+static int do_fg(int argc, char **argv) {
+    long pid = parse_pid_arg(argc, argv);
+    if (pid <= 0) { fprintf(stderr, "fg: need a pid\n"); return 1; }
+    if (osn_resume(pid) != 0) {
+        fprintf(stderr, "fg: %ld: %s\n", pid, strerror(errno));
+        return 1;
+    }
+    /* Now the task is READY again — bring it to foreground (Ctrl+C/Z
+     * routing) and wait for it. */
+    osn_set_fg(pid);
+    int rc = wait_pid_or_stop(pid);
+    osn_set_fg(0);
+    if (rc == 1) {
+        printf("\n[fg]  pid=%ld  stopped again\n", pid);
+    }
+    return 0;
+}
+
+static int do_bg(int argc, char **argv) {
+    long pid = parse_pid_arg(argc, argv);
+    if (pid <= 0) { fprintf(stderr, "bg: need a pid\n"); return 1; }
+    if (osn_resume(pid) != 0) {
+        fprintf(stderr, "bg: %ld: %s\n", pid, strerror(errno));
+        return 1;
+    }
+    printf("[bg]  pid=%ld  continued\n", pid);
+    return 0;
+}
+
+static int do_kill(int argc, char **argv) {
+    long pid = parse_pid_arg(argc, argv);
+    if (pid <= 0) { fprintf(stderr, "kill: need a pid\n"); return 1; }
+    /* SYS_KILL on osnos sets kill_pending + wakes if stopped/blocked. */
+    long r = osnos_syscall2(62 /* SYS_KILL */, pid, 15 /* SIGTERM */);
+    if (r < 0) { fprintf(stderr, "kill: %s\n", strerror(-(int)r)); return 1; }
+    return 0;
+}
+
 static int do_test(int argc, char **argv) {
     /* The legacy kernel-shell `test` builtin (cmd_test in
      * shell_server.c) lives in ring 0 and reaches into kernel
@@ -551,21 +609,33 @@ static void stage_parse(char *raw, stage_t *st) {
     st->argv[st->argc] = 0;
 }
 
-static void wait_pid(long pid) {
+/* Wait for `pid` to leave the running set. Returns:
+ *   0  — task is DEAD (normal exit / killed)
+ *   1  — task is STOPPED (Ctrl+Z) — caller should drop the prompt
+ *        without harvesting; `fg pid` / `bg pid` later resumes it.
+ */
+static int wait_pid_or_stop(long pid) {
     for (;;) {
-        int alive = 0;
+        int found = 0;
+        uint8_t state = 0;
         for (size_t i = 0; i < 16; i++) {
             osnos_taskinfo_t info;
             long r = osnos_syscall2(265, (long)i, (long)&info);
             if (r < 0) continue;
-            if ((long)info.pid == pid && info.state != OSNOS_TASK_DEAD) {
-                alive = 1; break;
-            }
+            if ((long)info.pid != pid) continue;
+            found = 1;
+            state = info.state;
+            break;
         }
-        if (!alive) break;
+        if (!found || state == OSNOS_TASK_DEAD) return 0;
+        if (state == OSNOS_TASK_STOPPED)         return 1;
         struct timespec ts = { 0, 20 * 1000000 };
         nanosleep(&ts, 0);
     }
+}
+
+static void wait_pid(long pid) {
+    (void)wait_pid_or_stop(pid);
 }
 
 /* Build "/bin/<name>" or pass absolute. */
@@ -672,7 +742,26 @@ static void run_pipeline(stage_t *stages, int n, int background,
         if (pipe_in_fd >= 0) close(pipe_in_fd);
         return;
     }
-    for (int k = 0; k < npids; k++) wait_pid(pids[k]);
+    /* Foreground: tell the kernel "Ctrl+C/Ctrl+Z should target the
+     * LAST stage's child" — Ctrl+Z on a pipeline stops the leader,
+     * which matches user intuition (the pipeline as a whole pauses).
+     * If any task stops (rc==1), bookkeep it as a background-style
+     * job so `fg pid` / `bg pid` can resume. */
+    if (npids > 0) osn_set_fg(pids[npids - 1]);
+    int stopped = 0;
+    long stopped_pid = 0;
+    for (int k = 0; k < npids; k++) {
+        if (wait_pid_or_stop(pids[k]) == 1) {
+            stopped = 1;
+            stopped_pid = pids[k];
+        }
+    }
+    osn_set_fg(0);
+    if (stopped) {
+        bg_jobs_remember(stopped_pid,
+                         line_for_label ? line_for_label : "(stopped)");
+        printf("\n[%d]  pid=%ld  stopped\n", n_bg_jobs, stopped_pid);
+    }
     if (pipe_in_fd >= 0) close(pipe_in_fd);
     return;
 
@@ -742,8 +831,15 @@ static void dispatch(char *line) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
-    printf("\nshellsrv: ring-3 shell (FASE 10.4 chunk 2 — raw-mode + history)\n");
-    printf("type 'help', or 'exit' to return to the parent shell\n");
+    printf("\nshellsrv: ring-3 shell (FASE 10.4 chunk 5 — final)\n");
+    printf("type 'help' for commands\n");
+
+    /* Claim SERVER_SHELL so IPC_KEY_EVENT (kbdsrv) + IPC_PROC_*
+     * (kernel signals) land here. When invoked as a sub-shell from
+     * the legacy kernel shell, this steals registration but the
+     * kernel shell is long-dead by chunk 5 — it's only spawned by
+     * kmain via proc_execve, so no contention. */
+    ipc_service_register(SERVER_SHELL);
 
     history_load();
     enter_raw();

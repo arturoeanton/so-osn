@@ -59,6 +59,8 @@
 #define SYS_TTY_INPUT         264
 #define SYS_TASKINFO          265
 #define SYS_SPAWN             266
+#define SYS_SET_FG            267
+#define SYS_RESUME            268
 
 /*
  * Saved user GPR set, pushed by int80_entry / syscall_entry on every
@@ -281,6 +283,22 @@ int64_t sys_tty_input(int c);
 int64_t sys_spawn(const char *path, const char *args,
                    const char *envp_flat,
                    int stdin_fd, int stdout_fd);
+
+/*
+ * SYS_SET_FG — publish the "currently foreground task pid" so the
+ * TTY layer can route Ctrl+C / Ctrl+Z signals to the right place
+ * when the shell itself runs in ring 3 (FASE 10.4 chunk 5). Passing
+ * pid=0 clears the override; tty.c then falls back to the legacy
+ * shell_fg_pid() path.
+ */
+int64_t sys_set_fg(uint64_t pid);
+
+/*
+ * SYS_RESUME — flip a TASK_STOPPED task back to TASK_READY without
+ * setting kill_pending. Used by the ring-3 shell's fg/bg builtins
+ * to resume children that hit Ctrl+Z.
+ */
+int64_t sys_resume(uint64_t pid);
 
 /*
  * Minimal fcntl(2). Supported cmds:

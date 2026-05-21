@@ -26,6 +26,11 @@ osnos_status_t ipc_send(const ipc_msg_t *msg) {
     }
 
     queue[write_index] = *msg;
+    /* Translate the service ID in `msg->to` into the actual receiver
+     * pid in the queued copy. Receivers filter by their own pid
+     * (sys_ipc_recv) so the queue MUST store pid, not the SID. The
+     * sender's view of msg.to is unchanged. */
+    queue[write_index].to = pid;
 
     write_index++;
     write_index %= IPC_QUEUE_SIZE;

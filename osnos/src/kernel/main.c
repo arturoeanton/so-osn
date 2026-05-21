@@ -11,7 +11,6 @@
 #include "../drivers/rtl8139.h"
 #include "../proc/exec.h"
 #include "../servers/keyboard_server.h"
-#include "../servers/shell_server.h"
 #include "../micro/fpu.h"
 #include "../micro/gdt.h"
 #include "../micro/idt.h"
@@ -148,22 +147,19 @@ void kmain(void) {
      */
     int keyboard_pid = task_create("keyboard", keyboard_server_tick);
     (void)keyboard_pid;
-    int shell_pid = task_create("shell", shell_server_tick);
 
-    service_register(SERVER_SHELL, shell_pid);
-
-    /* SERVER_FS / fs_server.c removed in FASE 10.3 — the shell now
-     * speaks directly to the VFS layer. The SERVER_FS ID stays
-     * reserved in osnos_ipc_abi.h for ABI stability but nobody
-     * registers against it anymore. */
+    /* SERVER_FS / fs_server.c removed in FASE 10.3 — the shell speaks
+     * directly to the VFS via syscalls. */
 
     /*
-     * Console + keyboard policy servers run as ring-3 ELFs (FASE
-     * 10.1 + 10.2). proc_execve creates the task in READY state; we
-     * pre-register their service IDs so any IPC sent before the
-     * scheduler dispatches them lands on the right queue. The ELFs
-     * also self-register via sys_service_register on first run —
-     * idempotent, same pid lands twice.
+     * Console + keyboard + shell now all run as ring-3 ELFs:
+     *   consrv   — FASE 10.1 (IPC_CONSOLE_* → /dev/fb0)
+     *   kbdsrv   — FASE 10.2 (/dev/input0 → tty_input + IPC_KEY_EVENT)
+     *   shellsrv — FASE 10.4 (line editor + dispatch + spawn)
+     * kmain pre-registers each service ID so any early IPC traffic
+     * lands on the right queue before the scheduler dispatches the
+     * ELF for the first time. The ELFs also self-register on entry
+     * (idempotent — same pid).
      */
     int64_t consrv_pid = proc_execve("/bin/consrv", "", 0);
     if (consrv_pid > 0) {
@@ -173,9 +169,12 @@ void kmain(void) {
     if (kbdsrv_pid > 0) {
         service_register(SERVER_KEYBOARD, (uint64_t)kbdsrv_pid);
     }
+    int64_t shellsrv_pid = proc_execve("/bin/shellsrv", "", 0);
+    if (shellsrv_pid > 0) {
+        service_register(SERVER_SHELL, (uint64_t)shellsrv_pid);
+    }
 
     keyboard_server_init();
-    shell_server_init();
 
     /*
      * Everything is set up — enable hardware interrupts. From this

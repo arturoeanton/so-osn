@@ -77,16 +77,11 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* Shell side: forward as IPC_KEY_EVENT so the line editor +
-         * history-nav still see arrow keys / non-canonical input. */
-        ipc_msg_t msg;
-        msg.from    = 0;             /* kernel overwrites with our pid */
-        msg.to      = SERVER_SHELL;
-        msg.type    = IPC_KEY_EVENT;
-        msg.arg0    = ev.keycode;
-        msg.arg1    = 0;
-        msg.data[0] = ev.ascii;
-        msg.data[1] = 0;
-        ipc_send(&msg);
+        /* No IPC_KEY_EVENT fan-out: the legacy kernel shell read keys
+         * via IPC, but the ring-3 shellsrv (FASE 10.4) reads them
+         * via the TTY (sys_tty_input above + raw-mode read(0)),
+         * which already carries arrow keys as CSI sequences. Sending
+         * IPC_KEY_EVENT here would just pile messages in the queue
+         * — nobody drains them. */
     }
 }

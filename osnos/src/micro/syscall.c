@@ -1257,6 +1257,35 @@ int64_t sys_tty_input(int c) {
 }
 
 /* ------------------------------------------------------------------ */
+/* sys_set_fg — publish the "currently foreground task" pid so tty.c  */
+/* can route Ctrl+C / Ctrl+Z signals from a ring-3 shell. pid=0       */
+/* clears the override (falls back to legacy shell_fg_pid()).         */
+/* ------------------------------------------------------------------ */
+
+uint64_t kernel_fg_pid = 0;
+
+int64_t sys_set_fg(uint64_t pid) {
+    /* Open today — any task may set. Restrict to SERVER_SHELL once
+     * we have proper session/process-group bookkeeping. */
+    kernel_fg_pid = pid;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_resume — flip TASK_STOPPED back to TASK_READY without setting  */
+/* kill_pending. SIGCONT-style. Used by the ring-3 shell's fg/bg.     */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_resume(uint64_t pid) {
+    task_t *t = task_by_pid(pid);
+    if (!t || !t->pml4) return err(OSNOS_ESRCH);
+    if (t->state == TASK_STOPPED) {
+        t->state = TASK_READY;
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* sys_spawn — ring-3 wrapper for proc_execve with optional fd        */
 /* inheritance. Used by the future ring-3 shell (FASE 10.4) to set up */
 /* pipelines + redirects before exec'ing children.                    */
@@ -1851,6 +1880,10 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
                 (const char *)frame->rdx,
                 (int)frame->r10,
                 (int)frame->r8));
+        case SYS_SET_FG:
+            return pack(sys_set_fg((uint64_t)frame->rdi));
+        case SYS_RESUME:
+            return pack(sys_resume((uint64_t)frame->rdi));
         case SYS_TASKINFO:
             return pack(sys_taskinfo(
                 (size_t)frame->rdi,

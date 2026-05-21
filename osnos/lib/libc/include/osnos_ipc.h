@@ -28,6 +28,8 @@
 #define SYS_SERVICE_LOOKUP    263
 #define SYS_TTY_INPUT         264
 #define SYS_SPAWN             266
+#define SYS_SET_FG            267
+#define SYS_RESUME            268
 #endif
 
 /*
@@ -116,4 +118,21 @@ static inline long osn_spawn(const char *path, const char *args,
                             (long)stdin_fd, (long)stdout_fd);
     if (r < 0) { errno = (int)(-r); return -1; }
     return r;
+}
+
+/* Publish the caller's current foreground child pid (or 0 to clear)
+ * so the TTY layer routes Ctrl+C / Ctrl+Z signals to it instead of
+ * the caller. Used by the ring-3 shell so the shell itself isn't
+ * killed by stray ^C while waiting for a child. */
+static inline long osn_set_fg(long pid) {
+    long r = osnos_syscall1(SYS_SET_FG, pid);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return 0;
+}
+
+/* Resume a stopped task (Ctrl+Z'd via SIGTSTP) without killing it. */
+static inline long osn_resume(long pid) {
+    long r = osnos_syscall1(SYS_RESUME, pid);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return 0;
 }

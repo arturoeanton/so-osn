@@ -10,7 +10,8 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
-| FASE 10.4 chunk 4 shellsrv background | `cmd &` (trailing ampersand) spawn-without-wait; pid + cmd recordados en bg_jobs[]. `jobs` builtin barre sys_taskinfo, lista live tasks con state, compacta dead. Ctrl+Z/fg/bg defer a chunk 5 (necesitan signal routing en shellsrv-as-SERVER_SHELL) | 100 |
+| **FASE 10.4 chunk 5 shellsrv ES EL SHELL** | shellsrv reemplaza shell_server.c en kmain (proc_execve("/bin/shellsrv")). Registra SERVER_SHELL. SYS_SET_FG=267 + SYS_RESUME=268. tty.c routea signals via kernel_fg_pid (sin más shell_fg_pid). wait_pid_or_stop maneja Ctrl+Z (retorna stopped + agrega a bg_jobs). fg/bg/kill builtins. **Borrado**: src/servers/shell_server.{c,h} (-3375 LOC). **Bugfix crítico**: ipc_send ahora traduce SID→pid en el queue (sys_ipc_recv filtra por t->pid). kbdsrv ya no envía IPC_KEY_EVENT (shellsrv lee via raw TTY) — evita saturar queue de 64 | -3050 |
+| FASE 10.4 chunk 4 shellsrv background | `cmd &` (trailing ampersand) spawn-without-wait; pid + cmd recordados en bg_jobs[]. `jobs` builtin barre sys_taskinfo, lista live tasks con state, compacta dead. | 100 |
 | FASE 10.4 chunk 3 shellsrv pipes + redir | Multi-stage `|` (hasta 4) + `< > >>` redirects via osn_spawn fd inheritance. Builtins solo en single-stage no-redir; con redirects/pipes cae a `/bin/<name>` ELF. Fix sys_read/sys_write fd 0/1: cuando el slot fue overrideado via spawn, ya no atrapa todo en TTY/console — fall through al path file/pipe correcto. `test` builtin → `/bin/kerntest` | 220 |
 | FASE 10.4 chunk 2 shellsrv line editor | Raw-mode TTY (ICANON+ECHO off, ISIG kept) + manual line editor con ↑↓ history nav + ←→ cursor edit + DEL/Ctrl+C. Cursor visible via SGR reverse. History ring de 16 + persistencia en /home/.history (load/save). Re-render con cursor block correcto al submit (Enter limpia el block). Builtins: help, exit, pwd, cd, ls, cat, echo, history | 250 |
 | FASE 10.4 chunk 1 shellsrv skeleton | **Tercer server ring-3 (proof of concept)**. elfs/osn-server/shellsrv.c (~280 LOC): prompt + read(0) canónico + dispatch table + builtins + fallback osn_spawn para /bin/*. Coexiste con shell kernel (sub-shell mode — usuario invoca `shellsrv`, `exit` vuelve). No registra SERVER_SHELL todavía | 280 |
@@ -69,7 +70,7 @@ canonical/raw, /home persistente cross-reboot.
   terminales (job control real ya está)
 - Process groups + sessions POSIX-strict (hoy job control usa
   pid 1-to-1 vía fg_pid; pgid/sid no existen)
-- FASE 10 (servers a ring 3 en elfs/osn-server/) — **en curso**, ver PLAN_FASE10.md (10.0 + 10.1 + 10.2 + 10.3 + 10.4-prep + 10.4 chunk 1 cerradas; próximas sesiones: 10.4 chunks 2-N — line editor con IPC_KEY_EVENT + history + flechas, pipes/redirects, job control, replace shell_server.c en kmain). cmd_test legacy queda en shell ring-0 hasta 10.4 final.
+- FASE 10 (servers a ring 3 en elfs/osn-server/) — **10.4 cerrada** ✅ (shell ES ring-3). Resta solo 10.5 cleanup + ARCH.md update.
 - fork() real (sin fork hoy)
 - Pipelines con más de 4 stages (hoy MAX_PIPELINE_STAGES=4)
 - Shell builtins (cat/ls/...) que respeten redirects sin
@@ -97,25 +98,23 @@ canonical/raw, /home persistente cross-reboot.
 | Network stack | `src/net/`: eth, arp, ip, icmp, udp, tcp, socket |
 | Process lifecycle | `src/proc/`: builtin, elf (loader), exec |
 | Lib freestanding | `src/lib/`: memory, printf, string |
-| **Servers ring-0 (a migrar)** | `src/servers/`: keyboard_server (feeder mínimo, queda en ring-0 hasta FASE 11), shell_server (3375 LOC, a migrar en 10.4) |
+| Kernel-side feeder (no es server) | `src/servers/keyboard_server.c` — solo poll PS/2 + push a /dev/input0. Queda en ring-0 hasta FASE 11 (driver migration) |
 
 **Ring 3 — ELFs separados embebidos en el kernel vía objcopy:**
 
 | Categoría | ELFs | Cantidad | Detalle |
 |-----------|------|----------|---------|
-| 🆕 Servers / sub-shell | `consrv`, `kbdsrv`, `shellsrv` | **3** | FASE 10.1 + 10.2 + 10.4-c1 — shellsrv aún coexiste con shell kernel (sub-shell mode) |
+| 🆕 Servers (ring-3, spawneados al boot) | `consrv`, `kbdsrv`, `shellsrv` | **3** | TODO el frontend del OS corre en ring 3: consola (10.1), keyboard policy (10.2), shell (10.4). kmain solo spawn + scheduler |
 | Shell script | `osh` | 1 | intérprete de scripts |
 | Tools (coreutils-like) | hello, true, false, init, cat, touch, mkdir, rmdir, rm, mv, cp, ls, echo, calc, sleep, kill, top, ovi, tcc, head | 20 | en `/bin/` |
 | Net | tcpclient, udptest, echotcp, selecttest, selectserver, httpd | 6 | clientes/servidores TCP/UDP |
 | Tests | hello_libc, libctest, ttytest, envtest, fptest, mmaptest, pipetest, fbtest, inputtest, kerntest, spawntest, user_hello (bare) | 12 | sanidad + ABI |
 | **Total ELFs** | | **42** | |
 
-**Distinción clave**: de los 42 ELFs, `consrv` y `kbdsrv` son *servers* (long-running daemons spawneados al boot por kmain). `shellsrv` es un sub-shell invocable por nombre. Los otros 39 son programas one-shot.
+**Distinción clave**: de los 42 ELFs, `consrv` + `kbdsrv` + `shellsrv` son los 3 servers ring-3 long-running spawneados al boot por kmain. shellsrv ES EL shell del sistema. Los otros 39 son programas one-shot.
 
 **Lo que falta para FASE 10:**
-- Expandir `shellsrv`: IPC_KEY_EVENT line editor + history + flechas + pipes/redirects + job control (10.4 chunks 2-N)
-- Reemplazar `src/servers/shell_server.c` por `shellsrv` en kmain (10.4 final)
-- Cleanup + ARCH.md (10.5)
+- 10.5: cleanup + ARCH.md — borrar refs muertas en sysfs/bootstrap, actualizar diagrama de capas
 
 **Lo que NO migra en FASE 10 (queda ring 0, futuro FASE 11):**
 - Todos los drivers (framebuffer pixels, PS/2 hardware, ATA PIO, RTL8139, PIT, LAPIC)
@@ -2496,13 +2495,15 @@ Pre-reqs cerrados (10.0 entera, sesión 2026-05-21):
 - 10.0.e SYS_TASKINFO + /bin/kerntest ELF
 
 Servers migrados / eliminados:
-- ✅ 10.1 console_server → elfs/osn-server/consrv.c (PRIMER SERVER RING-3)
-- ✅ 10.2 keyboard_server → elfs/osn-server/kbdsrv.c (checkpoint pasado)
-- ✅ 10.3 fs_server ELIMINADO (-290 LOC) — shell habla vfs directo
+- ✅ 10.1 console_server → elfs/osn-server/consrv.c
+- ✅ 10.2 keyboard_server → elfs/osn-server/kbdsrv.c
+- ✅ 10.3 fs_server ELIMINADO (-290 LOC)
+- ✅ 10.4 shell_server → elfs/osn-server/shellsrv.c (-3375 LOC)
 
-Pendientes:
-- 10.4 shell_server → elfs/osn-server/shellsrv.c (el grande, ~4-5 hr)
-- 10.5 cleanup + ARCH.md actualizado
+**EL OS ENTERO** (consola + teclado + shell) corre en ring 3. kmain solo arranca drivers + spawn de ELFs + scheduler.
+
+Pendiente:
+- 10.5 cleanup final + ARCH.md actualizado
 
 ### FASE 11 — Drivers a ring 3 (futuro, NO mezclar con 10)
 - IRQ delegation por IPC desde kernel-side handlers

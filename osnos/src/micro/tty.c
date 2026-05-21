@@ -1,7 +1,6 @@
 #include "tty.h"
 
 #include "../drivers/framebuffer.h"
-#include "../servers/shell_server.h"
 #include "task.h"
 
 /* ----- Module state ----- */
@@ -36,34 +35,37 @@ static void read_buf_push(char c) {
 }
 
 /*
- * Echo helper. Skipped while the shell itself is the foreground
- * consumer — the shell does its own echo in the IPC_KEY_EVENT path,
- * so a TTY echo on top would double everything. When a user ELF is
- * fg, the shell is blocked on IPC_PROC_EXITED and isn't drawing
- * anything, so the TTY is responsible.
+ * Echo helpers. With shellsrv (FASE 10.4 chunk 5) the shell itself
+ * runs in raw mode so TTY_ECHO is off whenever it's fg — meaning
+ * the early-return on `!ECHO` handles the "don't double-echo" case
+ * naturally. Children in canonical mode keep the bit set and TTY
+ * echoes for them.
  */
 static void tty_echo_char(char c) {
     if (!(tty_t.c_lflag & TTY_ECHO)) return;
-    if (shell_fg_pid() == 0) return;          /* shell is fg → it'll echo */
     char s[2] = { c, 0 };
     framebuffer_draw_string(s, 0xffffff);
 }
 
 static void tty_echo_erase(void) {
     if (!(tty_t.c_lflag & TTY_ECHOE)) return;
-    if (shell_fg_pid() == 0) return;
     framebuffer_backspace();
 }
 
-/* Deliver SIGINT to the current foreground user task. Kernel tasks
- * (the shell included) are never targeted — they cancel their own
- * input via the IPC keystroke path. */
+/* Deliver SIGINT to the current foreground user task.
+ *
+ * Routing: the ring-3 shell publishes its current fg child via
+ * sys_set_fg → kernel_fg_pid (defined in syscall.c). The shell
+ * itself never sets kernel_fg_pid to its own pid, so Ctrl+C never
+ * kills the shell — only its running child. */
+extern uint64_t kernel_fg_pid;
+
 static void tty_signal(int sig) {
-    (void)sig;        /* only SIGINT today; queue is binary kill_pending */
-    uint64_t pid = shell_fg_pid();
+    (void)sig;
+    uint64_t pid = kernel_fg_pid;
     if (pid == 0) return;
     task_t *t = task_by_pid(pid);
-    if (!t || !t->pml4) return;               /* must be a user task */
+    if (!t || !t->pml4) return;
     t->kill_pending = 1;
     stat_signals++;
 }
@@ -84,7 +86,7 @@ static void tty_signal(int sig) {
  * with a normal-looking 0 return, which matches user intuition
  * after a Ctrl+Z. */
 static void tty_stop_signal(void) {
-    uint64_t pid = shell_fg_pid();
+    uint64_t pid = kernel_fg_pid;
     if (pid == 0) return;
     task_t *t = task_by_pid(pid);
     if (!t || !t->pml4) return;
