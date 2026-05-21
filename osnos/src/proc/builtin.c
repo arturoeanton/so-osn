@@ -149,6 +149,23 @@ DECLARE_ELF(spawntest);
 DECLARE_ELF(consrv);
 DECLARE_ELF(kbdsrv);
 DECLARE_ELF(shellsrv);
+DECLARE_ELF(env);
+DECLARE_ELF(wc);
+DECLARE_ELF(pwd);
+DECLARE_ELF(uname);
+DECLARE_ELF(basename);
+DECLARE_ELF(dirname);
+DECLARE_ELF(tail);
+DECLARE_ELF(seq);
+DECLARE_ELF(yes);
+DECLARE_ELF(tee);
+DECLARE_ELF(date);
+DECLARE_ELF(printf);
+DECLARE_ELF(grep);
+DECLARE_ELF(sort);
+DECLARE_ELF(uniq);
+DECLARE_ELF(cut);
+DECLARE_ELF(tr);
 
 #undef DECLARE_ELF
 
@@ -219,6 +236,23 @@ static const builtin_t builtins[] = {
     ELF(consrv,       "console server ring-3 (FASE 10.1) — spawned by kmain"),
     ELF(kbdsrv,       "keyboard policy server ring-3 (FASE 10.2) — spawned by kmain"),
     ELF(shellsrv,     "ring-3 shell skeleton (FASE 10.4 chunk 1) — run as sub-shell"),
+    ELF(env,          "print the environment"),
+    ELF(wc,           "count lines, words, characters"),
+    ELF(pwd,          "print working directory"),
+    ELF(uname,        "system identification"),
+    ELF(basename,     "strip directory part of a path"),
+    ELF(dirname,      "print directory part of a path"),
+    ELF(tail,         "print last N lines of a file"),
+    ELF(seq,          "print arithmetic sequence"),
+    ELF(yes,          "repeat a string forever"),
+    ELF(tee,          "copy stdin to stdout and files"),
+    ELF(date,         "print uptime / time since boot"),
+    ELF(printf,       "format and print"),
+    ELF(grep,         "print lines matching a pattern"),
+    ELF(sort,         "sort lines lexicographically"),
+    ELF(uniq,         "dedupe consecutive identical lines"),
+    ELF(cut,          "extract fields from each line"),
+    ELF(tr,           "translate / delete characters"),
 };
 
 #undef USER

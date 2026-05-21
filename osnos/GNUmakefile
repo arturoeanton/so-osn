@@ -118,6 +118,23 @@ USER_ELF_LIBC_SRCS := \
     elfs/tools/ovi.c \
     elfs/tools/tcc.c \
     elfs/tools/head.c \
+    elfs/tools/env.c \
+    elfs/tools/wc.c \
+    elfs/tools/pwd.c \
+    elfs/tools/uname.c \
+    elfs/tools/basename.c \
+    elfs/tools/dirname.c \
+    elfs/tools/tail.c \
+    elfs/tools/seq.c \
+    elfs/tools/yes.c \
+    elfs/tools/tee.c \
+    elfs/tools/date.c \
+    elfs/tools/printf.c \
+    elfs/tools/grep.c \
+    elfs/tools/sort.c \
+    elfs/tools/uniq.c \
+    elfs/tools/cut.c \
+    elfs/tools/tr.c \
     elfs/net/udptest.c \
     elfs/net/echotcp.c \
     elfs/net/selecttest.c \

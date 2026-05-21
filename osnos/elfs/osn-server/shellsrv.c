@@ -328,7 +328,11 @@ static int  do_test(int argc, char **argv);
 static int  do_jobs(int argc, char **argv);
 static int  do_fg  (int argc, char **argv);
 static int  do_bg  (int argc, char **argv);
-static int  do_kill(int argc, char **argv);
+static const char *pack_envp(char *buf, size_t cap);
+static int  do_kill  (int argc, char **argv);
+static int  do_export(int argc, char **argv);
+static int  do_unset (int argc, char **argv);
+static int  do_setenv(int argc, char **argv);
 static void wait_pid(long pid);
 static int  wait_pid_or_stop(long pid);
 
@@ -362,7 +366,10 @@ static const cmd_t COMMANDS[] = {
     { "jobs",    do_jobs, "list background tasks"       },
     { "fg",      do_fg,   "fg <pid>: resume stopped task in foreground" },
     { "bg",      do_bg,   "bg <pid>: resume stopped task in background" },
-    { "kill",    do_kill, "kill <pid>"                  },
+    { "kill",    do_kill,   "kill <pid>"                  },
+    { "export",  do_export, "export VAR=VAL (set env var)" },
+    { "unset",   do_unset,  "unset VAR (remove env var)"  },
+    { "setenv",  do_setenv, "setenv VAR VAL (alias of export)" },
 };
 
 static int should_exit = 0;
@@ -531,23 +538,62 @@ static int do_kill(int argc, char **argv) {
     return 0;
 }
 
+static int do_export(int argc, char **argv) {
+    /* Support both forms:
+     *   export VAR=VAL    — single token
+     *   export VAR VAL    — two tokens (back-compat)
+     *   export VAR        — no-op (POSIX would mark for export) */
+    if (argc < 2) {
+        /* List current env. */
+        extern char **environ;
+        if (environ) for (int i = 0; environ[i]; i++) printf("export %s\n", environ[i]);
+        return 0;
+    }
+    for (int i = 1; i < argc; i++) {
+        char *eq = strchr(argv[i], '=');
+        if (eq) {
+            *eq = 0;
+            if (setenv(argv[i], eq + 1, 1) != 0) {
+                fprintf(stderr, "export: %s: %s\n", argv[i], strerror(errno));
+                *eq = '='; return 1;
+            }
+            *eq = '=';
+        }
+    }
+    return 0;
+}
+
+static int do_setenv(int argc, char **argv) {
+    if (argc < 3) { fprintf(stderr, "usage: setenv VAR VAL\n"); return 1; }
+    if (setenv(argv[1], argv[2], 1) != 0) {
+        fprintf(stderr, "setenv: %s\n", strerror(errno));
+        return 1;
+    }
+    return 0;
+}
+
+static int do_unset(int argc, char **argv) {
+    if (argc < 2) { fprintf(stderr, "usage: unset VAR\n"); return 1; }
+    for (int i = 1; i < argc; i++) {
+        if (unsetenv(argv[i]) != 0) {
+            fprintf(stderr, "unset: %s: %s\n", argv[i], strerror(errno));
+        }
+    }
+    return 0;
+}
+
 static int do_test(int argc, char **argv) {
-    /* The legacy kernel-shell `test` builtin (cmd_test in
-     * shell_server.c) lives in ring 0 and reaches into kernel
-     * internals — it can't be invoked from a ring-3 task. /bin/kerntest
-     * covers the user-visible ABI surface; we spawn that here so
-     * `test` keeps working from shellsrv. */
     (void)argc; (void)argv;
-    char *fake_argv[] = { "kerntest", 0 };
+    char envbuf[2048];
+    const char *envp = pack_envp(envbuf, sizeof(envbuf));
     leave_raw();
-    long pid = osn_spawn("/bin/kerntest", "", 0, -1, -1);
+    long pid = osn_spawn("/bin/kerntest", "", envp, -1, -1);
     enter_raw();
     if (pid <= 0) {
         fprintf(stderr, "test: kerntest unavailable: %s\n", strerror(errno));
         return 1;
     }
     wait_pid(pid);
-    (void)fake_argv;
     return 0;
 }
 
@@ -658,6 +704,24 @@ static void pack_args(stage_t *st, char *out, size_t cap) {
     }
 }
 
+/* Build a flat envp blob ("KEY=VAL\0KEY=VAL\0\0") from the live
+ * `environ` array. SYS_SPAWN expects this format. */
+static const char *pack_envp(char *buf, size_t cap) {
+    extern char **environ;
+    size_t pos = 0;
+    if (environ) {
+        for (int i = 0; environ[i]; i++) {
+            const char *e = environ[i];
+            size_t l = strlen(e);
+            if (pos + l + 2 > cap) break;     /* leave room for final NUL */
+            for (size_t k = 0; k < l; k++) buf[pos++] = e[k];
+            buf[pos++] = 0;
+        }
+    }
+    buf[pos] = 0;
+    return pos > 0 ? buf : 0;
+}
+
 static void run_pipeline(stage_t *stages, int n, int background,
                           const char *line_for_label) {
     long pids[MAX_STAGES];
@@ -710,11 +774,13 @@ static void run_pipeline(stage_t *stages, int n, int background,
 
         char path[PATH_MAX];
         char args[256];
+        char envbuf[2048];
         resolve_cmd_path(st->argv[0], path, sizeof(path));
         pack_args(st, args, sizeof(args));
+        const char *envp_flat = pack_envp(envbuf, sizeof(envbuf));
 
         leave_raw();
-        long pid = osn_spawn(path, args, 0, stdin_fd, stdout_fd);
+        long pid = osn_spawn(path, args, envp_flat, stdin_fd, stdout_fd);
         enter_raw();
         if (pid <= 0) {
             fprintf(stderr, "shellsrv: %s: %s\n",
@@ -831,17 +897,45 @@ static void dispatch(char *line) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
-    printf("\nshellsrv: ring-3 shell (FASE 10.4 chunk 5 — final)\n");
+    printf("\nshellsrv: ring-3 shell (FASE 10.4)\n");
     printf("type 'help' for commands\n");
 
-    /* Claim SERVER_SHELL so IPC_KEY_EVENT (kbdsrv) + IPC_PROC_*
-     * (kernel signals) land here. When invoked as a sub-shell from
-     * the legacy kernel shell, this steals registration but the
-     * kernel shell is long-dead by chunk 5 — it's only spawned by
-     * kmain via proc_execve, so no contention. */
+    /* Claim SERVER_SHELL so IPC_PROC_* land here. */
     ipc_service_register(SERVER_SHELL);
 
     history_load();
+
+    /* Replay .oshrc line-by-line BEFORE entering raw mode — the rc
+     * is just a stream of commands; same dispatch path, but we
+     * don't echo / accept input, just run. */
+    int rc_fd = open("/home/.oshrc", O_RDONLY);
+    if (rc_fd >= 0) {
+        char rc_line[LINE_MAX_LEN];
+        int  pos = 0;
+        char chunk[256];
+        long n;
+        while ((n = read(rc_fd, chunk, sizeof(chunk))) > 0) {
+            for (long i = 0; i < n; i++) {
+                char c = chunk[i];
+                if (c == '\n' || pos + 1 >= (int)sizeof(rc_line)) {
+                    rc_line[pos] = 0;
+                    if (pos > 0 && rc_line[0] != '#') {
+                        history_save(rc_line);
+                        dispatch(rc_line);
+                    }
+                    pos = 0;
+                } else if (c != '\r') {
+                    rc_line[pos++] = c;
+                }
+            }
+        }
+        if (pos > 0) {
+            rc_line[pos] = 0;
+            if (rc_line[0] != '#') dispatch(rc_line);
+        }
+        close(rc_fd);
+    }
+
     enter_raw();
 
     char line[LINE_MAX_LEN];

@@ -38,7 +38,10 @@ _start:
     call    main                            /* returns int in %eax  */
 
     movl    %eax, %edi                      /* exit_code            */
-    call    _exit                           /* never returns        */
+    call    exit                            /* exit() runs atexit + */
+                                            /* fflush(stdout) then  */
+                                            /* falls through to     */
+                                            /* _exit(syscall).      */
 
     /*
      * Defensive trap: if _exit returns (it shouldn't), drop into int3
