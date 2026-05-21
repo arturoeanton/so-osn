@@ -10,6 +10,7 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| Ctrl+Z / fg / bg / jobs | TASK_STOPPED + stop_pending + VSUSP, shell job-control cmds | 250 |
 | mmap/munmap anónimo | SYS_MMAP/MUNMAP, bump-allocator en `0x20000000`, libc + sys/mman.h + 12 tests | 250 |
 | Pipes + redirects mezclados | `a < in.txt \| b \| c > out.txt`, middle-stage redir validado, `echo -e` shell builtin | 200 |
 | O_NONBLOCK runtime | libc cachea O_NONBLOCK per-fd; read() respeta sin syscall extra | 50 |
@@ -52,7 +53,10 @@ canonical/raw, /home persistente cross-reboot.
 
 **TODOs no-bloqueantes** (postergados):
 - sys_execve real (libc surface lista, requiere coupling fg_pid)
-- TTY 3+ (PTY pairs, sessions, process groups)
+- PTY pairs (`/dev/ptmx`, `/dev/pts/N`) — para multiplex de
+  terminales (job control real ya está)
+- Process groups + sessions POSIX-strict (hoy job control usa
+  pid 1-to-1 vía fg_pid; pgid/sid no existen)
 - FASE 10 (servers a ring 3 en elfs/osn-server/)
 - fork() real (sin fork hoy)
 - pipe(2) syscall expuesto a user (necesita per-task fd tables)
@@ -1614,6 +1618,50 @@ OK .history (historial persistente) + .oshrc (startup script)
      Tipo en un boot, recuperá con flecha ↑ tras reboot. .oshrc
      queda como el lugar natural para "cd a tu workdir" o
      "export VARS" automáticos.
+
+### FASE Job control (Ctrl+Z / fg / bg / jobs) — CERRADA
+OK TASK_STOPPED + stop_pending
+   - Nuevo estado `TASK_STOPPED` en `task_state_t`. Scheduler
+     ya lo skipea (chequeo existente `state != TASK_READY`).
+   - `task_t.stop_pending` (int): set por el TTY cuando entra
+     Ctrl+Z. user_task_trampoline lo chequea ANTES de
+     user_task_resume y, si está set, transiciona state→STOPPED
+     y `sched_resume_jump()` — la task queda con `saved_iret_*`
+     intacto, listo para reanudar al pasar a READY.
+
+OK VSUSP en TTY (Ctrl+Z = 0x1A por default)
+   - `TTY_VSUSP = 10` agregado a c_cc indices.
+   - `tty_init`: `c_cc[VSUSP] = 26` (^Z). Configurable via
+     `tcsetattr` como cualquier control char.
+   - `tty_input` (ISIG path): detecta VSUSP y llama
+     `tty_stop_signal()` que: set fg task's stop_pending,
+     emite IPC_PROC_STOPPED al shell, bump signal counter.
+
+OK IPC_PROC_STOPPED + IPC_PROC_CONTINUED
+   - Nuevos opcodes 0x41 / 0x42 en `ipc.h`.
+   - shell_server handler: si arg1 == fg_pid, drop fg_pid +
+     pipeline_clear. Imprime "[pid] stopped" en gris claro.
+
+OK Shell builtins: jobs / fg / bg
+   - `jobs`: walk task table, lista user tasks con pml4 != NULL
+     y state != UNUSED/DEAD, formato bash-like:
+     `[pid] state  name`. Empacado en un IPC.
+   - `fg [PID]`: encuentra stopped task (PID explícito o highest-
+     pid stopped) → state=READY + fg_pid=pid. NO redibuja
+     prompt — el child es foreground; el prompt vuelve cuando
+     exit/se stops de nuevo.
+   - `bg [PID]`: misma búsqueda → state=READY pero fg_pid
+     intacto. Prompt sí vuelve.
+   - `find_stopped_task` helper compartido: parsea PID arg,
+     valida que sea user task STOPPED, fallback al "más reciente"
+     (highest-pid heuristic).
+
+OK Probado en QEMU
+   - `sleep 30` + Ctrl+Z → `[N] stopped`.
+   - `jobs` → lista entry.
+   - `fg` → reanuda, sigue durmiendo.
+   - Ctrl+Z → stop otra vez.
+   - `bg` → reanuda en background, prompt vuelve.
 
 ### FASE mmap anónimo — CERRADA
 OK SYS_MMAP (#9) + SYS_MUNMAP (#11) — anonymous only

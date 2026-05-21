@@ -68,6 +68,28 @@ static void tty_signal(int sig) {
     stat_signals++;
 }
 
+/* Deliver SIGTSTP to the foreground user task — Ctrl+Z. The task
+ * transitions to TASK_STOPPED on its next dispatch (user_task_
+ * trampoline checks the flag); resume via shell `fg`/`bg`. Send
+ * IPC to the shell so it can drop fg_pid and print "[pid] stopped". */
+static void tty_stop_signal(void) {
+    uint64_t pid = shell_fg_pid();
+    if (pid == 0) return;
+    task_t *t = task_by_pid(pid);
+    if (!t || !t->pml4) return;
+    t->stop_pending = 1;
+    stat_signals++;
+
+    ipc_msg_t msg;
+    msg.from    = 0;
+    msg.to      = SERVER_SHELL;
+    msg.type    = IPC_PROC_STOPPED;
+    msg.arg0    = 0;
+    msg.arg1    = pid;
+    msg.data[0] = 0;
+    ipc_send(&msg);
+}
+
 /* ----- Public API ----- */
 
 void tty_init(void) {
@@ -86,6 +108,7 @@ void tty_init(void) {
     tty_t.c_cc[TTY_VTIME]  = 0;
     tty_t.c_cc[TTY_VSTART] = 17;      /* ^Q  */
     tty_t.c_cc[TTY_VSTOP]  = 19;      /* ^S  */
+    tty_t.c_cc[TTY_VSUSP]  = 26;      /* ^Z  */
 
     read_head = read_tail = read_count = 0;
     line_len = 0;
@@ -107,7 +130,11 @@ void tty_input(char c) {
             tty_signal(2 /* SIGINT */);
             return;
         }
-        /* VQUIT, VSUSP TODO when we have those signals; for now drop. */
+        if (c != 0 && c == (char)tty_t.c_cc[TTY_VSUSP]) {
+            tty_stop_signal();    /* Ctrl+Z → SIGTSTP */
+            return;
+        }
+        /* VQUIT TODO when we have core-dump signals; for now drop. */
     }
 
     if (tty_t.c_lflag & TTY_ICANON) {

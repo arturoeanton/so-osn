@@ -14,6 +14,7 @@ typedef enum {
     TASK_READY,
     TASK_RUNNING,
     TASK_BLOCKED,
+    TASK_STOPPED,    /* Ctrl+Z'd; scheduler skips until SIGCONT */
     TASK_DEAD
 } task_state_t;
 
@@ -90,6 +91,15 @@ typedef struct {
      * of resuming. SIGINT convention exit code = 128 + 2 = 130.
      */
     int       kill_pending;
+    /*
+     * Stop pending — set when Ctrl+Z (VSUSP) hits while this task
+     * is the foreground process. user_task_trampoline checks it on
+     * dispatch and, if set, transitions state→TASK_STOPPED + longjmps
+     * back to the scheduler instead of returning to userland. The
+     * shell's `fg` / `bg` cmds (or any SIGCONT delivery) flip state
+     * back to TASK_READY and the task resumes via its saved_iret_*.
+     */
+    int       stop_pending;
     /* iret frame */
     uint64_t  saved_iret_rip;
     uint64_t  saved_iret_cs;

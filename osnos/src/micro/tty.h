@@ -79,6 +79,7 @@ struct osnos_termios {
 #define TTY_VMIN    6
 #define TTY_VSTART  8
 #define TTY_VSTOP   9
+#define TTY_VSUSP  10   /* default 0x1A (Ctrl+Z) */
 
 /* ioctl request numbers (asm-generic/ioctls.h) */
 #define TTY_TCGETS    0x5401u

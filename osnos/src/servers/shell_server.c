@@ -491,6 +491,9 @@ static void cmd_udptest(const char *args);
 static void cmd_tcptest(const char *args);
 static void cmd_exec(const char *args);
 static void cmd_kill(const char *args);
+static void cmd_jobs(const char *args);
+static void cmd_fg  (const char *args);
+static void cmd_bg  (const char *args);
 static void cmd_neof(const char *args);
 static void cmd_uname(const char *args);
 static void cmd_version(const char *args);
@@ -539,6 +542,9 @@ static const shell_command_t commands[] = {
     CMD("tcptest", cmd_tcptest, "tcptest [PORT] (listen, accept 1 conn, RST)"),
     CMD("exec",    cmd_exec,    "exec /bin/PROG [args] [&]"),
     CMD("kill",    cmd_kill,    "kill PID"),
+    CMD("jobs",    cmd_jobs,    "jobs (list stopped + background user tasks)"),
+    CMD("fg",      cmd_fg,      "fg [PID] (resume a stopped task in foreground)"),
+    CMD("bg",      cmd_bg,      "bg [PID] (resume a stopped task in background)"),
     CMD("neof",    cmd_neof,    "neof"),
     CMD("uname",   cmd_uname,   "uname"),
     CMD("version", cmd_version, "version"),
@@ -3302,6 +3308,122 @@ static void cmd_kill(const char *args) {
     prompt();
 }
 
+/*
+ * Find a candidate task for `fg [PID]` / `bg [PID]`. If `args` has
+ * a pid, use it directly (validate that it's a STOPPED user task).
+ * Otherwise pick the most-recently-stopped one (highest pid wins,
+ * which approximates "last stopped" closely enough for everyday use).
+ * Returns the task pointer, or NULL with `*reason` set for the error.
+ */
+static task_t *find_stopped_task(const char *args, const char **reason) {
+    while (*args == ' ') args++;
+    if (args[0]) {
+        uint64_t pid = 0;
+        for (const char *p = args; *p && *p != ' '; p++) {
+            if (*p < '0' || *p > '9') { *reason = "invalid pid"; return 0; }
+            pid = pid * 10 + (uint64_t)(*p - '0');
+        }
+        task_t *t = task_by_pid(pid);
+        if (!t || t->state != TASK_STOPPED) {
+            *reason = "no such stopped task";
+            return 0;
+        }
+        return t;
+    }
+    /* No pid given — pick the highest-pid stopped task. */
+    task_t *best = 0;
+    for (size_t i = 0; i < MAX_TASKS; i++) {
+        const task_t *cs = task_slot(i);
+        if (!cs || cs->state != TASK_STOPPED) continue;
+        task_t *t = task_by_pid(cs->pid);
+        if (!t) continue;
+        if (!best || t->pid > best->pid) best = t;
+    }
+    if (!best) { *reason = "no stopped jobs"; return 0; }
+    return best;
+}
+
+static void cmd_jobs(const char *args) {
+    (void)args;
+    /*
+     * Walk the task table and list anything that's a user task and
+     * either backgrounded (state != fg_pid) or stopped. Format mimics
+     * bash:
+     *   [pid] state  name
+     * Single IPC for the whole output to stay inside the single-shot
+     * IPC contract.
+     */
+    char buf[IPC_DATA_SIZE];
+    buf[0] = 0;
+    os_strlcat(buf, "\n", sizeof(buf));
+
+    int any = 0;
+    for (size_t i = 0; i < MAX_TASKS; i++) {
+        const task_t *t = task_slot(i);
+        if (!t || !t->pml4) continue;             /* user tasks only */
+        if (t->state == TASK_DEAD || t->state == TASK_UNUSED) continue;
+        if (t->pid == fg_pid) continue;           /* fg is "the prompt", skip */
+
+        char num[16];
+        format_size((size_t)t->pid, num, sizeof(num));
+        os_strlcat(buf, "[",  sizeof(buf));
+        os_strlcat(buf, num,  sizeof(buf));
+        os_strlcat(buf, "] ", sizeof(buf));
+        const char *st = (t->state == TASK_STOPPED) ? "stopped " :
+                        (t->state == TASK_BLOCKED) ? "blocked " : "running ";
+        os_strlcat(buf, st,  sizeof(buf));
+        os_strlcat(buf, t->name ? t->name : "?", sizeof(buf));
+        os_strlcat(buf, "\n", sizeof(buf));
+        any = 1;
+    }
+    if (!any) os_strlcat(buf, "(no jobs)\n", sizeof(buf));
+    shell_send_console(buf);
+    prompt();
+}
+
+static void cmd_fg(const char *args) {
+    const char *err = 0;
+    task_t *t = find_stopped_task(args, &err);
+    if (!t) {
+        shell_send_console_color("\nfg: ", 0xff5555);
+        shell_send_console_color(err, 0xff5555);
+        shell_send_console("\n");
+        prompt();
+        return;
+    }
+    /* Resume + make foreground. The task's saved_iret_* still hold
+     * its preempt point so it'll continue exactly where Ctrl+Z left it. */
+    t->state = TASK_READY;
+    fg_pid   = t->pid;
+    char num[16];
+    format_size((size_t)t->pid, num, sizeof(num));
+    shell_send_console_color("\n[", 0xaaaaaa);
+    shell_send_console_color(num, 0xaaaaaa);
+    shell_send_console_color("] continued (fg)\n", 0xaaaaaa);
+    /* Do NOT prompt — the resumed task is foreground; the prompt
+     * comes back when it exits (or Ctrl+Z stops it again). */
+}
+
+static void cmd_bg(const char *args) {
+    const char *err = 0;
+    task_t *t = find_stopped_task(args, &err);
+    if (!t) {
+        shell_send_console_color("\nbg: ", 0xff5555);
+        shell_send_console_color(err, 0xff5555);
+        shell_send_console("\n");
+        prompt();
+        return;
+    }
+    t->state = TASK_READY;
+    /* fg_pid unchanged — task runs in background. */
+    char num[16];
+    format_size((size_t)t->pid, num, sizeof(num));
+    shell_send_console_color("\n[", 0xaaaaaa);
+    shell_send_console_color(num, 0xaaaaaa);
+    shell_send_console_color("] continued (bg)\n", 0xaaaaaa);
+    prompt();
+}
+
 static void cmd_neof(const char *args) {
     (void)args;
     shell_send_console_color(
@@ -3522,6 +3644,27 @@ void shell_server_tick(void) {
      *     — the user may be typing, and we'd corrupt their input.
      *     The next keystroke / Enter will scroll naturally.
      */
+    if (msg.type == IPC_PROC_STOPPED) {
+        /*
+         * Ctrl+Z came in for the foreground task. The TTY layer
+         * already flipped its stop_pending bit; the task will
+         * STOPPED itself on the next dispatch. Drop fg_pid and
+         * draw a job-control notice; the prompt waits one cycle
+         * so any pre-stop output flushes first.
+         */
+        if (msg.arg1 == fg_pid) {
+            fg_pid = 0;
+            pipeline_clear();
+        }
+        char num[16];
+        format_size((size_t)msg.arg1, num, sizeof(num));
+        shell_send_console_color("\n[", 0xaaaaaa);
+        shell_send_console_color(num, 0xaaaaaa);
+        shell_send_console_color("] stopped\n", 0xaaaaaa);
+        prompt();
+        return;
+    }
+
     if (msg.type == IPC_PROC_EXITED) {
         /* Upstream of an active pipeline: swallow silently. The
          * downstream's exit (matched against fg_pid below) is the

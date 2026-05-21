@@ -136,6 +136,20 @@ static void user_task_trampoline(void) {
         __builtin_unreachable();
     }
 
+    /*
+     * Ctrl+Z arrived while this task was running. Mark it
+     * STOPPED so the scheduler skips it until SIGCONT (fg / bg
+     * shell cmd) flips the state back to READY. The task's
+     * saved_iret_* still hold the preempt point, so resume goes
+     * straight into user_task_resume on next dispatch.
+     */
+    if (t->stop_pending) {
+        t->stop_pending = 0;
+        t->state        = TASK_STOPPED;
+        sched_resume_jump();
+        __builtin_unreachable();
+    }
+
     /* Resume previously-suspended task (sleep wake-up etc.). */
     if (t->saved_valid) user_task_resume(t);   /* never returns */
 

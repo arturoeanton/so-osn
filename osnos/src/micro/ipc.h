@@ -70,7 +70,9 @@ typedef enum {
     IPC_FS_COPY          = 0x2a,
     IPC_FS_MOVE          = 0x2b,
 
-    IPC_PROC_EXITED      = 0x40
+    IPC_PROC_EXITED      = 0x40,
+    IPC_PROC_STOPPED     = 0x41,   /* Ctrl+Z hit a fg user task */
+    IPC_PROC_CONTINUED   = 0x42    /* `fg` / `bg` resumed a stopped task */
 } ipc_type_t;
 
 typedef struct {
