@@ -10,6 +10,7 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| FASE 10.4 chunk 4 shellsrv background | `cmd &` (trailing ampersand) spawn-without-wait; pid + cmd recordados en bg_jobs[]. `jobs` builtin barre sys_taskinfo, lista live tasks con state, compacta dead. Ctrl+Z/fg/bg defer a chunk 5 (necesitan signal routing en shellsrv-as-SERVER_SHELL) | 100 |
 | FASE 10.4 chunk 3 shellsrv pipes + redir | Multi-stage `|` (hasta 4) + `< > >>` redirects via osn_spawn fd inheritance. Builtins solo en single-stage no-redir; con redirects/pipes cae a `/bin/<name>` ELF. Fix sys_read/sys_write fd 0/1: cuando el slot fue overrideado via spawn, ya no atrapa todo en TTY/console — fall through al path file/pipe correcto. `test` builtin → `/bin/kerntest` | 220 |
 | FASE 10.4 chunk 2 shellsrv line editor | Raw-mode TTY (ICANON+ECHO off, ISIG kept) + manual line editor con ↑↓ history nav + ←→ cursor edit + DEL/Ctrl+C. Cursor visible via SGR reverse. History ring de 16 + persistencia en /home/.history (load/save). Re-render con cursor block correcto al submit (Enter limpia el block). Builtins: help, exit, pwd, cd, ls, cat, echo, history | 250 |
 | FASE 10.4 chunk 1 shellsrv skeleton | **Tercer server ring-3 (proof of concept)**. elfs/osn-server/shellsrv.c (~280 LOC): prompt + read(0) canónico + dispatch table + builtins + fallback osn_spawn para /bin/*. Coexiste con shell kernel (sub-shell mode — usuario invoca `shellsrv`, `exit` vuelve). No registra SERVER_SHELL todavía | 280 |

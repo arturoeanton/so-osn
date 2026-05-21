@@ -325,7 +325,25 @@ typedef int (*cmd_fn)(int, char **);
 typedef struct { const char *name; cmd_fn fn; const char *help; } cmd_t;
 
 static int  do_test(int argc, char **argv);
+static int  do_jobs(int argc, char **argv);
 static void wait_pid(long pid);     /* defined alongside the pipeline runner */
+
+/* Background-job tracking. shellsrv adds an entry every time the
+ * user appends `&` to a pipeline; `jobs` enumerates the live ones. */
+#define MAX_JOBS 16
+typedef struct {
+    long pid;
+    char cmd[64];
+} job_t;
+static job_t bg_jobs[MAX_JOBS];
+static int   n_bg_jobs;
+
+static void bg_jobs_remember(long pid, const char *cmd) {
+    if (n_bg_jobs >= MAX_JOBS) return;
+    bg_jobs[n_bg_jobs].pid = pid;
+    safe_copy(bg_jobs[n_bg_jobs].cmd, cmd, sizeof(bg_jobs[n_bg_jobs].cmd));
+    n_bg_jobs++;
+}
 
 static const cmd_t COMMANDS[] = {
     { "help",    do_help, "list available commands"     },
@@ -337,6 +355,7 @@ static const cmd_t COMMANDS[] = {
     { "echo",    do_echo, "echo arguments (no escapes)" },
     { "history", do_hist, "show command history"        },
     { "test",    do_test, "run /bin/kerntest ABI suite" },
+    { "jobs",    do_jobs, "list background tasks"       },
 };
 
 static int should_exit = 0;
@@ -404,6 +423,53 @@ static int do_hist(int argc, char **argv) {
     for (int i = 0; i < history_count; i++) {
         printf("%4d  %s\n", i + 1, history[i]);
     }
+    return 0;
+}
+
+static int do_jobs(int argc, char **argv) {
+    (void)argc; (void)argv;
+    /* Sweep the kernel task table to discover the current state of
+     * each tracked background pid; drop dead ones. */
+    int live[MAX_JOBS] = {0};
+    const char *state_label[MAX_JOBS] = {0};
+
+    for (int i = 0; i < n_bg_jobs; i++) {
+        for (size_t k = 0; k < 16; k++) {
+            osnos_taskinfo_t info;
+            long r = osnos_syscall2(265, (long)k, (long)&info);
+            if (r < 0) continue;
+            if ((long)info.pid != bg_jobs[i].pid) continue;
+            if (info.state == OSNOS_TASK_DEAD)   continue;
+            live[i] = 1;
+            switch (info.state) {
+                case OSNOS_TASK_RUNNING: state_label[i] = "running"; break;
+                case OSNOS_TASK_READY:   state_label[i] = "ready";   break;
+                case OSNOS_TASK_BLOCKED: state_label[i] = "blocked"; break;
+                case OSNOS_TASK_STOPPED: state_label[i] = "stopped"; break;
+                default:                 state_label[i] = "?";       break;
+            }
+            break;
+        }
+    }
+
+    int printed = 0;
+    for (int i = 0; i < n_bg_jobs; i++) {
+        if (!live[i]) continue;
+        printf("[%d]  pid=%ld  %s  %s\n",
+               i + 1, bg_jobs[i].pid, state_label[i], bg_jobs[i].cmd);
+        printed++;
+    }
+    if (printed == 0) printf("no background jobs\n");
+
+    /* Compact the array, dropping dead entries. */
+    int w = 0;
+    for (int r = 0; r < n_bg_jobs; r++) {
+        if (live[r]) {
+            if (w != r) bg_jobs[w] = bg_jobs[r];
+            w++;
+        }
+    }
+    n_bg_jobs = w;
     return 0;
 }
 
@@ -522,7 +588,8 @@ static void pack_args(stage_t *st, char *out, size_t cap) {
     }
 }
 
-static void run_pipeline(stage_t *stages, int n) {
+static void run_pipeline(stage_t *stages, int n, int background,
+                          const char *line_for_label) {
     long pids[MAX_STAGES];
     int  npids = 0;
     int  pipe_in_fd = -1;            /* read end of pipe FROM previous stage */
@@ -594,6 +661,17 @@ static void run_pipeline(stage_t *stages, int n) {
         pipe_in_fd = next_pipe_in;
     }
 
+    if (background) {
+        /* Don't wait — register the LAST stage's pid as the job
+         * leader and return to the prompt immediately. */
+        if (npids > 0) {
+            long lead = pids[npids - 1];
+            bg_jobs_remember(lead, line_for_label ? line_for_label : "");
+            printf("[%d]  pid=%ld  &\n", n_bg_jobs, lead);
+        }
+        if (pipe_in_fd >= 0) close(pipe_in_fd);
+        return;
+    }
     for (int k = 0; k < npids; k++) wait_pid(pids[k]);
     if (pipe_in_fd >= 0) close(pipe_in_fd);
     return;
@@ -606,10 +684,34 @@ cleanup:
 /* ---- dispatch ---- */
 
 static void dispatch(char *line) {
+    /* Preserve a printable copy of the original line for the `jobs`
+     * builtin (split_args mutates `line` in place). */
+    char line_copy[LINE_MAX_LEN];
+    safe_copy(line_copy, line, sizeof(line_copy));
+
+    /* Detect a trailing `&` (with optional whitespace before it) so
+     * we can spawn the pipeline in the background. The flag is
+     * recognised across the whole line, not per-stage. */
+    int background = 0;
+    int last = (int)strlen(line) - 1;
+    while (last >= 0 && (line[last] == ' ' || line[last] == '\t')) last--;
+    if (last >= 0 && line[last] == '&') {
+        background = 1;
+        line[last] = ' ';   /* let the parser see it as plain whitespace */
+        /* Also strip the trailing '&' from the label so `jobs` shows
+         * a clean command. */
+        int last_label = (int)strlen(line_copy) - 1;
+        while (last_label >= 0 && (line_copy[last_label] == ' ' ||
+                                    line_copy[last_label] == '\t')) last_label--;
+        if (last_label >= 0 && line_copy[last_label] == '&') {
+            line_copy[last_label] = 0;
+        }
+    }
+
     /* Pipe-aware path: split into stages, parse each, run pipeline.
      * Builtins only run when there's exactly one stage AND no
-     * redirects — otherwise we fall through to /bin/<name> ELF so
-     * redirects + pipes can wire its fds. */
+     * redirects AND no background — otherwise we fall through to
+     * /bin/<name> ELF so redirects + pipes + bg can wire its fds. */
     char *raw[MAX_STAGES];
     int n = line_split_stages(line, raw);
     if (n <= 0) {
@@ -620,7 +722,8 @@ static void dispatch(char *line) {
     stage_t stages[MAX_STAGES];
     for (int i = 0; i < n; i++) stage_parse(raw[i], &stages[i]);
 
-    if (n == 1 && !stages[0].stdin_file && !stages[0].stdout_file) {
+    if (n == 1 && !background &&
+        !stages[0].stdin_file && !stages[0].stdout_file) {
         stage_t *st = &stages[0];
         if (st->argc == 0) return;
         for (size_t i = 0; i < sizeof(COMMANDS)/sizeof(COMMANDS[0]); i++) {
@@ -631,7 +734,7 @@ static void dispatch(char *line) {
         }
     }
 
-    run_pipeline(stages, n);
+    run_pipeline(stages, n, background, line_copy);
 }
 
 /* ---- main ---- */
