@@ -116,6 +116,13 @@ void framebuffer_putpixel(
  * color. Used as the editor cursor highlight. */
 static int sgr_reverse = 0;
 
+/* SGR foreground override (ESC[38;2;R;G;Bm). When sgr_fg_set is
+ * non-zero, draw_string overrides its `color` arg with sgr_fg.
+ * Reset by ESC[0m / ESC[39m. Used by the ring-3 console server
+ * (FASE 10.1) to encode IPC arg0 colors as inline ANSI sequences. */
+static int      sgr_fg_set = 0;
+static uint32_t sgr_fg     = 0xffffff;
+
 void framebuffer_draw_char(
     char c,
     size_t x,
@@ -178,21 +185,31 @@ void framebuffer_draw_string(
          */
         if (*s == 0x1b && s[1] == '[') {
             s += 2;
-            int p1 = 0, p2 = 0;
-            int have_p1 = 0, have_p2 = 0;
-            while (*s >= '0' && *s <= '9') {
-                p1 = p1 * 10 + (*s - '0');
-                have_p1 = 1;
-                s++;
-            }
-            if (*s == ';') {
-                s++;
+            /* Parse up to 5 ";"-separated decimal params. Enough for
+             * SGR truecolor (38;2;R;G;B). Tail params past the cap
+             * are silently dropped. */
+            int params[5] = {0,0,0,0,0};
+            int n_params  = 0;
+            int have_p1 = 0;
+            for (;;) {
+                int v = 0;
+                int got = 0;
                 while (*s >= '0' && *s <= '9') {
-                    p2 = p2 * 10 + (*s - '0');
-                    have_p2 = 1;
+                    v = v * 10 + (*s - '0');
+                    got = 1;
                     s++;
                 }
+                if (got) {
+                    if (n_params < 5) params[n_params] = v;
+                    n_params++;
+                    if (n_params == 1) have_p1 = 1;
+                }
+                if (*s == ';') { s++; continue; }
+                break;
             }
+            int p1 = params[0];
+            int p2 = params[1];
+            int have_p2 = (n_params >= 2);
             char cmd = *s ? *s++ : 0;
             if (cmd == 'J' && (!have_p1 || p1 == 2)) {
                 framebuffer_clear(bg_color);
@@ -217,9 +234,27 @@ void framebuffer_draw_string(
                 }
                 sgr_reverse = prev;
             } else if (cmd == 'm') {
-                /* SGR: only reverse (7) / reset (0 or 27) handled. */
-                if (have_p1 && p1 == 7)              sgr_reverse = 1;
-                else if (!have_p1 || p1 == 0 || p1 == 27) sgr_reverse = 0;
+                /* SGR. Supported:
+                 *   0   — reset (clears reverse + fg override)
+                 *   7   — reverse on
+                 *   27  — reverse off
+                 *   38;2;R;G;B — truecolor foreground override
+                 *   39  — default foreground (clear override) */
+                if (!have_p1 || p1 == 0) {
+                    sgr_reverse = 0;
+                    sgr_fg_set  = 0;
+                } else if (p1 == 7) {
+                    sgr_reverse = 1;
+                } else if (p1 == 27) {
+                    sgr_reverse = 0;
+                } else if (p1 == 38 && n_params >= 5 && params[1] == 2) {
+                    sgr_fg = ((uint32_t)params[2] << 16)
+                           | ((uint32_t)params[3] << 8)
+                           |  (uint32_t)params[4];
+                    sgr_fg_set = 1;
+                } else if (p1 == 39) {
+                    sgr_fg_set = 0;
+                }
             }
             continue;
         }
@@ -264,7 +299,7 @@ void framebuffer_draw_string(
             *s,
             cursor_x,
             cursor_y,
-            color
+            sgr_fg_set ? sgr_fg : color
         );
 
         cursor_x += CHAR_WIDTH;

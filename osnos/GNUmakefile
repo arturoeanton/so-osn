@@ -133,7 +133,8 @@ USER_ELF_LIBC_SRCS := \
     elfs/tests/pipetest.c \
     elfs/tests/fbtest.c \
     elfs/tests/inputtest.c \
-    elfs/tests/kerntest.c
+    elfs/tests/kerntest.c \
+    elfs/osn-server/consrv.c
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS))

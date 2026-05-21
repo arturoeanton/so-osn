@@ -69,7 +69,10 @@ static void test_taskinfo(void) {
 
         if (strcmp(info.name, "shell")    == 0) saw_shell++;
         if (strcmp(info.name, "keyboard") == 0) saw_keyboard++;
-        if (strcmp(info.name, "console")  == 0) saw_console++;
+        /* Console server is "console" pre-FASE-10.1, "consrv" once
+         * it migrates to a ring-3 ELF. Either name counts. */
+        if (strcmp(info.name, "console")  == 0 ||
+            strcmp(info.name, "consrv")   == 0) saw_console++;
         if (strcmp(info.name, "fs")       == 0) saw_fs++;
         if ((long)info.pid == my_pid)           saw_self++;
         if (info.is_user)                       n_user++;

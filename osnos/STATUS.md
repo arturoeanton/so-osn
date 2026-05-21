@@ -10,6 +10,7 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| FASE 10.1 console_server ring-3 | **Primer server en ring 3**. SYS_IPC_SEND/RECV/SERVICE_REGISTER/LOOKUP (260-263). lib/libc/include/osnos_ipc.h con ipc_send/recv/recv_block/service_*. elfs/osn-server/consrv.c (~70 LOC): open(/dev/fb0)+register+loop. Framebuffer parser CSI extendido a truecolor SGR 38;2;R;G;B. kmain pre-registra SERVER_CONSOLE→pid del ELF antes de spawn shell. ps muestra consrv BLOCKED con dispatches > 1000 | 350 |
 | FASE 10.0.d + 10.0.e ABI + kerntest | osnos_ipc_abi.h (ipc_msg_t/SERVER_*/opcodes) compartido kernel↔ring-3; service.h+ipc.h forwardean. Build add `-I src/include` a USER_CFLAGS para que ELFs vean los headers ABI. SYS_TASKINFO=265 + osnos_taskinfo.h. /bin/kerntest con 22 PASS sobre sys_taskinfo, /dev/fb0/input0, pipe roundtrip, dup-pipe-share, /sys/meminfo | 220 |
 | FASE 10.0.c /dev/fb0 + /dev/input0 | devfs char devices nuevos: fb0 (write → framebuffer via framebuffer_write_bytes) e input0 (read → keyboard_event_t via ring de 32). keyboard_server fan-outs a TTY + IPC + ring sin perder eventos. osnos_fd_t.is_chr para bypass de offset-slicing en streams; sys_write acepta CHR (antes EISDIR). /bin/fbtest + /bin/inputtest | 180 |
 | FASE 10.0.b pipe(2) syscall | SYS_PIPE=22 expuesto a userland; osnos_fd_t extendido (is_pipe/pipe_ref/pipe_side); sys_read/sys_write reconocen pipes via fd; pipeline migrado de task_t.pipe_in/pipe_out a fds; cleanup en exit barre fd 0..MAX; libc pipe() wrapper + /bin/pipetest (9/9 pass) | 240 |
@@ -61,7 +62,7 @@ canonical/raw, /home persistente cross-reboot.
   terminales (job control real ya está)
 - Process groups + sessions POSIX-strict (hoy job control usa
   pid 1-to-1 vía fg_pid; pgid/sid no existen)
-- FASE 10 (servers a ring 3 en elfs/osn-server/) — **en curso**, ver PLAN_FASE10.md (10.0 ENTERA cerrada: a/b/c/d/e; próxima sesión: 10.1 console_server ring-3). El port completo de cmd_test queda postergado a 10.4 (los checks kernel-internos se quedan en cmd_test del shell por ahora; /bin/kerntest cubre la cara user-visible)
+- FASE 10 (servers a ring 3 en elfs/osn-server/) — **en curso**, ver PLAN_FASE10.md (10.0 + 10.1 cerradas; próxima: 10.2 keyboard_server ring-3). El port completo de cmd_test queda postergado a 10.4 (los checks kernel-internos se quedan en cmd_test del shell por ahora; /bin/kerntest cubre la cara user-visible)
 - fork() real (sin fork hoy)
 - Pipelines con más de 4 stages (hoy MAX_PIPELINE_STAGES=4)
 - Shell builtins (cat/ls/...) que respeten redirects sin
@@ -2445,12 +2446,14 @@ Pre-reqs cerrados (10.0 entera, sesión 2026-05-21):
 - 10.0.d osnos_ipc_abi.h compartido kernel↔ring-3
 - 10.0.e SYS_TASKINFO + /bin/kerntest ELF
 
+Servers migrados:
+- ✅ 10.1 console_server → elfs/osn-server/consrv.c (PRIMER SERVER RING-3)
+
 Servers a migrar (próximas sesiones):
-43. 10.1 console_server → elfs/osn-server/consrv.c (lee IPC, escribe /dev/fb0)
-44. 10.2 keyboard_server → elfs/osn-server/kbdsrv.c (lee /dev/input0, escribe IPC)
-45. 10.3 fs_server: ELIMINAR (shell ring-3 usa syscalls directos)
-46. 10.4 shell_server → elfs/osn-server/shellsrv.c
-47. 10.5 cleanup + ARCH.md actualizado
+- 10.2 keyboard_server → elfs/osn-server/kbdsrv.c (lee /dev/input0, escribe IPC)
+- 10.3 fs_server: ELIMINAR (shell ring-3 usa syscalls directos)
+- 10.4 shell_server → elfs/osn-server/shellsrv.c
+- 10.5 cleanup + ARCH.md actualizado
 
 ### FASE 11 — Drivers a ring 3 (futuro, NO mezclar con 10)
 - IRQ delegation por IPC desde kernel-side handlers

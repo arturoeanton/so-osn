@@ -9,7 +9,7 @@
 #include "../drivers/lapic.h"
 #include "../drivers/pic.h"
 #include "../drivers/rtl8139.h"
-#include "../servers/console_server.h"
+#include "../proc/exec.h"
 #include "../servers/keyboard_server.h"
 #include "../servers/shell_server.h"
 #include "../micro/fpu.h"
@@ -142,15 +142,25 @@ void kmain(void) {
     int fs_pid = task_create("fs", fs_server_tick);
     int keyboard_pid = task_create("keyboard", keyboard_server_tick);
     int shell_pid = task_create("shell", shell_server_tick);
-    int console_pid = task_create("console", console_server_tick);
 
     service_register(SERVER_FS, fs_pid);
     service_register(SERVER_KEYBOARD, keyboard_pid);
     service_register(SERVER_SHELL, shell_pid);
-    service_register(SERVER_CONSOLE, console_pid);
+
+    /*
+     * Console server now runs as a ring-3 ELF (FASE 10.1). Spawn it
+     * via proc_execve and pre-register SERVER_CONSOLE so any IPC
+     * sent by shell_server_init below (banner / prompt) lands on
+     * the new task's queue before the scheduler ever dispatches it.
+     * The ELF also self-registers via sys_service_register on its
+     * first dispatch — idempotent, lands on the same pid.
+     */
+    int64_t consrv_pid = proc_execve("/bin/consrv", "", 0);
+    if (consrv_pid > 0) {
+        service_register(SERVER_CONSOLE, (uint64_t)consrv_pid);
+    }
 
     fs_server_init();
-    console_server_init();
     keyboard_server_init();
     shell_server_init();
 

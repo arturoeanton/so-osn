@@ -1168,6 +1168,78 @@ int64_t sys_dup2(int oldfd, int newfd) {
 }
 
 /* ------------------------------------------------------------------ */
+/* sys_ipc_send — Linux-style copy_from_user wrapper around ipc_send. */
+/* arg0 is the user pointer to a fully-formed ipc_msg_t. We always    */
+/* override the `from` field with the caller's pid so a malicious     */
+/* sender can't impersonate another service.                          */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_ipc_send(const ipc_msg_t *user_msg) {
+    if (!user_msg) return err(OSNOS_EFAULT);
+
+    ipc_msg_t kmsg;
+    if (copy_from_user(&kmsg, user_msg, sizeof(kmsg)) != OSNOS_OK) {
+        return err(OSNOS_EFAULT);
+    }
+
+    task_t *t = task_current();
+    if (t) kmsg.from = t->pid;
+
+    osnos_status_t s = ipc_send(&kmsg);
+    if (s != OSNOS_OK) return err(s);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_ipc_recv — non-blocking pop from the shared queue. If nothing  */
+/* matches the caller's pid, returns -EAGAIN so libc can spin via     */
+/* nanosleep. Always copies the full ipc_msg_t out to user.           */
+/* `blocking` arg accepted but unused today (libc handles it).        */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_ipc_recv(ipc_msg_t *user_out, int blocking) {
+    (void)blocking;
+    if (!user_out) return err(OSNOS_EFAULT);
+
+    task_t *t = task_current();
+    if (!t) return err(OSNOS_ESRCH);
+
+    ipc_msg_t kmsg;
+    if (!ipc_recv(t->pid, &kmsg)) {
+        return err(OSNOS_EAGAIN);
+    }
+    if (copy_to_user(user_out, &kmsg, sizeof(kmsg)) != OSNOS_OK) {
+        return err(OSNOS_EFAULT);
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_service_register — bind SERVER_* sid to caller's pid. The      */
+/* registry is a flat lookup keyed by sid; later registrations win.   */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_service_register(int sid) {
+    if (sid < 0 || sid >= 16) return err(OSNOS_EINVAL);
+    task_t *t = task_current();
+    if (!t) return err(OSNOS_ESRCH);
+    service_register((uint64_t)sid, t->pid);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_service_lookup — returns the pid associated with sid, or       */
+/* -ENOENT if none registered.                                        */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_service_lookup(int sid) {
+    if (sid < 0 || sid >= 16) return err(OSNOS_EINVAL);
+    uint64_t pid = service_get_pid((uint64_t)sid);
+    if (pid == 0) return err(OSNOS_ENOENT);
+    return (int64_t)pid;
+}
+
+/* ------------------------------------------------------------------ */
 /* sys_taskinfo — read-only inspection of a task slot. Safe to expose */
 /* to ring 3: copies a small struct out, hides kernel-internal fields */
 /* like saved iret frames, kstacks, and pml4 pointers.                */
@@ -1662,6 +1734,15 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
                 (int)frame->rdi, (int)frame->rsi));
         case SYS_PIPE:
             return pack(sys_pipe((int *)frame->rdi));
+        case SYS_IPC_SEND:
+            return pack(sys_ipc_send((const ipc_msg_t *)frame->rdi));
+        case SYS_IPC_RECV:
+            return pack(sys_ipc_recv(
+                (ipc_msg_t *)frame->rdi, (int)frame->rsi));
+        case SYS_SERVICE_REGISTER:
+            return pack(sys_service_register((int)frame->rdi));
+        case SYS_SERVICE_LOOKUP:
+            return pack(sys_service_lookup((int)frame->rdi));
         case SYS_TASKINFO:
             return pack(sys_taskinfo(
                 (size_t)frame->rdi,

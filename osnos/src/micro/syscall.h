@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "../include/osnos_ipc_abi.h"
 #include "../include/osnos_stat.h"
 
 /*
@@ -50,8 +51,12 @@
 #define SYS_SETSOCKOPT 54
 
 /* osnos-specific (above 250 to dodge Linux's #201 = time, #228 = clock_gettime). */
-#define SYS_ISATTY      250
-#define SYS_TASKINFO    265
+#define SYS_ISATTY            250
+#define SYS_IPC_SEND          260
+#define SYS_IPC_RECV          261
+#define SYS_SERVICE_REGISTER  262
+#define SYS_SERVICE_LOOKUP    263
+#define SYS_TASKINFO          265
 
 /*
  * Saved user GPR set, pushed by int80_entry / syscall_entry on every
@@ -219,6 +224,28 @@ int64_t sys_pipe    (int *pipefd);
  */
 struct osnos_taskinfo;
 int64_t sys_taskinfo(size_t idx, struct osnos_taskinfo *out);
+
+/*
+ * IPC syscalls (FASE 10.1+). The kernel keeps its internal `ipc_send`
+ * / `ipc_recv_block` for the in-process server queue; these are the
+ * ring-3 facing equivalents.
+ *
+ *   sys_ipc_send(msg)      — copy_from_user the wire-shape `ipc_msg_t`
+ *                            and enqueue it. Returns 0 / -EAGAIN
+ *                            (queue full) / -ESRCH (no such service).
+ *   sys_ipc_recv(out, blk) — pop the next message addressed to
+ *                            task_current()->pid. Today blk is
+ *                            ignored — libc loops on EAGAIN with
+ *                            nanosleep so blocking is cheap to add
+ *                            without saving iret state in the kernel.
+ *   sys_service_register(sid) — bind SERVER_* sid to caller's pid.
+ *                            Idempotent; replaces any prior owner.
+ *   sys_service_lookup(sid)  — returns pid or -ENOENT.
+ */
+int64_t sys_ipc_send         (const ipc_msg_t *user_msg);
+int64_t sys_ipc_recv         (ipc_msg_t *user_out, int blocking);
+int64_t sys_service_register (int sid);
+int64_t sys_service_lookup   (int sid);
 
 /*
  * Minimal fcntl(2). Supported cmds:
