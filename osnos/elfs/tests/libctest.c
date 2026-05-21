@@ -265,6 +265,77 @@ int main(int argc, char **argv) {
               clock_gettime(99, &ts) == -1 && errno == EINVAL);
     }
 
+    /* ---------------- dup / dup2 / fcntl ---------------- */
+    {
+        const char *path = "/tmp/libctest-dup.txt";
+        FILE *fp = fopen(path, "w");
+        if (fp) { fwrite("abc", 1, 3, fp); fclose(fp); }
+
+        int fd = open(path, O_RDONLY);
+        check("dup-base-open",  fd >= 3);
+        int dfd = dup(fd);
+        check("dup-fresh-fd",   dfd >= 3 && dfd != fd);
+
+        /* Both fds can read; dup'd one starts from offset 0. */
+        char a[4] = {0}, b[4] = {0};
+        check("dup-read-base",  read(fd, a, 3) == 3);
+        check("dup-read-clone", read(dfd, b, 3) == 3);
+        check("dup-same-bytes", a[0]=='a' && b[0]=='a');
+
+        int target = 15;
+        check("dup2-to-target", dup2(fd, target) == target);
+        check("dup2-self-noop", dup2(fd, fd)   == fd);
+
+        errno = 0;
+        check("dup-bad-fd",
+              dup(9999) == -1 && errno == EBADF);
+
+        int fl = fcntl(fd, F_GETFL, 0);
+        check("fcntl-getfl",   fl >= 0);
+        check("fcntl-setfl",   fcntl(fd, F_SETFL, O_NONBLOCK) == 0);
+        check("fcntl-roundtrip",
+              (fcntl(fd, F_GETFL, 0) & O_NONBLOCK) != 0);
+        check("fcntl-getfd-zero", fcntl(fd, F_GETFD, 0) == 0);
+
+        errno = 0;
+        check("fcntl-bogus-cmd",
+              fcntl(fd, 99, 0) == -1 && errno == EINVAL);
+
+        close(dfd);
+        close(target);
+        close(fd);
+        unlink(path);
+    }
+
+    /* ---------------- mkstemp / tmpfile ---------------- */
+    {
+        char tmpl[] = "/tmp/lctXXXXXX";
+        int fd = mkstemp(tmpl);
+        check("mkstemp-fd",      fd >= 3);
+        /* "/tmp/lct" = 8 chars; XXXXXX sits at indices 8..13. */
+        check("mkstemp-rewrote",
+              tmpl[8] != 'X' && tmpl[13] != 'X');
+        /* Verify the file exists. */
+        struct stat st;
+        check("mkstemp-stat",    stat(tmpl, &st) == 0);
+        close(fd);
+        unlink(tmpl);
+
+        /* Bad template */
+        errno = 0;
+        char bad[] = "/tmp/no-x";
+        check("mkstemp-einval",
+              mkstemp(bad) == -1 && errno == EINVAL);
+
+        /* tmpfile */
+        FILE *tf = tmpfile();
+        check("tmpfile-non-null", tf != NULL);
+        if (tf) {
+            check("tmpfile-write", fwrite("xx", 1, 2, tf) == 2);
+            fclose(tf);
+        }
+    }
+
     /* ---------------- summary ---------------- */
     printf("== %d passed, %d failed ==\n", pass_count, fail_count);
     return fail_count == 0 ? 0 : 1;

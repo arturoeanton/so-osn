@@ -45,6 +45,25 @@ void fd_free(int fd);
 osnos_fd_t *fd_get(int fd);
 
 /*
+ * Duplicate an existing fd into a fresh slot. The clone gets a copy
+ * of the source's flags, path, type bits, and (importantly) a
+ * snapshot of its current offset — i.e. they don't share an "open
+ * file description". POSIX-strict dup expects shared offsets; that
+ * needs a separate file-description refcount layer (TODO).
+ *
+ *   fd_dup(src)           — find any free fd >= 3.
+ *   fd_dup_min(src, min)  — find the lowest free fd >= min (F_DUPFD).
+ *   fd_dup2(src, target)  — copy into specific target; closes target
+ *                            first if it was open. src==target is a
+ *                            no-op (POSIX).
+ *
+ * All three return the new fd on success, -1 on failure.
+ */
+int fd_dup     (int src);
+int fd_dup_min (int src, int min_fd);
+int fd_dup2    (int src, int target);
+
+/*
  * stdin ring buffer. keyboard_server pushes printable chars and '\n';
  * sys_read(0, ...) pops. Bounded — overflow drops oldest. Non-blocking.
  */

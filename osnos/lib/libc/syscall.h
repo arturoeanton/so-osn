@@ -25,7 +25,10 @@
 #define SYS_BRK       12
 #define SYS_IOCTL     16
 #define SYS_EXECVE    59
+#define SYS_DUP       32
+#define SYS_DUP2      33
 #define SYS_NANOSLEEP 35
+#define SYS_FCNTL     72
 #define SYS_TIME     201
 #define SYS_CLOCK_GETTIME 228
 #define SYS_GETPID    39

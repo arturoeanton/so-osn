@@ -18,7 +18,10 @@
 #define SYS_FSTAT     5
 #define SYS_LSEEK     8
 #define SYS_BRK      12
+#define SYS_DUP      32
+#define SYS_DUP2     33
 #define SYS_NANOSLEEP 35
+#define SYS_FCNTL    72
 #define SYS_GETPID   39
 #define SYS_EXIT     60
 #define SYS_KILL     62
@@ -172,6 +175,28 @@ int64_t sys_time    (int64_t *t);
  * (0) and CLOCK_MONOTONIC (1) are recognised; both return ticks
  * since boot (no RTC). Writes a struct timespec to user memory. */
 int64_t sys_clock_gettime(int clk_id, void *tp);
+
+/*
+ * dup / dup2. Both return the new fd on success, -1 on error. Today
+ * the clone gets a copy of the source's struct — they share path
+ * and flags, but offsets diverge after the dup (POSIX-strict dup
+ * requires a shared "open file description" which we don't have).
+ */
+int64_t sys_dup     (int fd);
+int64_t sys_dup2    (int oldfd, int newfd);
+
+/*
+ * Minimal fcntl(2). Supported cmds:
+ *   F_DUPFD (0) — dup with min fd arg.
+ *   F_GETFD (1) — close-on-exec flag (always 0; we don't have CLOEXEC).
+ *   F_SETFD (2) — accepted but ignored.
+ *   F_GETFL (3) — returns the fd's flags.
+ *   F_SETFL (4) — updates the editable subset (O_APPEND, O_NONBLOCK).
+ *                 Note: today neither flag changes runtime behaviour
+ *                 of read/write — they are stored for future use.
+ * Any other cmd returns -EINVAL.
+ */
+int64_t sys_fcntl   (int fd, int cmd, int64_t arg);
 
 /*
  * Linux socket layer. Only AF_INET (2) + SOCK_DGRAM (2) lit up for now;

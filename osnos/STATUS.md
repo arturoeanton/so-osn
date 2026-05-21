@@ -10,6 +10,7 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| Libc gaps 4+5+6 | dup/dup2 (#32/#33), fcntl básico (#72), mkstemp/tmpfile | 220 |
 | Libc gaps 1+2+3 | strerror completo (33 errnos), stat(path)/access, time/clock_gettime, fix nlink_t ABI | 250 |
 | Arrow keys + getcwd/chdir | keyboard_server → ESC[A-D al TTY; SYS_GETCWD/CHDIR per-task | 120 |
 | /bin/ovi | editor modal vim-style (hjkl + flechas, i/a/o, x/dd, :w/:q/:wq) + VT100 mínimo + TIOCGWINSZ + SGR reverse | 500 |
@@ -28,10 +29,11 @@ POSIX, y un shell con history + rc files.
 | FASE 7 | libc + ELF ring-3 + crt0 + 25 tools | 1500 |
 | FASE 2-6 | VFS + microkernel + IPC + paging + ELF | 2500 |
 
-**Tests**: 615/615 pass (KHEAP + SLAB + SOCK + VFS + libc + ramfs + FAT
-+ STAT/ACCESS + TIME/CLOCK). Idempotente — `test` se puede correr N
-veces seguidas sin falsos negativos. libctest ELF user-side cubre
-strerror/stat/access/time/clock_gettime libc-side.
+**Tests**: 624/624 pass (KHEAP + SLAB + SOCK + VFS + libc + ramfs +
+FAT + STAT/ACCESS + TIME/CLOCK + DUP/DUP2 + FCNTL). Idempotente —
+`test` se puede correr N veces seguidas sin falsos negativos.
+libctest ELF user-side cubre strerror/stat/access/time/clock_gettime
++ dup/fcntl/mkstemp/tmpfile libc-side.
 
 **Demos que funcionan end-to-end** (compilan código upstream sin
 modificar): `selectserver.c` de Beej, curl/Firefox contra
@@ -45,7 +47,10 @@ canonical/raw, /home persistente cross-reboot.
 - fork() real (sin fork hoy)
 - write con offset real (hoy sys_write→vfs_append; lseek+write no
   reescribe a mitad de archivo — requiere `vfs_write_at` por backend)
-- dup/dup2, fcntl (F_GETFL/F_SETFL/F_DUPFD), mkstemp/tmpfile
+- Open file description shared offsets para dup POSIX-strict
+- O_NONBLOCK runtime real (hoy fcntl lo almacena pero sys_read/write
+  no lo respetan)
+- tmpfile unlink-on-close (necesita anonymous FD layer)
 - RTC real (hoy time/clock_gettime = segundos desde boot)
 - IPv6, TLS, DHCP (en ROADMAP_APENDICE.md)
 
@@ -1596,6 +1601,66 @@ OK .history (historial persistente) + .oshrc (startup script)
      Tipo en un boot, recuperá con flecha ↑ tras reboot. .oshrc
      queda como el lugar natural para "cd a tu workdir" o
      "export VARS" automáticos.
+
+### FASE Libc gaps 4+5+6 — CERRADA
+OK dup / dup2 — Linux syscalls #32 / #33
+   - **src/micro/fd.{c,h}**: tres helpers nuevos sobre la fd table
+     existente:
+     - `fd_dup(src)` — alloca el primer slot libre >= 3 y copia el
+       struct.
+     - `fd_dup_min(src, min_fd)` — variante para F_DUPFD: busca el
+       slot más bajo >= min_fd.
+     - `fd_dup2(src, target)` — escribe en un slot específico;
+       cierra el target si estaba abierto. `src == target` es
+       no-op POSIX.
+   - **Limitación documentada**: el clon recibe una COPIA de
+     `path/flags/offset`. POSIX-strict dup requiere "open file
+     description" compartida (mismo offset). Eso necesita un
+     refcount separado de la fd table — TODO. En la práctica
+     todos los user-mode redirection patterns (e.g. `dup2(fd, 1)`
+     antes de exec) funcionan porque escriben/leen secuencialmente
+     vía el mismo path.
+   - **sys_dup/sys_dup2** envuelven los helpers y devuelven EBADF
+     en caso de fd inválido.
+
+OK fcntl básico — Linux syscall #72
+   - **Comandos soportados**: F_DUPFD (0), F_GETFD (1), F_SETFD (2),
+     F_GETFL (3), F_SETFL (4). Cualquier otro → -EINVAL.
+   - F_GETFD/F_SETFD: aceptan/devuelven 0 (sin FD_CLOEXEC todavía).
+   - F_GETFL: retorna `f->flags` (los flags pasados a open).
+   - F_SETFL: actualiza solo el mutable_mask = O_APPEND | O_NONBLOCK.
+     Los flags de access mode + O_CREAT/O_EXCL/O_TRUNC quedan
+     inmutables (POSIX correcto).
+   - **Caveat documentado**: hoy O_NONBLOCK se almacena pero NO
+     afecta el runtime de sys_read/sys_write. Para que tenga efecto
+     real, los syscalls tendrían que chequear `f->flags & O_NONBLOCK`
+     y devolver EAGAIN inmediato sin loop. Esto es trivial de
+     agregar más adelante; por ahora la API queda lista.
+
+OK mkstemp / tmpfile (libc)
+   - **lib/libc/stdlib.c**: `mkstemp(char *tmpl)` rewrites the
+     trailing "XXXXXX" con un sufijo base-36 (seed = `time() *
+     65537 + getpid() * 7919 + counter`). Loop hasta 100 attempts
+     con O_RDWR | O_CREAT | O_EXCL; primera EEXIST → retry con
+     nuevo seed; otro error → return -1 + errno.
+   - **lib/libc/stdio.c**: `tmpfile()` llama mkstemp con template
+     "/tmp/tmpf-XXXXXX" + wrap_fd() helper compartido con fopen.
+   - **Limitación documentada**: el archivo NO se borra
+     automáticamente al fclose (POSIX exige unlink-on-close vía
+     "open file description anónima"). Cleanup queda como
+     responsabilidad del caller — pair con `remove()` cuando
+     se necesite.
+   - **errno.h**: O_NONBLOCK (04000) agregado al fcntl.h libc.
+
+OK Test suite +28 checks
+   - **cmd_test (kernel)**: 9 nuevos para DUP/DUP2/FCNTL (open base,
+     dup fresh fd, dup2 target/self, fcntl F_GETFL/F_SETFL roundtrip,
+     bad fd / cmd cases).
+   - **elfs/tests/libctest.c**: 19 nuevos para dup/dup2/fcntl/
+     mkstemp/tmpfile (dup-read both ways, dup-bad-fd EBADF,
+     fcntl-roundtrip O_NONBLOCK, mkstemp-rewrote/stat,
+     mkstemp-einval, tmpfile-write).
+   - Total ahora: **624 / 624 pass**, idempotente.
 
 ### FASE Libc gaps 1+2+3 — CERRADA
 OK strerror completo (33 entries)

@@ -72,6 +72,61 @@ osnos_fd_t *fd_get(int fd) {
     return &fds[fd];
 }
 
+/*
+ * Internal copy helper. Replicates `src` into `dst` (which must point
+ * at an UNUSED slot — caller decides whether to free first). The
+ * copy is shallow: path string and flags are duplicated, but there's
+ * no shared "open file description" so offsets diverge from here on.
+ */
+static void fd_copy_struct(osnos_fd_t *dst, const osnos_fd_t *src) {
+    dst->used       = true;
+    dst->is_special = src->is_special;
+    dst->is_dir     = src->is_dir;
+    dst->is_socket  = src->is_socket;
+    dst->sock_idx   = src->sock_idx;
+    dst->flags      = src->flags;
+    dst->offset     = src->offset;
+    for (int i = 0; i < OSNOS_PATH_MAX; i++) dst->path[i] = src->path[i];
+}
+
+int fd_dup(int src) {
+    return fd_dup_min(src, 3);
+}
+
+int fd_dup_min(int src, int min_fd) {
+    osnos_fd_t *s = fd_get(src);
+    if (!s) return -1;
+    if (min_fd < 0) min_fd = 0;
+    /* Special fds 0/1/2 are always live and can't be reused as a
+     * dup target — start the scan at max(3, min_fd). */
+    if (min_fd < 3) min_fd = 3;
+    for (int i = min_fd; i < OSNOS_MAX_FDS; i++) {
+        if (!fds[i].used) {
+            fd_copy_struct(&fds[i], s);
+            return i;
+        }
+    }
+    return -1;
+}
+
+int fd_dup2(int src, int target) {
+    osnos_fd_t *s = fd_get(src);
+    if (!s) return -1;
+    if (target < 0 || target >= OSNOS_MAX_FDS) return -1;
+    if (target == src) return target;
+    /* dup2 silently closes target if it was already open. The
+     * special fds 0/1/2 stay (they reset to their default open). */
+    if (target >= 3 && fds[target].used) {
+        fd_free(target);
+    } else if (target < 3) {
+        /* Replacing stdin/stdout/stderr — clobber the slot. The
+         * shell never does this today but POSIX allows it. */
+        fds[target].used = false;
+    }
+    fd_copy_struct(&fds[target], s);
+    return target;
+}
+
 /* ---- stdin shims over the TTY line discipline ----
  *
  * These wrappers keep the old fd.h API alive for callers that don't

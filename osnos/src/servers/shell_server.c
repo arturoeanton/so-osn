@@ -2318,6 +2318,44 @@ static void cmd_test(const char *args) {
               "CLOCK: bogus clk_id -> -EINVAL");
     }
 
+    /* ----- dup / dup2 / fcntl ----- */
+    {
+        int64_t base = sys_open("/test/syscall.txt", O_RDONLY, 0);
+        CHECK(base >= 3, "DUP: open returns fd >= 3");
+
+        int64_t d = sys_dup((int)base);
+        CHECK(d >= 3 && d != base, "DUP: returns fresh fd != base");
+
+        int64_t bad = sys_dup(9999);
+        CHECK(bad == -(int64_t)OSNOS_EBADF, "DUP: bad fd -> EBADF");
+
+        /* dup2 to an unused slot. */
+        int64_t target = 12;
+        int64_t r2 = sys_dup2((int)base, (int)target);
+        CHECK(r2 == target, "DUP2: returns newfd");
+        CHECK(fd_get((int)target) != 0, "DUP2: newfd is live");
+
+        /* dup2(fd, fd) is a no-op. */
+        int64_t same = sys_dup2((int)base, (int)base);
+        CHECK(same == base, "DUP2: same fd -> no-op");
+
+        /* fcntl F_GETFL returns flags; F_SETFL toggles editable bits. */
+        int64_t fl = sys_fcntl((int)base, 3 /* F_GETFL */, 0);
+        CHECK(fl >= 0, "FCNTL: F_GETFL succeeds");
+        int64_t set = sys_fcntl((int)base, 4 /* F_SETFL */,
+                                 04000 /* O_NONBLOCK */);
+        CHECK(set == 0, "FCNTL: F_SETFL succeeds");
+        int64_t fl2 = sys_fcntl((int)base, 3 /* F_GETFL */, 0);
+        CHECK((fl2 & 04000) != 0, "FCNTL: O_NONBLOCK now set");
+
+        int64_t bogus = sys_fcntl((int)base, 99 /* unknown */, 0);
+        CHECK(bogus == -(int64_t)OSNOS_EINVAL, "FCNTL: bogus cmd -> EINVAL");
+
+        sys_close((int)d);
+        sys_close((int)target);
+        sys_close((int)base);
+    }
+
     /* cleanup */
     vfs_unlink("/test/syscall.txt");
     vfs_rmdir("/test");

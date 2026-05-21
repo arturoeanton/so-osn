@@ -54,6 +54,15 @@ int   unsetenv(const char *name);
 int   putenv  (char *kv);
 
 /*
+ * mkstemp — overwrite the trailing "XXXXXX" of `template` with a
+ * unique 6-char suffix and atomically create the file with
+ * O_RDWR | O_CREAT | O_EXCL. Returns the new fd, or -1 + errno
+ * (EINVAL if template doesn't end in XXXXXX, EEXIST if all 100
+ * candidates collide). Template is modified in place.
+ */
+int   mkstemp(char *tmpl);
+
+/*
  * atexit — registers a function to run on exit(). Up to 32 slots,
  * invoked in LIFO order. Returns 0 on success, non-zero on overflow.
  */

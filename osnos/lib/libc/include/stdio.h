@@ -47,6 +47,16 @@ FILE *fopen  (const char *path, const char *mode);
 FILE *freopen(const char *path, const char *mode, FILE *f);
 int   fclose (FILE *f);
 
+/*
+ * tmpfile — open a unique file under /tmp and return a writable
+ * FILE*. NOTE: unlike POSIX, the file is NOT auto-deleted on
+ * fclose (osnos VFS resolves paths on every read/write, so an
+ * unlinked file can't be accessed via the fd). Cleanup is the
+ * caller's responsibility — pair with `mkstemp` if you need the
+ * path back.
+ */
+FILE *tmpfile(void);
+
 /* Bulk I/O --------------------------------------------------------- */
 size_t fread (void *ptr, size_t size, size_t nmemb, FILE *f);
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *f);

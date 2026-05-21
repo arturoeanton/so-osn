@@ -871,6 +871,63 @@ int64_t sys_clock_gettime(int clk_id, void *tp) {
     return 0;
 }
 
+/* fcntl cmds — Linux asm-generic/fcntl.h. */
+#define OSNOS_F_DUPFD 0
+#define OSNOS_F_GETFD 1
+#define OSNOS_F_SETFD 2
+#define OSNOS_F_GETFL 3
+#define OSNOS_F_SETFL 4
+
+/* O_APPEND and O_NONBLOCK are the only flags F_SETFL is allowed to
+ * mutate — everything else (access mode, O_CREAT, O_TRUNC, ...) is
+ * fixed at open time. */
+#define OSNOS_O_APPEND   01000   /* matches Linux's #define */
+#define OSNOS_O_NONBLOCK 04000
+
+int64_t sys_dup(int fd) {
+    int r = fd_dup(fd);
+    if (r < 0) return err(OSNOS_EBADF);
+    return r;
+}
+
+int64_t sys_dup2(int oldfd, int newfd) {
+    /* fd_dup2 validates oldfd internally; we just gate the newfd
+     * range here to surface a clean EBADF instead of -1. */
+    if (newfd < 0 || newfd >= OSNOS_MAX_FDS) return err(OSNOS_EBADF);
+    int r = fd_dup2(oldfd, newfd);
+    if (r < 0) return err(OSNOS_EBADF);
+    return r;
+}
+
+int64_t sys_fcntl(int fd, int cmd, int64_t arg) {
+    osnos_fd_t *f = fd_get(fd);
+    if (!f) return err(OSNOS_EBADF);
+
+    switch (cmd) {
+    case OSNOS_F_DUPFD: {
+        int r = fd_dup_min(fd, (int)arg);
+        if (r < 0) return err(OSNOS_EMFILE);
+        return r;
+    }
+    case OSNOS_F_GETFD:
+        /* No FD_CLOEXEC support — always 0. */
+        return 0;
+    case OSNOS_F_SETFD:
+        /* Accept any value; CLOEXEC has no observable effect. */
+        return 0;
+    case OSNOS_F_GETFL:
+        return (int64_t)f->flags;
+    case OSNOS_F_SETFL: {
+        /* Only O_APPEND + O_NONBLOCK are settable; rest stays. */
+        int mutable_mask = OSNOS_O_APPEND | OSNOS_O_NONBLOCK;
+        f->flags = (f->flags & ~mutable_mask) | ((int)arg & mutable_mask);
+        return 0;
+    }
+    default:
+        return err(OSNOS_EINVAL);
+    }
+}
+
 /*
  * Today the only ioctl device is the controlling TTY at fd 0/1/2.
  * Anything else returns -ENOTTY. termios I/O goes via copy_*_user so
@@ -1232,6 +1289,16 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
             return pack(sys_clock_gettime(
                 (int)frame->rdi,
                 (void *)frame->rsi));
+        case SYS_DUP:
+            return pack(sys_dup((int)frame->rdi));
+        case SYS_DUP2:
+            return pack(sys_dup2(
+                (int)frame->rdi, (int)frame->rsi));
+        case SYS_FCNTL:
+            return pack(sys_fcntl(
+                (int)frame->rdi,
+                (int)frame->rsi,
+                (int64_t)frame->rdx));
         case SYS_ACCEPT:
             return pack(sys_accept(
                 (int)frame->rdi,

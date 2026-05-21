@@ -32,6 +32,15 @@ int     rename(const char *oldpath, const char *newpath);
 int     access(const char *path, int mode);
 
 /*
+ * dup / dup2 — return a new fd referring to the same open file.
+ * Today the clone gets a copy of the source's flags/path but a
+ * snapshot of offset (POSIX-strict shared offsets need an "open
+ * file description" refcount that osnos doesn't have yet).
+ */
+int     dup (int fd);
+int     dup2(int oldfd, int newfd);
+
+/*
  * Linux brk(addr): set the program break to addr; returns the new
  * break, or the OLD break if the request was refused. sbrk(incr)
  * is a libc convenience that adjusts brk by incr and returns the

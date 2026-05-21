@@ -161,6 +161,24 @@ int stat(const char *path, struct stat *out) {
         osnos_syscall2(SYS_STAT, (long)abs_path, (long)out));
 }
 
+int dup(int fd) {
+    return (int)set_errno(osnos_syscall1(SYS_DUP, fd));
+}
+
+int dup2(int oldfd, int newfd) {
+    return (int)set_errno(
+        osnos_syscall2(SYS_DUP2, oldfd, newfd));
+}
+
+int fcntl(int fd, int cmd, ...) {
+    va_list ap;
+    va_start(ap, cmd);
+    long arg = va_arg(ap, long);
+    va_end(ap);
+    return (int)set_errno(
+        osnos_syscall3(SYS_FCNTL, fd, cmd, arg));
+}
+
 /*
  * brk / sbrk.
  *

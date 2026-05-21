@@ -1,8 +1,10 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "syscall.h"
@@ -396,6 +398,48 @@ int unsetenv(const char *name) {
     while (environ[i + 1]) { environ[i] = environ[i + 1]; i++; }
     environ[i] = 0;
     return 0;
+}
+
+/* ---------------------------------------------------------------- */
+/* mkstemp                                                            */
+/* ---------------------------------------------------------------- */
+
+/*
+ * Produce a 6-char alphanumeric suffix from a 32-bit seed by base-36
+ * encoding. No PRNG is required — we just spread the seed over the
+ * 6 positions, and the EEXIST retry-loop in mkstemp handles
+ * collisions. */
+static void encode_suffix(unsigned int seed, char *out6) {
+    for (int i = 0; i < 6; i++) {
+        unsigned int v = seed % 36;
+        out6[i] = (v < 10) ? (char)('0' + v) : (char)('a' + (v - 10));
+        seed = (seed / 36) ^ ((seed * 1103515245u) + 12345u);
+    }
+}
+
+int mkstemp(char *tmpl) {
+    size_t n = 0;
+    while (tmpl[n]) n++;
+    if (n < 6) { errno = EINVAL; return -1; }
+    for (int i = 0; i < 6; i++) {
+        if (tmpl[n - 6 + i] != 'X') { errno = EINVAL; return -1; }
+    }
+
+    /* Mix time + pid + counter so siblings don't collide if they
+     * call mkstemp in the same millisecond. */
+    static unsigned int counter = 0;
+    for (int attempt = 0; attempt < 100; attempt++) {
+        unsigned int seed = (unsigned int)time(0) * 65537u
+                          + (unsigned int)getpid() * 7919u
+                          + counter++;
+        encode_suffix(seed, tmpl + n - 6);
+
+        int fd = open(tmpl, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0) return fd;
+        if (errno != EEXIST) return -1;
+    }
+    errno = EEXIST;
+    return -1;
 }
 
 /* ---------------------------------------------------------------- */

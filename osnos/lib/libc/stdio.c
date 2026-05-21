@@ -183,13 +183,13 @@ static int parse_mode(const char *mode) {
     return flags;
 }
 
-FILE *fopen(const char *path, const char *mode) {
-    int flags = parse_mode(mode);
-    if (flags < 0) { errno = EINVAL; return NULL; }
-    int fd = open(path, flags, 0644);
-    if (fd < 0) return NULL;
+/*
+ * Wrap a raw fd in a FILE*. Shared init between fopen and tmpfile.
+ * Returns NULL on malloc failure; caller owns the fd in that case.
+ */
+static FILE *wrap_fd(int fd) {
     FILE *f = (FILE *)malloc(sizeof(FILE));
-    if (!f) { close(fd); errno = ENOMEM; return NULL; }
+    if (!f) { errno = ENOMEM; return NULL; }
     f->fd       = fd;
     f->err      = 0;
     f->eof      = 0;
@@ -201,6 +201,32 @@ FILE *fopen(const char *path, const char *mode) {
     f->bufcap   = sizeof(f->defbuf);
     f->bufpos   = 0;
     f->buflen   = 0;
+    return f;
+}
+
+FILE *fopen(const char *path, const char *mode) {
+    int flags = parse_mode(mode);
+    if (flags < 0) { errno = EINVAL; return NULL; }
+    int fd = open(path, flags, 0644);
+    if (fd < 0) return NULL;
+    FILE *f = wrap_fd(fd);
+    if (!f) { close(fd); return NULL; }
+    return f;
+}
+
+FILE *tmpfile(void) {
+    /* mkstemp creates /tmp/tmpf-XXXXXX with O_RDWR | O_CREAT |
+     * O_EXCL. The file is NOT auto-deleted on fclose (see header
+     * comment) — that needs an "open file description" decoupled
+     * from the path, which osnos VFS doesn't have. */
+    mkdir("/tmp", 0755);   /* idempotent: ignore EEXIST */
+    char tmpl[32];
+    const char *t = "/tmp/tmpf-XXXXXX";
+    int i = 0; while (t[i]) { tmpl[i] = t[i]; i++; } tmpl[i] = 0;
+    int fd = mkstemp(tmpl);
+    if (fd < 0) return NULL;
+    FILE *f = wrap_fd(fd);
+    if (!f) { close(fd); return NULL; }
     return f;
 }
 
