@@ -3767,6 +3767,16 @@ void shell_server_tick(void) {
         return;
     }
 
+    /*
+     * Drop unhandled control characters (< 0x20) so they don't end up
+     * in the line buffer. The TTY signal layer (VINTR, VSUSP, VQUIT,
+     * etc.) already swallowed the ones it cared about — but the
+     * keyboard server still fires IPC_KEY_EVENT for every keystroke,
+     * so Ctrl+Z (0x1A) or Ctrl+D (0x04) would otherwise leak in as
+     * an invisible glyph that breaks the next command.
+     */
+    if ((unsigned char)c < 0x20) return;
+
     if (input_len < OSNOS_INPUT_MAX - 1) {
         input[input_len++] = c;
         char s[2] = { c, 0 };
