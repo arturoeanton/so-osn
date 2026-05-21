@@ -27,6 +27,7 @@
 #define SYS_SERVICE_REGISTER  262
 #define SYS_SERVICE_LOOKUP    263
 #define SYS_TTY_INPUT         264
+#define SYS_SPAWN             266
 #endif
 
 /*
@@ -97,4 +98,22 @@ static inline long ipc_tty_input(int c) {
     long r = osnos_syscall1(SYS_TTY_INPUT, c);
     if (r < 0) { errno = (int)(-r); return -1; }
     return 0;
+}
+
+/*
+ * osn_spawn — fork-and-exec replacement for ring-3 tasks (FASE 10.4
+ * pre-req). Creates a child task running `path` with `args` and the
+ * packed `envp_flat` ("KEY=VAL\0KEY=VAL\0\0") or NULL. fd inheritance:
+ * if `stdin_fd` / `stdout_fd` are >= 0 they MUST be open fds in the
+ * caller's table; their slots are MOVED into the child's fds[0]/[1]
+ * and zeroed in the caller. Returns child pid on success.
+ */
+static inline long osn_spawn(const char *path, const char *args,
+                              const char *envp_flat,
+                              int stdin_fd, int stdout_fd) {
+    long r = osnos_syscall5(SYS_SPAWN,
+                            (long)path, (long)args, (long)envp_flat,
+                            (long)stdin_fd, (long)stdout_fd);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return r;
 }

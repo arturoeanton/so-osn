@@ -145,6 +145,7 @@ DECLARE_ELF(pipetest);
 DECLARE_ELF(fbtest);
 DECLARE_ELF(inputtest);
 DECLARE_ELF(kerntest);
+DECLARE_ELF(spawntest);
 DECLARE_ELF(consrv);
 DECLARE_ELF(kbdsrv);
 
@@ -213,6 +214,7 @@ static const builtin_t builtins[] = {
     ELF(fbtest,       "write a line to /dev/fb0 (FASE 10.0.c)"),
     ELF(inputtest,    "read 5 keystrokes from /dev/input0 (FASE 10.0.c)"),
     ELF(kerntest,     "FASE 10 ABI userland tests (sys_taskinfo, dev, pipe, dup)"),
+    ELF(spawntest,    "exercise SYS_SPAWN + fd inheritance (FASE 10.4 prereq)"),
     ELF(consrv,       "console server ring-3 (FASE 10.1) — spawned by kmain"),
     ELF(kbdsrv,       "keyboard policy server ring-3 (FASE 10.2) — spawned by kmain"),
 };

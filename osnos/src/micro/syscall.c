@@ -1256,6 +1256,88 @@ int64_t sys_tty_input(int c) {
 }
 
 /* ------------------------------------------------------------------ */
+/* sys_spawn — ring-3 wrapper for proc_execve with optional fd        */
+/* inheritance. Used by the future ring-3 shell (FASE 10.4) to set up */
+/* pipelines + redirects before exec'ing children.                    */
+/* ------------------------------------------------------------------ */
+
+#define SYS_SPAWN_ENVP_MAX 32
+
+int64_t sys_spawn(const char *path, const char *args,
+                   const char *envp_flat,
+                   int stdin_fd, int stdout_fd) {
+    if (!path) return err(OSNOS_EFAULT);
+    if (!args) args = "";
+
+    /* Validate the caller's fds before spawning so a bad fd doesn't
+     * leave a half-created child behind. */
+    task_t *caller = task_current();
+    if (!caller) return err(OSNOS_ESRCH);
+    osnos_fd_t *src_in  = (stdin_fd  >= 0) ? fd_get(caller, stdin_fd)  : 0;
+    osnos_fd_t *src_out = (stdout_fd >= 0) ? fd_get(caller, stdout_fd) : 0;
+    if (stdin_fd  >= 0 && !src_in)  return err(OSNOS_EBADF);
+    if (stdout_fd >= 0 && !src_out) return err(OSNOS_EBADF);
+
+    /* Unpack the flat envp blob into a temporary pointer array that
+     * proc_execve / build_argv_block can iterate. The strings stay
+     * pointing into user memory; proc_execve copies them onto the
+     * child's user stack so the caller is free to release the
+     * buffer after return. */
+    const char *envp_arr[SYS_SPAWN_ENVP_MAX + 1];
+    int envp_n = 0;
+    if (envp_flat) {
+        const char *p = envp_flat;
+        while (*p && envp_n < SYS_SPAWN_ENVP_MAX) {
+            envp_arr[envp_n++] = p;
+            while (*p) p++;
+            p++;
+        }
+    }
+    envp_arr[envp_n] = 0;
+
+    int64_t pid = proc_execve(path, args, envp_n > 0 ? envp_arr : 0);
+    if (pid < 0) return pid;
+
+    /* Child was created in READY state but hasn't been dispatched
+     * yet, so its fds[] still hold the fd_init_for_task defaults.
+     * Move the requested slots in now: copy the full osnos_fd_t,
+     * clear the caller's slot WITHOUT calling pipe_close_*. The
+     * resource (pipe end, socket, file) is unchanged — ownership
+     * has just transferred from caller to child. */
+    task_t *child = task_by_pid((uint64_t)pid);
+    if (!child) return pid;   /* defensive, shouldn't trigger */
+
+    if (src_in) {
+        child->fds[OSNOS_FD_STDIN] = *src_in;
+        osnos_fd_t *cf = &caller->fds[stdin_fd];
+        cf->used      = false;
+        cf->is_pipe   = false;
+        cf->is_socket = false;
+        cf->is_chr    = false;
+        cf->is_dir    = false;
+        cf->is_special= false;
+        cf->pipe_ref  = 0;
+        cf->sock_idx  = -1;
+        cf->path[0]   = 0;
+    }
+    if (src_out) {
+        child->fds[OSNOS_FD_STDOUT] = *src_out;
+        osnos_fd_t *cf = &caller->fds[stdout_fd];
+        cf->used      = false;
+        cf->is_pipe   = false;
+        cf->is_socket = false;
+        cf->is_chr    = false;
+        cf->is_dir    = false;
+        cf->is_special= false;
+        cf->pipe_ref  = 0;
+        cf->sock_idx  = -1;
+        cf->path[0]   = 0;
+    }
+
+    return pid;
+}
+
+/* ------------------------------------------------------------------ */
 /* sys_taskinfo — read-only inspection of a task slot. Safe to expose */
 /* to ring 3: copies a small struct out, hides kernel-internal fields */
 /* like saved iret frames, kstacks, and pml4 pointers.                */
@@ -1761,6 +1843,13 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
             return pack(sys_service_lookup((int)frame->rdi));
         case SYS_TTY_INPUT:
             return pack(sys_tty_input((int)frame->rdi));
+        case SYS_SPAWN:
+            return pack(sys_spawn(
+                (const char *)frame->rdi,
+                (const char *)frame->rsi,
+                (const char *)frame->rdx,
+                (int)frame->r10,
+                (int)frame->r8));
         case SYS_TASKINFO:
             return pack(sys_taskinfo(
                 (size_t)frame->rdi,

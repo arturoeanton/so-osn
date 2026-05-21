@@ -58,6 +58,7 @@
 #define SYS_SERVICE_LOOKUP    263
 #define SYS_TTY_INPUT         264
 #define SYS_TASKINFO          265
+#define SYS_SPAWN             266
 
 /*
  * Saved user GPR set, pushed by int80_entry / syscall_entry on every
@@ -255,6 +256,31 @@ int64_t sys_service_lookup   (int sid);
  * other callers get -EPERM so a random ELF can't inject keystrokes.
  */
 int64_t sys_tty_input(int c);
+
+/*
+ * SYS_SPAWN — ring-3-callable wrapper for proc_execve with optional
+ * fd inheritance for stdin/stdout. Designed for the future ring-3
+ * shell (FASE 10.4) which needs to set up pipelines + redirects
+ * before exec'ing children.
+ *
+ * Args:
+ *   path        — /bin/<name> or VFS path; same shape as proc_execve.
+ *   args        — single argv string, space-separated (parsed by
+ *                 crt0 like the existing builtin path).
+ *   envp_flat   — packed envp ("KEY1=VAL1\0KEY2=VAL2\0\0") or NULL.
+ *                 The kernel rebuilds a NULL-terminated char** array
+ *                 from this and forwards to proc_execve.
+ *   stdin_fd    — fd in CALLER's table to wire as child's fd 0, or
+ *                 -1 to leave child's stdin as the default. The slot
+ *                 is MOVED (caller's slot cleared, child takes over).
+ *   stdout_fd   — same for child's fd 1.
+ *
+ * Returns child pid (>0) or -errno. On any failure the child is not
+ * created and caller's fd slots are left untouched.
+ */
+int64_t sys_spawn(const char *path, const char *args,
+                   const char *envp_flat,
+                   int stdin_fd, int stdout_fd);
 
 /*
  * Minimal fcntl(2). Supported cmds:

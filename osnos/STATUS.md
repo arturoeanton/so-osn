@@ -10,6 +10,7 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| FASE 10.4-prep SYS_SPAWN | SYS_SPAWN=266 con fd inheritance (stdin_fd/stdout_fd del caller → child fds[0]/[1], slots MOVED). libc osn_spawn() wrapper. /bin/spawntest valida pipe+spawn+read child output 5/5 PASS. Habilita al shell ring-3 (10.4) a wirear pipes + redirects sin necesitar fork(2) | 200 |
 | FASE 10.3 fs_server eliminado | shell_send_fs1/fs2 ahora llaman vfs_* sincronamente + imprimen amarillo inline (sin IPC roundtrip). IPC_FS_RESPONSE handler removido del shell. **Borrados**: src/servers/fs_server.{c,h} (-240 LOC) + src/servers/console_server.{c,h} (-50 LOC) + int80 console_server_tick hack (-7 LOC). kmain sin fs_pid ni fs_server_init. SERVER_FS ID reservado en ABI pero no se registra | -290 |
 | FASE 10.2 keyboard_server ring-3 | **Segundo server en ring 3** (checkpoint pasado). SYS_TTY_INPUT=264 con guard solo-SERVER_KEYBOARD. Kernel keyboard_server.c reducido a feeder mínimo (poll + devfs_input_push). elfs/osn-server/kbdsrv.c (~90 LOC): lee /dev/input0, dispatch CSI arrows + sys_tty_input + ipc_send a shell. ipc_tty_input wrapper en libc. Comportamiento user-visible idéntico — typing, Ctrl+C/Z, arrow keys, ovi raw mode | 200 |
 | FASE 10.1 console_server ring-3 | **Primer server en ring 3**. SYS_IPC_SEND/RECV/SERVICE_REGISTER/LOOKUP (260-263). lib/libc/include/osnos_ipc.h con ipc_send/recv/recv_block/service_*. elfs/osn-server/consrv.c (~70 LOC): open(/dev/fb0)+register+loop. Framebuffer parser CSI extendido a truecolor SGR 38;2;R;G;B. kmain pre-registra SERVER_CONSOLE→pid del ELF antes de spawn shell. ps muestra consrv BLOCKED con dispatches > 1000 | 350 |
@@ -64,7 +65,7 @@ canonical/raw, /home persistente cross-reboot.
   terminales (job control real ya está)
 - Process groups + sessions POSIX-strict (hoy job control usa
   pid 1-to-1 vía fg_pid; pgid/sid no existen)
-- FASE 10 (servers a ring 3 en elfs/osn-server/) — **en curso**, ver PLAN_FASE10.md (10.0 + 10.1 + 10.2 + 10.3 cerradas; próxima: 10.4 shell_server ring-3, el grande ~4-5 hr). El port completo de cmd_test queda postergado a 10.4 (los checks kernel-internos se quedan en cmd_test del shell por ahora; /bin/kerntest cubre la cara user-visible)
+- FASE 10 (servers a ring 3 en elfs/osn-server/) — **en curso**, ver PLAN_FASE10.md (10.0 + 10.1 + 10.2 + 10.3 + 10.4-prep cerradas; próxima sesión: 10.4 propiamente — migrar shell_server.c a /bin/shellsrv, ~4-5 hr). cmd_test legacy queda en shell ring-0 hasta 10.4 (los checks kernel-internos no portables se cambian por sys_taskinfo donde apliquen, el resto se borra).
 - fork() real (sin fork hoy)
 - Pipelines con más de 4 stages (hoy MAX_PIPELINE_STAGES=4)
 - Shell builtins (cat/ls/...) que respeten redirects sin
