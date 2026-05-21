@@ -6,6 +6,8 @@
 #include <string.h>
 #include <sys/socket.h>
 
+#include "resolver.h"
+
 /*
  * getaddrinfo / freeaddrinfo / gai_strerror.
  *
@@ -60,8 +62,14 @@ int getaddrinfo(const char *node, const char *service,
         ip = (flags & AI_PASSIVE) ? htonl(INADDR_ANY) : htonl(INADDR_LOOPBACK);
     } else {
         struct in_addr a;
-        if (!inet_aton(node, &a)) return EAI_NONAME;
-        ip = a.s_addr;
+        if (inet_aton(node, &a)) {
+            ip = a.s_addr;
+        } else if (flags & AI_NUMERICHOST) {
+            return EAI_NONAME;
+        } else {
+            /* Hostname → DNS query to slirp's emulated resolver. */
+            if (dns_resolve_a(node, &ip) != 0) return EAI_NONAME;
+        }
     }
 
     struct addrinfo    *ai = (struct addrinfo *)malloc(sizeof *ai);

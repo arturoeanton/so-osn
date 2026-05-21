@@ -1165,8 +1165,40 @@ OK 8.5.8 TCP connect() / SYN_SENT / outbound — VERIFICADO en QEMU
    - **MILESTONE**: el surface socket completo (passive + active open
      + data + close + multiplex) está cubierto. Cualquier programa
      BSD-sockets que use IP literal compila y corre.
-TODO opcional 8.5.9 retransmisión + RTT + congestion control real
-TODO opcional 8.5.10 IPv6
+OK 8.5.9 DNS resolver + getaddrinfo con nombres — VERIFICADO en QEMU
+   - lib/libc/resolver.{c,h} (privado, no se exporta en includes/):
+     - dns_encode_name: "google.com" → "\7google\3com\0".
+     - dns_skip_name: walk de labels + soporte de compression
+       pointers (0xC0..) para parsear respuestas con name compression.
+     - dns_parse_response: valida ID match + RCODE=0; iterate
+       questions skip; en answers, primer TYPE=1 (A) record →
+       extrae IPv4 en network byte order.
+     - dns_resolve_a: UDP socket, query con QTYPE=A QCLASS=IN a
+       slirp DNS 10.0.2.3:53. Recv con select(timeout=3s) para no
+       colgar si no hay respuesta. 512 bytes max response, TC ignorado.
+     - dns_next_id: counter seeded with getpid para no colisionar
+       entre llamadas.
+   - lib/libc/netdb.c (getaddrinfo): si inet_aton falla y
+     AI_NUMERICHOST no está set, fallback a dns_resolve_a. Hostnames
+     no resueltos devuelven EAI_NONAME como antes.
+   - tests/tcpclient.c migrado a getaddrinfo (acepta IPs literales O
+     hostnames). Mejora: si port==80, manda HTTP/1.0 GET real con
+     Host header y Connection: close, así el server (Google etc.)
+     responde. recv bounded con select(timeout=5s) para no colgar
+     en peers que no respondan inmediato. Cap de 4KB en output.
+   - Verificado: `exec /bin/tcpclient google.com 80` →
+     "connecting to 172.217.18.110:80 (resolved from google.com)" →
+     "connected!" → "sent 92 bytes" → HTML real de Google → "(peer
+     closed, 773 bytes total)". DNS + TCP + HTTP funcionando
+     end-to-end desde un hobby OS escrito en C desde cero.
+   - **MILESTONE**: tu OS puede visitar sitios web. Cualquier
+     programa BSD-sockets que use getaddrinfo/connect/recv compila
+     y resuelve nombres reales vía DNS.
+
+TODO opcional 8.5.10 retransmisión + RTT + congestion control real
+TODO opcional 8.5.11 /bin/httpd sirviendo /sd/index.html
+TODO opcional 8.5.12 /bin/wget con HTTP parsing más rico
+TODO opcional 8.5.13 IPv6
 TODO 8.5.5 TCP state machine
 TODO 8.5.6 Syscalls wireados + libc
 TODO 8.5.7 /bin/httpd sirviendo /sd/index.html
