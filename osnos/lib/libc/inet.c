@@ -142,8 +142,9 @@ int accept(int sockfd, struct sockaddr *addr, socklen_t *len) {
 }
 
 int connect(int sockfd, const struct sockaddr *addr, socklen_t len) {
-    (void)sockfd; (void)addr; (void)len;
-    return nosys_int();        /* 8.5.5d: active open */
+    long r = osnos_syscall3(SYS_CONNECT, sockfd, (long)addr, (long)len);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return 0;
 }
 
 ssize_t send(int sockfd, const void *buf, size_t len, int flags) {

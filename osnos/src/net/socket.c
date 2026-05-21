@@ -298,6 +298,59 @@ int sock_listen(int sd, int backlog) {
     return 0;
 }
 
+static uint16_t tcp_advertised_window(const sock_t *s);   /* fwd ref */
+
+int sock_connect(int sd, uint32_t dst_ip, uint16_t dst_port,
+                  uint32_t timeout_ms) {
+    sock_t *s = sock_at(sd);
+    if (!s) return -1;
+    if (s->type != OSNOS_SOCK_STREAM) return -1;
+    if (s->tcp_state != TCP_CLOSED) return -1;
+    if (dst_ip == 0 || dst_port == 0) return -1;
+
+    /* Auto-bind to an ephemeral port so the SYN has a meaningful src. */
+    if (s->local_port == 0) {
+        if (sock_bind(sd, 0, 0) != 0) return -1;
+    }
+
+    cli();
+    s->remote_ip   = dst_ip;
+    s->remote_port = dst_port;
+    s->snd_una = s->snd_nxt =
+        (uint32_t)timer_ms() + (uint32_t)sd * 1000;
+    s->rcv_nxt = 0;
+    s->tcp_state = TCP_SYN_SENT;
+    sti();
+
+    /* Fire the SYN. tcp_advertised_window reads volatile fields, no
+     * issue if it runs with the state half-set. */
+    if (!tcp_send(dst_ip, dst_port, s->local_port,
+                   s->snd_nxt, 0,
+                   TCP_FLAG_SYN, tcp_advertised_window(s),
+                   NULL, 0)) {
+        cli();
+        s->tcp_state = TCP_CLOSED;
+        s->remote_ip = 0;
+        s->remote_port = 0;
+        sti();
+        return -1;
+    }
+    s->snd_nxt++;     /* SYN consumes 1 seq */
+
+    /* Block until handshake completes. The NIC IRQ flips tcp_state to
+     * ESTABLISHED when the SYN-ACK round-trip closes, or CLOSED on RST. */
+    volatile sock_t *vs = (volatile sock_t *)s;
+    uint64_t deadline = timer_ms() + timeout_ms;
+    while (timer_ms() < deadline) {
+        if (poll_interrupted()) return -1;
+        tcp_state_t st = vs->tcp_state;
+        if (st == TCP_ESTABLISHED) return 0;
+        if (st == TCP_CLOSED)      return -1;
+    }
+    /* Timeout — leave the socket roughly intact but signal failure. */
+    return -1;
+}
+
 int sock_accept(int listen_sd,
                  uint32_t *peer_ip, uint16_t *peer_port,
                  uint32_t timeout_ms) {
@@ -503,6 +556,50 @@ void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
                           TCP_FLAG_SYN | TCP_FLAG_ACK,
                           tcp_advertised_window(c), NULL, 0);
                 c->snd_nxt++;
+            }
+            return;
+
+        case TCP_SYN_SENT:
+            if (flags & TCP_FLAG_RST) {
+                /* Connection refused. Mark CLOSED so sock_connect
+                 * can see the failure and return -1. */
+                cli();
+                s->tcp_state = TCP_CLOSED;
+                s->remote_ip = 0;
+                s->remote_port = 0;
+                sti();
+                return;
+            }
+            if ((flags & TCP_FLAG_SYN) && (flags & TCP_FLAG_ACK)) {
+                /* SYN-ACK from server. Validate, ACK back, ESTABLISHED. */
+                if (ack != s->snd_nxt) {
+                    /* Bad ACK — RST the connection. */
+                    tcp_send(src_ip, src_port, dst_port,
+                              ack, 0, TCP_FLAG_RST, 0, NULL, 0);
+                    cli();
+                    s->tcp_state = TCP_CLOSED;
+                    sti();
+                    return;
+                }
+                cli();
+                s->snd_una = ack;
+                s->rcv_nxt = seq + 1;
+                s->tcp_state = TCP_ESTABLISHED;
+                sti();
+                tcp_emit_ack(s);
+                return;
+            }
+            if (flags & TCP_FLAG_SYN) {
+                /* Simultaneous open (both sides sent SYN at once). */
+                cli();
+                s->rcv_nxt = seq + 1;
+                s->tcp_state = TCP_SYN_RCVD;
+                sti();
+                tcp_send(src_ip, src_port, dst_port,
+                          s->snd_una, s->rcv_nxt,
+                          TCP_FLAG_SYN | TCP_FLAG_ACK,
+                          tcp_advertised_window(s), NULL, 0);
+                return;
             }
             return;
 

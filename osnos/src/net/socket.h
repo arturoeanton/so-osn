@@ -75,6 +75,14 @@ bool sock_tcp_get_peer(int sd, uint32_t *ip_out, uint16_t *port_out);
 void sock_tcp_reset(int sd);
 
 /*
+ * Active open. Auto-binds to an ephemeral port if not yet bound,
+ * sends SYN, polls until ESTABLISHED or `timeout_ms` elapses. Returns
+ * 0 on success, -1 on error / timeout / RST.
+ */
+int  sock_connect(int sd, uint32_t dst_ip, uint16_t dst_port,
+                   uint32_t timeout_ms);
+
+/*
  * Stream recv. Waits up to `timeout_ms` for at least 1 byte to be
  * available. Returns:
  *    n > 0  — bytes copied

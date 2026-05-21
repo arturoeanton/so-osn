@@ -671,6 +671,23 @@ int64_t sys_listen(int fd, int backlog) {
     return 0;
 }
 
+int64_t sys_connect(int fd, const void *addr, uint32_t addrlen) {
+    osnos_fd_t *f = fd_get(fd);
+    if (!f || !f->is_socket) return err(OSNOS_EBADF);
+
+    uint32_t ip = 0;
+    uint16_t port = 0;
+    int64_t e;
+    if (!unpack_sockaddr_in(addr, addrlen, &ip, &port, &e)) return e;
+
+    /* 5-second handshake timeout — Linux default is minutes, but for
+     * a hobby stack on QEMU localhost that's overkill. */
+    if (sock_connect(f->sock_idx, ip, port, 5000) != 0) {
+        return err(OSNOS_ECONNREFUSED);
+    }
+    return 0;
+}
+
 /*
  * setsockopt: only SO_REUSEADDR (level=SOL_SOCKET=1, optname=2) is a
  * no-op success — enough to let Beej-style servers run. Other options
@@ -960,6 +977,11 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
             return pack(sys_listen(
                 (int)frame->rdi,
                 (int)frame->rsi));
+        case SYS_CONNECT:
+            return pack(sys_connect(
+                (int)frame->rdi,
+                (const void *)frame->rsi,
+                (uint32_t)frame->rdx));
         case SYS_SETSOCKOPT:
             return pack(sys_setsockopt(
                 (int)frame->rdi,

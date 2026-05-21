@@ -33,6 +33,7 @@
 #define SYS_GETDENTS 217
 #define SYS_SELECT     23
 #define SYS_SOCKET     41
+#define SYS_CONNECT    42
 #define SYS_ACCEPT     43
 #define SYS_SENDTO     44
 #define SYS_RECVFROM   45

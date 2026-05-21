@@ -1139,7 +1139,32 @@ OK 8.5.7 getaddrinfo no-DNS + /bin/selectserver — VERIFICADO en QEMU
      Linux ABI compat (números syscall, struct sockaddr_in,
      errno values, fd_set layout) se mantuvo desde FASE 4 sin grietas.
 
-TODO opcional 8.5.8 connect() / active open + DNS resolver
+OK 8.5.8 TCP connect() / SYN_SENT / outbound — VERIFICADO en QEMU
+   - State machine extiende con TCP_SYN_SENT:
+     - Recibe SYN-ACK válido (ack == snd_nxt) → ACK back, ESTABLISHED.
+     - Recibe SYN sin ACK (simultaneous open) → SYN_RCVD, SYN-ACK back.
+     - Recibe RST → CLOSED (connection refused).
+     - Bad ACK → RST + CLOSED.
+   - sock_connect(sd, dst_ip, dst_port, timeout_ms):
+     - Auto-bind a ephemeral port si no estaba bindeado.
+     - Setea remote, ISN = timer_ms + sd*1000.
+     - Manda SYN, marca SYN_SENT, snd_nxt++.
+     - Busy-poll con volatile read del tcp_state hasta ESTABLISHED
+       o CLOSED o deadline. poll_interrupted() respeta Ctrl+C.
+   - Syscall SYS_CONNECT=42 (Linux x86_64). sys_connect unpacks
+     sockaddr_in, llama sock_connect con timeout 5s, mapea a
+     ECONNREFUSED en fallo.
+   - libc inet.c: connect() pasa de stub ENOSYS a syscall real.
+   - tests/tcpclient.c (/bin/tcpclient HOST PORT): parsea dotted-quad,
+     socket(AF_INET, SOCK_STREAM), connect, send greeting, recv reply,
+     close. Demo de extremo a extremo del path activo.
+   - Verificado: Mac `nc -l 9050` + OSnOS `exec /bin/tcpclient
+     10.0.2.2 9050` → handshake limpio, Mac ve "hello from osnos",
+     reply de Mac vuelve a OSnOS. Funciona también contra IPs externas
+     vía slirp (probado conexiones outbound).
+   - **MILESTONE**: el surface socket completo (passive + active open
+     + data + close + multiplex) está cubierto. Cualquier programa
+     BSD-sockets que use IP literal compila y corre.
 TODO opcional 8.5.9 retransmisión + RTT + congestion control real
 TODO opcional 8.5.10 IPv6
 TODO 8.5.5 TCP state machine
