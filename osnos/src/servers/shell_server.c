@@ -785,7 +785,55 @@ static void strip_outer_quotes(const char **start, const char **end) {
     *end   = e;
 }
 
+/*
+ * Process backslash escapes `\n \t \r \b \\ \" \a \0` into a
+ * new buffer. Matches /bin/echo -e behaviour so the shell
+ * builtin stays in sync. `dst_size` includes the NUL.
+ */
+static size_t echo_unescape(const char *src, size_t src_len,
+                              char *dst, size_t dst_size) {
+    size_t w = 0;
+    for (size_t i = 0; i < src_len && w + 1 < dst_size; i++) {
+        if (src[i] != '\\' || i + 1 >= src_len) { dst[w++] = src[i]; continue; }
+        char next = src[++i];
+        switch (next) {
+        case 'n':  dst[w++] = '\n'; break;
+        case 't':  dst[w++] = '\t'; break;
+        case 'r':  dst[w++] = '\r'; break;
+        case 'b':  dst[w++] = '\b'; break;
+        case '\\': dst[w++] = '\\'; break;
+        case '"':  dst[w++] = '"';  break;
+        case 'a':  dst[w++] = 0x07; break;
+        case '0':  dst[w++] = '\0'; break;
+        default:
+            if (w + 1 < dst_size) dst[w++] = '\\';
+            if (w + 1 < dst_size) dst[w++] = next;
+            break;
+        }
+    }
+    dst[w] = 0;
+    return w;
+}
+
 static void cmd_echo(const char *args) {
+    /* Parse leading flags. Matches `/bin/echo`:
+     *   -e  interpret escapes (\n \t ...)
+     *   -E  literal (default)
+     *   -n  suppress trailing newline
+     * Stops at the first non-flag word so things like
+     * `echo -e -- "-n no flag"` still work.
+     */
+    int interpret = 0;
+    int newline   = 1;
+    while (args[0] == '-' && args[1] && args[2] == ' ') {
+        if      (args[1] == 'e') interpret = 1;
+        else if (args[1] == 'E') interpret = 0;
+        else if (args[1] == 'n') newline   = 0;
+        else break;
+        args += 2;
+        while (*args == ' ' || *args == '\t') args++;
+    }
+
     const char *p = args;
     const char *redir = 0;
     int append = 0;
@@ -804,13 +852,17 @@ static void cmd_echo(const char *args) {
     if (!redir) {
         char line[OSNOS_INPUT_MAX];
         size_t n = (size_t)(ce - cs);
-        if (n >= sizeof(line)) n = sizeof(line) - 1;
-        for (size_t k = 0; k < n; k++) line[k] = cs[k];
-        line[n] = 0;
+        if (interpret) {
+            n = echo_unescape(cs, n, line, sizeof(line));
+        } else {
+            if (n >= sizeof(line)) n = sizeof(line) - 1;
+            for (size_t k = 0; k < n; k++) line[k] = cs[k];
+            line[n] = 0;
+        }
 
         shell_send_console("\n");
         shell_send_console(line);
-        shell_send_console("\n");
+        if (newline) shell_send_console("\n");
         prompt();
         return;
     }
@@ -819,10 +871,16 @@ static void cmd_echo(const char *args) {
     char filename[OSNOS_NAME_MAX];
     char abs_filename[OSNOS_PATH_MAX];
 
-    size_t n = (size_t)(ce - cs);
-    if (n + 2 > sizeof(content)) n = sizeof(content) - 2;
-    for (size_t k = 0; k < n; k++) content[k] = cs[k];
-    content[n++] = '\n';
+    size_t n;
+    if (interpret) {
+        n = echo_unescape(cs, (size_t)(ce - cs),
+                           content, sizeof(content) - 1);
+    } else {
+        n = (size_t)(ce - cs);
+        if (n + 2 > sizeof(content)) n = sizeof(content) - 2;
+        for (size_t k = 0; k < n; k++) content[k] = cs[k];
+    }
+    if (newline) content[n++] = '\n';
     content[n]   = 0;
 
     /* Filename span = after `>`/`>>`, skip blanks, strip quotes. */
@@ -2925,6 +2983,61 @@ static void run_pipeline(char *stages_buf, int n_stages) {
         return;
     }
 
+    /*
+     * Per-stage state: each stage_buf slot points at the writable
+     * sub-string for that stage inside stages_buf. We need the
+     * pointer-to-each-stage before tokenisation so we can extract
+     * redirects from the FIRST (`<`) and LAST (`>`/`>>`) stages
+     * independently — extract_redir mutates the line in place, and
+     * the cursor-walk below relies on each stage being NUL-
+     * terminated already (the caller did that on `|`).
+     */
+    char *stage_buf[MAX_PIPELINE_STAGES];
+    {
+        char *p = stages_buf;
+        for (int i = 0; i < n_stages; i++) {
+            stage_buf[i] = p;
+            while (*p) p++;   /* find this stage's NUL terminator */
+            p++;              /* step over it to the next stage */
+        }
+    }
+
+    /*
+     * Pull redirects:
+     *   - first stage may have `<` (stdin from file).
+     *   - last stage may have `>` or `>>` (stdout to file).
+     *   - middle stages can't have any — error if they do.
+     * extract_redir trims the operator+path off the stage line,
+     * so the subsequent cmd/args tokenisation sees a clean buffer.
+     */
+    char stdin_path [OSNOS_PATH_MAX] = {0};
+    char stdout_path[OSNOS_PATH_MAX] = {0};
+    int  stdout_append = 0;
+
+    extract_redir(stage_buf[0], "<", stdin_path, sizeof(stdin_path));
+
+    if (extract_redir(stage_buf[n_stages - 1], ">>",
+                      stdout_path, sizeof(stdout_path))) {
+        stdout_append = 1;
+    } else {
+        extract_redir(stage_buf[n_stages - 1], ">",
+                      stdout_path, sizeof(stdout_path));
+    }
+
+    for (int i = 1; i < n_stages - 1; i++) {
+        for (const char *p = stage_buf[i]; *p; p++) {
+            if (*p == '<' || *p == '>') {
+                shell_send_console_color(
+                    "\npipe: middle stage cannot redirect\n", 0xff5555);
+                prompt();
+                return;
+            }
+        }
+    }
+
+    absolutize_redir(stdin_path,  sizeof(stdin_path));
+    absolutize_redir(stdout_path, sizeof(stdout_path));
+
     /* Tokenise: for each stage, split off the leading word as the
      * command name and keep the rest as args. resolve_bin maps
      * "cat" → "/bin/cat". */
@@ -2932,13 +3045,8 @@ static void run_pipeline(char *stages_buf, int n_stages) {
     const char  *stage_paths[MAX_PIPELINE_STAGES];
     const char  *stage_args [MAX_PIPELINE_STAGES];
 
-    /* Walk through stages_buf. `stages_buf` is a writable buffer
-     * with each stage NUL-separated already (the caller did the
-     * splitting on `|`). For each stage, trim leading whitespace,
-     * isolate the cmd token by NUL-terminating after the first
-     * whitespace, and remember the args as the tail. */
-    char *cursor = stages_buf;
     for (int i = 0; i < n_stages; i++) {
+        char *cursor = stage_buf[i];
         while (*cursor == ' ' || *cursor == '\t') cursor++;
         if (*cursor == 0) {
             shell_send_console_color("\npipe: empty stage\n", 0xff5555);
@@ -2966,11 +3074,34 @@ static void run_pipeline(char *stages_buf, int n_stages) {
         resolve_bin(cmd_start, stage_paths_buf[i], OSNOS_PATH_MAX);
         stage_paths[i] = stage_paths_buf[i];
         stage_args [i] = args_start;
+    }
 
-        /* Advance cursor past the rest of this stage to the next
-         * NUL separator (placed by the splitter). */
-        while (*cursor) cursor++;
-        cursor++;   /* step over the NUL separator */
+    /* Validate the stdin path exists (clean error before we spawn). */
+    if (stdin_path[0]) {
+        vfs_stat_t st;
+        if (vfs_stat(stdin_path, &st) != OSNOS_OK) {
+            shell_send_console_color("\npipe: stdin redirect not found: ",
+                                       0xff5555);
+            shell_send_console_color(stdin_path, 0xff5555);
+            shell_send_console("\n");
+            prompt();
+            return;
+        }
+    }
+    /* Pre-create / truncate the stdout file. POSIX `>` truncates
+     * before the pipeline starts; `>>` leaves prior content. */
+    if (stdout_path[0]) {
+        vfs_stat_t st;
+        bool exists = (vfs_stat(stdout_path, &st) == OSNOS_OK);
+        if (!exists || !stdout_append) {
+            osnos_status_t s = vfs_write(stdout_path, "", 0);
+            if (s != OSNOS_OK) {
+                shell_send_console_color("\npipe: cannot create stdout file\n",
+                                           0xff5555);
+                prompt();
+                return;
+            }
+        }
     }
 
     const char *env_snapshot[SHELL_ENV_MAX + 1];
@@ -2983,6 +3114,32 @@ static void run_pipeline(char *stages_buf, int n_stages) {
         shell_send_console_color("\npipe: spawn failed\n", 0xff5555);
         prompt();
         return;
+    }
+
+    /* Bolt the redirect paths onto the first/last stage's task
+     * struct AFTER spawning — proc_execve_pipeline already set
+     * pipe_in/pipe_out, but those tasks haven't run yet so we
+     * can mutate them safely. The kernel's sys_read/sys_write
+     * priority is pipe > file > TTY, so:
+     *   - first stage: no pipe_in (it's the head), stdin_redir
+     *     fires if set. pipe_out is its real output.
+     *   - last stage: pipe_in is its real input. stdout_redir
+     *     fires if set (no pipe_out conflicts).
+     */
+    if (stdin_path[0]) {
+        task_t *t0 = task_by_pid((uint64_t)pids[0]);
+        if (t0) {
+            os_strlcpy(t0->stdin_redir, stdin_path, OSNOS_PATH_MAX);
+            t0->stdin_redir_off = 0;
+        }
+    }
+    if (stdout_path[0]) {
+        task_t *tn = task_by_pid((uint64_t)pids[n_stages - 1]);
+        if (tn) {
+            os_strlcpy(tn->stdout_redir, stdout_path, OSNOS_PATH_MAX);
+            tn->stdout_append   = stdout_append;
+            tn->stdout_redir_off = 0;
+        }
     }
 
     /* Track upstream pids so their IPC_PROC_EXITED gets swallowed. */

@@ -10,6 +10,7 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| Pipes + redirects mezclados | `a < in.txt \| b \| c > out.txt`, middle-stage redir validado, `echo -e` shell builtin | 200 |
 | O_NONBLOCK runtime | libc cachea O_NONBLOCK per-fd; read() respeta sin syscall extra | 50 |
 | Multi-stage pipes | `a \| b \| c \| d` (hasta 4) — proc_execve_pipeline + shell N-split | 180 |
 | FXSAVE/FXRSTOR per-task | 512 B fpu_state aligned 16 en task_t, save/restore en task_run_next, printf %f | 120 |
@@ -55,10 +56,8 @@ canonical/raw, /home persistente cross-reboot.
 - fork() real (sin fork hoy)
 - pipe(2) syscall expuesto a user (necesita per-task fd tables)
 - Pipelines con más de 4 stages (hoy MAX_PIPELINE_STAGES=4)
-- Mezclar pipes con redirects: `a < in.txt | b > out.txt`
-- Shell builtins (cat/ls/echo/...) que respeten redirects (hoy
-  solo los ELFs los honran; el short-circuit en run_command salta
-  al ELF cuando hay `<`/`>` / `|`)
+- Shell builtins (cat/ls/...) que respeten redirects sin
+  short-circuit a ELF (echo ya lo hace via echo_unescape)
 - Open file description shared offsets para dup POSIX-strict
 - tmpfile unlink-on-close (necesita anonymous FD layer)
 - RTC real (hoy time/clock_gettime = segundos desde boot)
@@ -1643,6 +1642,40 @@ OK O_NONBLOCK runtime real (libc-side, sin syscall extra)
      su cache independiente. Real per-task flags están en
      osnos_fd_t.flags; el cache es una optimización para evitar
      fcntl(F_GETFL) en cada read.
+
+OK echo -e / -n (POSIX behavior)
+   - `elfs/tools/echo.c` ahora parsea flags coreutils-style.
+   - `-e`: interpreta `\n`, `\t`, `\r`, `\b`, `\\`, `\"`, `\a`, `\0`.
+     Sin esto el shell no podía emitir multilínea via echo, así que
+     pipes con `\n` separators no funcionaban.
+   - `-n`: suprime el newline trailing (`echo -n hola > f` deja
+     "hola" sin el `\n` final).
+   - `-E`: forzar literal (default, compat).
+   - Default sin flag → comportamiento previo intacto.
+   - `cmd_echo` shell-builtin replica la lógica (`-e` / `-n`)
+     porque sin `|`/`<`/`>` el dispatcher va al builtin, no al ELF.
+     `echo_unescape()` helper compartido entre el path "no
+     redirect" y "redirect a archivo".
+
+OK Pipes + redirects mezclados — run_pipeline extendido
+   - **Primer stage** puede tener `< file` (stdin desde archivo).
+   - **Último stage** puede tener `> file` o `>> file` (stdout a
+     archivo). Pre-truncate el archivo de output cuando es `>` y
+     ya existe.
+   - **Middle stages** NO permiten redirects: validación pre-spawn
+     reporta "pipe: middle stage cannot redirect" sin tocar nada.
+   - **Path resolve** a absoluto vs cwd ANTES de pasar al task —
+     `cat < x.txt` desde /home busca /home/x.txt.
+   - **Post-spawn** mete `stdin_redir` en pids[0] y `stdout_redir`
+     en pids[n-1]. La prioridad pipe > file > TTY en sys_read/
+     write deja todo coherente: primer stage no tiene pipe_in
+     (redirect gana), último stage no tiene pipe_out (redirect
+     gana). Nada conflicta.
+   - Casos validados manualmente:
+     `cat < x.txt | head -n 2`,
+     `head -n 2 > z.txt | head` (debería rechazar middle),
+     `cat < a.txt | head -n 3 | head -n 1 > b.txt` (3-stage
+     con ambos extremos redirected).
 
 ### FASE FXSAVE/FXRSTOR per-task — CERRADA
 OK Task struct field — task_t.fpu_state[512] aligned 16
