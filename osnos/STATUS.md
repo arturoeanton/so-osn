@@ -10,6 +10,7 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| FASE 10.2 keyboard_server ring-3 | **Segundo server en ring 3** (checkpoint pasado). SYS_TTY_INPUT=264 con guard solo-SERVER_KEYBOARD. Kernel keyboard_server.c reducido a feeder mínimo (poll + devfs_input_push). elfs/osn-server/kbdsrv.c (~90 LOC): lee /dev/input0, dispatch CSI arrows + sys_tty_input + ipc_send a shell. ipc_tty_input wrapper en libc. Comportamiento user-visible idéntico — typing, Ctrl+C/Z, arrow keys, ovi raw mode | 200 |
 | FASE 10.1 console_server ring-3 | **Primer server en ring 3**. SYS_IPC_SEND/RECV/SERVICE_REGISTER/LOOKUP (260-263). lib/libc/include/osnos_ipc.h con ipc_send/recv/recv_block/service_*. elfs/osn-server/consrv.c (~70 LOC): open(/dev/fb0)+register+loop. Framebuffer parser CSI extendido a truecolor SGR 38;2;R;G;B. kmain pre-registra SERVER_CONSOLE→pid del ELF antes de spawn shell. ps muestra consrv BLOCKED con dispatches > 1000 | 350 |
 | FASE 10.0.d + 10.0.e ABI + kerntest | osnos_ipc_abi.h (ipc_msg_t/SERVER_*/opcodes) compartido kernel↔ring-3; service.h+ipc.h forwardean. Build add `-I src/include` a USER_CFLAGS para que ELFs vean los headers ABI. SYS_TASKINFO=265 + osnos_taskinfo.h. /bin/kerntest con 22 PASS sobre sys_taskinfo, /dev/fb0/input0, pipe roundtrip, dup-pipe-share, /sys/meminfo | 220 |
 | FASE 10.0.c /dev/fb0 + /dev/input0 | devfs char devices nuevos: fb0 (write → framebuffer via framebuffer_write_bytes) e input0 (read → keyboard_event_t via ring de 32). keyboard_server fan-outs a TTY + IPC + ring sin perder eventos. osnos_fd_t.is_chr para bypass de offset-slicing en streams; sys_write acepta CHR (antes EISDIR). /bin/fbtest + /bin/inputtest | 180 |
@@ -2490,10 +2491,10 @@ Pre-reqs cerrados (10.0 entera, sesión 2026-05-21):
 
 Servers migrados:
 - ✅ 10.1 console_server → elfs/osn-server/consrv.c (PRIMER SERVER RING-3)
+- ✅ 10.2 keyboard_server → elfs/osn-server/kbdsrv.c (checkpoint pasado)
 
 Servers a migrar (próximas sesiones):
-- 10.2 keyboard_server → elfs/osn-server/kbdsrv.c (lee /dev/input0, escribe IPC)
-- 10.3 fs_server: ELIMINAR (shell ring-3 usa syscalls directos)
+- 10.3 fs_server: ELIMINAR (shell hace syscalls directos mientras sigue ring-0)
 - 10.4 shell_server → elfs/osn-server/shellsrv.c
 - 10.5 cleanup + ARCH.md actualizado
 
