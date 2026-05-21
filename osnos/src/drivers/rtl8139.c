@@ -308,16 +308,27 @@ bool rtl8139_tx(const void *buf, size_t len) {
     if (len == 0)             return false;
     if (len > TX_BUF_SIZE)    return false;
 
-    uint8_t slot = dev.tx_cur;
-
     /*
-     * If this slot's previous TX hasn't completed (OWN still clear),
-     * the chip hasn't reclaimed it — bail rather than corrupt a DMA
-     * still in flight. With 4 slots we only hit this on saturation.
+     * Hunt for a free slot among all NUM_TX_SLOTS. Original code only
+     * looked at tx_cur and bailed if busy — losing packets whenever
+     * the chip hadn't drained that specific slot yet. Iterate so we
+     * use whichever slot is currently available.
+     *
+     * OWN=1 means "CPU owns this slot" (free or done). OWN=0 + size!=0
+     * means "chip is using it" (busy). After init all slots have OWN=1
+     * and size=0, so they all match the free condition.
      */
-    uint32_t tsd = inl(dev.io_base + R_TSD0 + slot * 4);
-    if (slot < NUM_TX_SLOTS && (tsd & TSD_OWN) == 0 && (tsd & 0x1FFFu) != 0) {
-        /* OWN clear means chip is still using the slot. (OWN=1 = done.) */
+    uint8_t slot = dev.tx_cur;
+    int tried = 0;
+    while (tried < NUM_TX_SLOTS) {
+        uint32_t tsd = inl(dev.io_base + R_TSD0 + slot * 4);
+        if ((tsd & TSD_OWN) != 0 || (tsd & 0x1FFFu) == 0) break;
+        slot = (uint8_t)((slot + 1) % NUM_TX_SLOTS);
+        tried++;
+    }
+    if (tried == NUM_TX_SLOTS) {
+        /* All four slots busy — chip is saturated. Drop the frame;
+         * upper layer (TCP) will retransmit. */
         return false;
     }
 
@@ -332,7 +343,9 @@ bool rtl8139_tx(const void *buf, size_t len) {
      */
     outl(dev.io_base + R_TSD0 + slot * 4, (uint32_t)len);
 
+    /* Next time start the hunt one slot ahead. */
     dev.tx_cur = (uint8_t)((slot + 1) % NUM_TX_SLOTS);
+    (void)0;
     dev.tx_bytes += (uint64_t)len;
     return true;
 }

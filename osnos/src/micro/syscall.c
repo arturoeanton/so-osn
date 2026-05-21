@@ -9,6 +9,7 @@
 #include "../include/osnos_status.h"
 #include "../lib/string.h"
 #include "../net/socket.h"
+#include "../net/tcp.h"
 #include "../proc/exec.h"
 #include "fd.h"
 #include "ipc.h"
@@ -842,18 +843,46 @@ int64_t sys_accept(int fd, void *addr, void *addrlen_ptr) {
     return (int64_t)new_fd;
 }
 
+/* Diagnostic for the httpd-multi-curl bug — capture fd state the
+ * moment send fails up here, before sock_send even gets called. */
+static int g_sendto_fail_fd        = -1;
+static int g_sendto_fail_fd_used   = -1;
+static int g_sendto_fail_is_socket = -1;
+static int g_sendto_fail_sock_idx  = -2;
+int sys_sendto_fail_fd       (void) { return g_sendto_fail_fd; }
+int sys_sendto_fail_fd_used  (void) { return g_sendto_fail_fd_used; }
+int sys_sendto_fail_is_socket(void) { return g_sendto_fail_is_socket; }
+int sys_sendto_fail_sock_idx (void) { return g_sendto_fail_sock_idx; }
+
 int64_t sys_sendto(int fd, const void *buf, size_t len, int flags,
                     const void *dst_addr, uint32_t addrlen) {
     (void)flags;
     osnos_fd_t *f = fd_get(fd);
-    if (!f || !f->is_socket) return err(OSNOS_EBADF);
+    if (!f || !f->is_socket) {
+        /* Grab whatever the slot looks like even if 'used' is false. */
+        extern osnos_fd_t *fd_peek_raw(int fd);
+        osnos_fd_t *raw = (fd >= 0 && fd < OSNOS_MAX_FDS) ? fd_peek_raw(fd) : 0;
+        g_sendto_fail_fd        = fd;
+        g_sendto_fail_fd_used   = raw ? (int)raw->used : -1;
+        g_sendto_fail_is_socket = raw ? (int)raw->is_socket : -1;
+        g_sendto_fail_sock_idx  = raw ? raw->sock_idx : -2;
+        return err(OSNOS_EBADF);
+    }
     if (!buf && len > 0)     return err(OSNOS_EFAULT);
 
     /* On a stream socket dst_addr is ignored — connection is already
      * pinned by accept/connect. Lets libc send() forward verbatim. */
     if (dst_addr == NULL || addrlen == 0) {
         int n = sock_send(f->sock_idx, buf, len);
-        if (n < 0) return err(OSNOS_EBADF);
+        if (n < 0) {
+            /* Distinguish "fd lost its socket" (EBADF) from "connection
+             * went away while the user task held a live fd" (ECONNRESET)
+             * — both signal "stop using this socket" but the second is
+             * Linux's expected errno when send after RST. */
+            int st = sock_tcp_state_int(f->sock_idx);
+            if (st == TCP_CLOSED) return err(OSNOS_ECONNRESET);
+            return err(OSNOS_EBADF);
+        }
         return (int64_t)n;
     }
 

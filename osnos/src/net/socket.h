@@ -131,6 +131,23 @@ uint16_t sock_local_port(int sd);
 uint64_t sock_tcp_retx_total(void);   /* total retransmits across all sockets */
 uint64_t sock_tcp_retx_drops(void);   /* connections RST'd after TCP_MAX_RETX */
 
+/* Diagnostics: which path freed slots. Useful for the httpd-multi-curl
+ * investigation. */
+uint64_t sock_free_udp_close(void);
+uint64_t sock_free_tcp_reset_zombie(void);
+uint64_t sock_free_finwait1_zombie(void);
+uint64_t sock_free_finwait2_zombie(void);
+uint64_t sock_free_lastack_zombie(void);
+uint64_t sock_free_closing_zombie(void);
+uint64_t sock_free_close_listen(void);
+uint64_t sock_free_tick_maxretx(void);
+
+int sock_last_send_fail_sd    (void);
+int sock_last_send_fail_used  (void);
+int sock_last_send_fail_type  (void);
+int sock_last_send_fail_state (void);
+int sock_last_send_fail_parent(void);
+
 /* Returns -1 on invalid sd. */
 int      sock_tcp_state_int(int sd);  /* tcp_state_t cast to int */
 int      sock_tcp_retx_len (int sd);  /* current pending retx buffer length */

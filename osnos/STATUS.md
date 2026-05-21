@@ -1195,14 +1195,9 @@ OK 8.5.9 DNS resolver + getaddrinfo con nombres — VERIFICADO en QEMU
      programa BSD-sockets que use getaddrinfo/connect/recv compila
      y resuelve nombres reales vía DNS.
 
-OK 8.5.10 /bin/httpd HTTP/1.0 server — PARCIAL (1 request por run)
-   KNOWN LIMITATION: la SEGUNDA conexión consecutiva muestra
-   "send hdr FAILED errno=9" (EBADF). Entre recv() y send() de la
-   segunda conexión, el child socket slot se libera (used=false),
-   probablemente por un path de cleanup en la state machine TCP que
-   se gatilla por un RST o FIN-flag inesperado de slirp/curl. La
-   primera conexión sirve perfecto. Workaround: reiniciar httpd
-   entre requests. A debuggear en una sesión dedicada.
+OK 8.5.10 /bin/httpd HTTP/1.0 server — VERIFICADO en QEMU
+   Multi-cliente: probado con curl en loop (5+), F5 spam en
+   Firefox/Safari, cliente browser real renderizando el HTML con CSS.
    - tests/httpd.c: bind+listen TCP port 80 (default), accept loop
      hasta MAX_CONNS=50 conexiones, parse de "GET /path HTTP/1.0\r\n",
      map a /sd/<path> (default /sd/index.html), abre el archivo
@@ -1234,13 +1229,89 @@ OK 8.5.10 /bin/httpd HTTP/1.0 server — PARCIAL (1 request por run)
      gracias al fix volatile/memory-barrier — sin el fix, accept
      se quedaba pegado a partir de la segunda conexión.
 
-TODO opcional 8.5.11 retransmisión + RTT + congestion control real
-TODO opcional 8.5.12 IPv6 (struct sockaddr_in6 + state machine)
-TODO opcional 8.5.13 select() / accept blocking real via task suspend
-                       (hoy es busy-poll en kernel; las syscalls que
-                       blockean por mucho tiempo no dejan correr otros
-                       servers cooperativos sin libc wrapping con
-                       nanosleep como hicimos en select)
+OK 8.5.11 TCP retransmisión + RTO + tests — VERIFICADO en QEMU
+   - sock_t extiende con buffer de retx por socket: uint8_t
+     retx_buf[TCP_MSS], uint16_t retx_len, uint32_t retx_seq,
+     uint64_t retx_sent_ms, uint8_t retx_count. ~12 KiB de BSS extra
+     (8 sockets × 1.5 KiB).
+   - sock_send guarda copia del último segmento enviado (seq, len,
+     timestamp). cli/sti protege la actualización contra reentrancia
+     del IRQ.
+   - En ACK handling de ESTABLISHED: si el ACK cubre retx_seq +
+     retx_len, retx_len = 0 (segmento confirmed).
+   - sock_tick(now_ms): hookeado al timer_handle a 100 Hz. Walka
+     todos los sockets; los que tienen retx_len > 0 y elapsed >
+     TCP_RTO_MS (500ms) retransmiten el mismo segmento con la misma
+     seq number, bump retx_count, g_retx_total++. Tras
+     TCP_MAX_RETX=5 intentos sin ACK → RST, state CLOSED, drop la
+     conexión, g_retx_drops++.
+   - Estilo simple "single-segment go-back-1" en vez de go-back-N
+     completo. Para QEMU localhost (drop rate ≈ 0) es transparente;
+     bajo packet loss real recupera al menos el último segment.
+   - Sin RTT smooth estimator (Jacobson/Karn) — RTO fijo en 500ms.
+     Congestion control / slow start quedan como TODO futuro.
+   - **High-entropy ISN**: alloc_child_for_syn ahora computa el ISN
+     como timer_ms * 0x9E3779B1 ^ (i * 0x1234ABCD). Antes era
+     timer_ms + i*1000 — conexiones consecutivas reusando el mismo
+     slot tenían ISNs muy parecidos, lo que confunde a slirp/NATs
+     stateful (interpretan la nueva como retransmisión vieja → RST).
+   - sys_sendto error map: si sock_send falla con state==CLOSED
+     pero el slot todavía vivo, retorna ECONNRESET (errno 104) en
+     vez de EBADF. EBADF queda para "fd o socket inválido". Ayuda
+     al diagnóstico de connection-reset vs slot-freed.
+   - /sys/net extendido con línea "tcp retx/drops: N / M".
+   - Diagnósticos públicos (getters): sock_tcp_state_int,
+     sock_tcp_retx_len, sock_tcp_retx_count, sock_local_port,
+     sock_tcp_get_local_port. Usados por los nuevos tests.
+   - **Tests nuevos en `test` shell command** (17 asserts SOCK):
+     create UDP/STREAM, bind UDP/TCP, state CLOSED→LISTEN
+     transition, fresh retx buffer empty, retx_count=0, listen
+     sin bind rechazado, sd inválido devuelve -1, close LISTEN,
+     /sys/net retx counters accessibles. Todos los asserts pasan;
+     puro state-machine inspection (no se requiere red real).
+   - **Bug pendiente del httpd**: ya RESUELTO. Ver 8.5.10b.
+
+OK 8.5.10b httpd multi-curl bug post-mortem — RESUELTO
+   Después de mucha investigación con instrumentación granular,
+   resultó que NO era ni state machine, ni FD lifecycle, ni close
+   prematuro. Era el **driver del RTL8139**.
+   - rtl8139_tx solo miraba dev.tx_cur (el slot "actual") y
+     retornaba false si ese slot específico estaba en uso. Con 4
+     slots y bursts (handshake + ACKs + body chunked), el slot
+     que tocaba para la SEGUNDA conexión podía estar todavía
+     ocupado por la cola de TX de la primera → ip_send → tcp_send
+     → sock_send fallaban en cascada → user veía EBADF.
+   - Fix: rtl8139_tx ahora hunt-loop sobre los 4 slots, buscando
+     uno con OWN=1. Solo retorna false si los CUATRO están
+     ocupados (saturación real — improbable en QEMU localhost,
+     y TCP se encargaría de retransmitir).
+   - Diagnostic mileage que dejó el camino:
+     - g_free_* counters en /sys/net contando freeings por path.
+     - g_last_send_fail_* counters mostrando el estado del slot
+       cuando sock_send rechaza.
+     - g_sendto_fail_* counters para el path !f || !f->is_socket
+       en sys_sendto (early return).
+     - Diagnostic sentinel state=-100-N cuando tcp_send mismo
+       falla (vs state machine rechaza).
+     Estos counters quedan visibles en /sys/net y son útiles para
+     futuras investigaciones de la pila TCP/eth.
+   - Verificado: `for i in 1..5; do curl --http1.0 ... ; done`
+     baja el HTML 5 veces. F5 spam en Firefox/Safari muestra la
+     página renderizada con CSS sin problemas, recargas múltiples.
+   - **Lección**: cuando todo arriba (state machine, FD, ARP)
+     parece correcto, mirá el driver. Especialmente si los counters
+     IP tx ≠ NIC tx (señal de eth_send fallando).
+
+TODO 8.5.13 select() / accept blocking real via task suspend
+            (hoy es busy-poll en kernel; las syscalls que blockean
+            por mucho tiempo no dejan correr otros servers
+            cooperativos sin libc wrapping con nanosleep como hicimos
+            en select; Ctrl+C en accept tampoco llega al fg_pid).
+            Se desbloquea automáticamente cuando FASE 9 tenga
+            preempción en CPL=0 (hoy solo CPL=3).
+
+(IPv6 movido a ROADMAP_APENDICE.md como item de "Networking
+ avanzado" — no bloquea nada del roadmap principal.)
 
 ### FASE 9 — Scheduler real — CERRADA
 OK 9.1 timer IRQ infra — VERIFICADO en QEMU

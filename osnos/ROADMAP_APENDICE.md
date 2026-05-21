@@ -65,6 +65,53 @@ tenga base estable (todas las fases 1-12 del ROADMAP principal cerradas).
   permission model más allá de Unix uid/gid.
 - **Profiling kernel** (kperf / kpatch) — instrumentación dinámica.
 
+## Networking avanzado
+
+- **IPv6** — `struct sockaddr_in6`, AF_INET6 en sys_socket, ICMPv6
+  + Neighbor Discovery en lugar de ARP, encabezado de 40 bytes,
+  routing dual-stack. Hoy AF_INET6 → EAI_FAMILY en getaddrinfo.
+  FASE 8.5.7 dejó `struct in6_addr` / `sockaddr_in6` declarados en
+  netinet/in.h por compatibilidad de compilación (selectserver.c
+  los referencia en código muerto), pero ningún path los procesa.
+
+- **TCP go-back-N / sliding window** — hoy `sock_send` guarda
+  sólo el ÚLTIMO segmento para retransmisión (single-segment).
+  Bajo packet loss sostenido eso no recupera bursts. Necesita
+  cola de segmentos pendientes + ventana de congestión.
+
+- **TCP RTT smooth estimator (Karn/Jacobson)** — hoy RTO es fijo
+  500ms. Real implementation: SRTT = 0.875·SRTT + 0.125·RTT,
+  RTO = SRTT + 4·RTTVAR. Karn's algorithm: ignorar RTT de
+  retransmisiones.
+
+- **TCP fast retransmit / SACK** — RFC 2018 Selective ACK, fast
+  retransmit on 3 duplicate ACKs.
+
+- **TCP Nagle / delayed ACK** — agrupar pequeños writes; agrupar
+  ACKs con datos en la dirección contraria.
+
+- **TCP keep-alive** — heartbeat opcional para conexiones idle.
+
+- **DNS resolver completo** — hoy: una query A a slirp 10.0.2.3,
+  parse de la primera A record. Falta: AAAA, CNAME chasing,
+  caching local con TTL, /etc/hosts, /etc/resolv.conf,
+  retransmisión, fallback TCP cuando truncated.
+
+- **DHCP client** — obtener IP del DHCP de slirp / red real en
+  vez de hardcodear 10.0.2.15.
+
+- **Routing table real** — múltiples interfaces, default gateway,
+  rutas estáticas, ip route add/del.
+
+- **Múltiples NICs / interfaces** — `if_*` API, `struct ifreq`,
+  `ioctl(SIOCGIFCONF)`.
+
+- **Loopback (lo) interface** — hoy 127.0.0.1 va al gateway por
+  routing genérico. Short-circuit a un loopback in-memory.
+
+- **TLS / openssl-equivalent** — librería de criptografía + TLS
+  1.2/1.3 client + server. Requiere primero un RNG sólido.
+
 ## Performance
 
 - **vDSO** — funciones rápidas como `gettimeofday` que no requieren

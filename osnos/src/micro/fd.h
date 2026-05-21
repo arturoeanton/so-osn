@@ -44,6 +44,11 @@ void fd_free(int fd);
  * special fds 0/1/2 (which always exist). */
 osnos_fd_t *fd_get(int fd);
 
+/* Like fd_get but returns the raw slot regardless of `used`. For
+ * diagnostics only — read only, don't deref non-trivial fields without
+ * checking used first. */
+osnos_fd_t *fd_peek_raw(int fd);
+
 /*
  * stdin ring buffer. keyboard_server pushes printable chars and '\n';
  * sys_read(0, ...) pops. Bounded — overflow drops oldest. Non-blocking.

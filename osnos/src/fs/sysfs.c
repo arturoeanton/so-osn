@@ -432,6 +432,49 @@ static void gen_net(char *out, size_t out_size) {
     os_strlcat(out, " / ", out_size);
     os_format_u64(sock_tcp_retx_drops(), num, sizeof(num));
     os_strlcat(out, num, out_size);
+    os_strlcat(out, "\nfree udp/rst/fw1/fw2/lack/cls/lst/tick: ", out_size);
+    os_format_u64(sock_free_udp_close(), num, sizeof(num));
+    os_strlcat(out, num, out_size); os_strlcat(out, "/", out_size);
+    os_format_u64(sock_free_tcp_reset_zombie(), num, sizeof(num));
+    os_strlcat(out, num, out_size); os_strlcat(out, "/", out_size);
+    os_format_u64(sock_free_finwait1_zombie(), num, sizeof(num));
+    os_strlcat(out, num, out_size); os_strlcat(out, "/", out_size);
+    os_format_u64(sock_free_finwait2_zombie(), num, sizeof(num));
+    os_strlcat(out, num, out_size); os_strlcat(out, "/", out_size);
+    os_format_u64(sock_free_lastack_zombie(), num, sizeof(num));
+    os_strlcat(out, num, out_size); os_strlcat(out, "/", out_size);
+    os_format_u64(sock_free_closing_zombie(), num, sizeof(num));
+    os_strlcat(out, num, out_size); os_strlcat(out, "/", out_size);
+    os_format_u64(sock_free_close_listen(), num, sizeof(num));
+    os_strlcat(out, num, out_size); os_strlcat(out, "/", out_size);
+    os_format_u64(sock_free_tick_maxretx(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\nlast send fail [sd/used/type/state/parent | fd/used/is_sock/sock_idx]: ", out_size);
+    extern int sys_sendto_fail_fd       (void);
+    extern int sys_sendto_fail_fd_used  (void);
+    extern int sys_sendto_fail_is_socket(void);
+    extern int sys_sendto_fail_sock_idx (void);
+    int vals[9] = {
+        sock_last_send_fail_sd(),
+        sock_last_send_fail_used(),
+        sock_last_send_fail_type(),
+        sock_last_send_fail_state(),
+        sock_last_send_fail_parent(),
+        sys_sendto_fail_fd(),
+        sys_sendto_fail_fd_used(),
+        sys_sendto_fail_is_socket(),
+        sys_sendto_fail_sock_idx(),
+    };
+    for (int i = 0; i < 9; i++) {
+        if (i > 0) os_strlcat(out, "/", out_size);
+        if (vals[i] < 0) {
+            os_strlcat(out, "-", out_size);
+            os_format_u64((uint64_t)(-vals[i]), num, sizeof(num));
+        } else {
+            os_format_u64((uint64_t)vals[i], num, sizeof(num));
+        }
+        os_strlcat(out, num, out_size);
+    }
     os_strlcat(out, "\n", out_size);
 }
 
