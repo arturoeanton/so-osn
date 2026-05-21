@@ -26,6 +26,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 static int pass_count;
@@ -185,7 +187,82 @@ int main(int argc, char **argv) {
     {
         errno = 0;
         int s = socket(AF_INET, SOCK_STREAM, 0);
-        check("socket-enosys", s == -1 && errno == ENOSYS);
+        check("socket-ok", s >= 0);    /* FASE 8.5 onwards: real */
+        if (s >= 0) close(s);
+    }
+
+    /* ---------------- strerror ---------------- */
+    {
+        check("strerror-EPERM",
+              strcmp(strerror(EPERM), "Operation not permitted") == 0);
+        check("strerror-ENOENT",
+              strcmp(strerror(ENOENT), "No such file or directory") == 0);
+        check("strerror-EBADF",
+              strcmp(strerror(EBADF), "Bad file descriptor") == 0);
+        check("strerror-EINVAL",
+              strcmp(strerror(EINVAL), "Invalid argument") == 0);
+        check("strerror-ENOSYS",
+              strcmp(strerror(ENOSYS), "Function not implemented") == 0);
+        check("strerror-ENOTTY",
+              strcmp(strerror(ENOTTY), "Not a typewriter") == 0);
+        check("strerror-ERANGE",
+              strcmp(strerror(ERANGE), "Numerical result out of range") == 0);
+        check("strerror-ETIMEDOUT",
+              strcmp(strerror(ETIMEDOUT), "Connection timed out") == 0);
+        check("strerror-ECONNREFUSED",
+              strcmp(strerror(ECONNREFUSED), "Connection refused") == 0);
+        check("strerror-EAGAIN",
+              strcmp(strerror(EAGAIN), "Resource temporarily unavailable") == 0);
+        /* Unknown errno falls back to "errno=N" itoa path. */
+        const char *uk = strerror(9999);
+        check("strerror-unknown-itoa",
+              strstr(uk, "9999") != 0);
+    }
+
+    /* ---------------- stat / access ---------------- */
+    {
+        const char *path = "/tmp/libctest-stat.txt";
+        FILE *fp = fopen(path, "w");
+        if (fp) { fwrite("hi", 1, 2, fp); fclose(fp); }
+
+        struct stat st;
+        errno = 0;
+        check("stat-ok",       stat(path, &st) == 0);
+        check("stat-size==2",  st.st_size == 2);
+        check("stat-isreg",    S_ISREG(st.st_mode));
+
+        errno = 0;
+        check("stat-enoent",
+              stat("/nope/nope/nope", &st) == -1 && errno == ENOENT);
+
+        errno = 0;
+        check("access-ok",     access(path, F_OK) == 0);
+        errno = 0;
+        check("access-enoent",
+              access("/nope/nope/nope", F_OK) == -1 && errno == ENOENT);
+
+        unlink(path);
+    }
+
+    /* ---------------- time / clock_gettime ---------------- */
+    {
+        time_t t1 = time(0);
+        check("time-positive", t1 >= 0);
+        time_t t2 = 0;
+        time_t r = time(&t2);
+        check("time-out-param-matches", r == t2);
+
+        struct timespec ts;
+        check("clock_gettime-REALTIME",
+              clock_gettime(CLOCK_REALTIME, &ts) == 0);
+        check("clock_gettime-MONOTONIC",
+              clock_gettime(CLOCK_MONOTONIC, &ts) == 0);
+        check("clock_gettime-ts-sane",
+              ts.tv_sec >= 0 && ts.tv_nsec >= 0 && ts.tv_nsec < 1000000000);
+
+        errno = 0;
+        check("clock_gettime-bad-id",
+              clock_gettime(99, &ts) == -1 && errno == EINVAL);
     }
 
     /* ---------------- summary ---------------- */

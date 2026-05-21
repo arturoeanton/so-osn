@@ -147,6 +147,20 @@ int rename(const char *oldpath, const char *newpath) {
         osnos_syscall2(SYS_RENAME, (long)abs_old, (long)abs_new));
 }
 
+int access(const char *path, int mode) {
+    char abs_buf[256];
+    const char *abs_path = resolve_path(path, abs_buf, sizeof(abs_buf));
+    return (int)set_errno(
+        osnos_syscall2(SYS_ACCESS, (long)abs_path, (long)mode));
+}
+
+int stat(const char *path, struct stat *out) {
+    char abs_buf[256];
+    const char *abs_path = resolve_path(path, abs_buf, sizeof(abs_buf));
+    return (int)set_errno(
+        osnos_syscall2(SYS_STAT, (long)abs_path, (long)out));
+}
+
 /*
  * brk / sbrk.
  *

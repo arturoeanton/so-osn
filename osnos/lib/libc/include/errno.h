@@ -10,6 +10,7 @@ extern int errno;
 #define EPERM           1
 #define ENOENT          2
 #define ESRCH           3
+#define EINTR           4
 #define EIO             5
 #define E2BIG           7
 #define EBADF           9
@@ -24,8 +25,10 @@ extern int errno;
 #define EINVAL         22
 #define ENFILE         23
 #define EMFILE         24
+#define ENOTTY         25
 #define ENOSPC         28
 #define EROFS          30
+#define ERANGE         34
 #define ENAMETOOLONG   36
 #define ENOTEMPTY      39
 #define ENOSYS         38

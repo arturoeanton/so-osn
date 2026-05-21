@@ -10,6 +10,7 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| Libc gaps 1+2+3 | strerror completo (33 errnos), stat(path)/access, time/clock_gettime, fix nlink_t ABI | 250 |
 | Arrow keys + getcwd/chdir | keyboard_server → ESC[A-D al TTY; SYS_GETCWD/CHDIR per-task | 120 |
 | /bin/ovi | editor modal vim-style (hjkl + flechas, i/a/o, x/dd, :w/:q/:wq) + VT100 mínimo + TIOCGWINSZ + SGR reverse | 500 |
 | libc path resolve | relativos resueltos vs cwd kernel (getcwd) — fallback $PWD | 50 |
@@ -27,7 +28,10 @@ POSIX, y un shell con history + rc files.
 | FASE 7 | libc + ELF ring-3 + crt0 + 25 tools | 1500 |
 | FASE 2-6 | VFS + microkernel + IPC + paging + ELF | 2500 |
 
-**Tests**: 603/603 pass (KHEAP + SLAB + SOCK + VFS + libc + ramfs + FAT).
+**Tests**: 615/615 pass (KHEAP + SLAB + SOCK + VFS + libc + ramfs + FAT
++ STAT/ACCESS + TIME/CLOCK). Idempotente — `test` se puede correr N
+veces seguidas sin falsos negativos. libctest ELF user-side cubre
+strerror/stat/access/time/clock_gettime libc-side.
 
 **Demos que funcionan end-to-end** (compilan código upstream sin
 modificar): `selectserver.c` de Beej, curl/Firefox contra
@@ -1897,7 +1901,7 @@ OK 9.4 /bin/top — viewer live — VERIFICADO en QEMU
 ### FASE 11 — TUI potente
 47. mini Norton Commander / mini-mc
 48. viewer
-49. editor
+ok editor **ovi simple vi**
 50. copy/move/delete visual
 
 ### FASE 12 — Gráfico

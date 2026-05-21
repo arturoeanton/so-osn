@@ -772,6 +772,106 @@ int64_t sys_chdir(const char *path) {
 }
 
 /*
+ * sys_stat — like fstat but takes an absolute path. Fills the
+ * Linux-layout osnos_stat_t. Same field semantics as fstat (st_mode
+ * carries type | perms; st_size in bytes; timestamps zeroed since
+ * we have no RTC).
+ */
+int64_t sys_stat(const char *path, void *out) {
+    if (!path || !out) return err(OSNOS_EFAULT);
+
+    /* Pull path into kernel scratch so a faulting user pointer
+     * unwinds cleanly via the extable. */
+    char kpath[OSNOS_PATH_MAX];
+    if (copy_from_user(kpath, path, OSNOS_PATH_MAX) != OSNOS_OK) {
+        return err(OSNOS_EFAULT);
+    }
+    kpath[OSNOS_PATH_MAX - 1] = 0;
+
+    vfs_stat_t st;
+    osnos_status_t s = vfs_stat(kpath, &st);
+    if (s != OSNOS_OK) return err(s);
+
+    osnos_stat_t kout;
+    for (size_t i = 0; i < sizeof(kout); i++) ((char *)&kout)[i] = 0;
+    kout.st_ino     = st.inode;
+    kout.st_nlink   = 1;
+    kout.st_mode    = (uint32_t)st.type | (st.mode & 07777);
+    kout.st_size    = (int64_t)st.size;
+    kout.st_blksize = 512;
+    kout.st_blocks  = (int64_t)((st.size + 511) / 512);
+
+    if (copy_to_user(out, &kout, sizeof(kout)) != OSNOS_OK) {
+        return err(OSNOS_EFAULT);
+    }
+    return 0;
+}
+
+/*
+ * sys_access — POSIX access(2). osnos doesn't enforce permission bits
+ * yet, so the only relevant check is "does the path resolve?". `mode`
+ * (R_OK / W_OK / X_OK / F_OK) is accepted but ignored.
+ */
+int64_t sys_access(const char *path, int mode) {
+    (void)mode;
+    if (!path) return err(OSNOS_EFAULT);
+
+    char kpath[OSNOS_PATH_MAX];
+    if (copy_from_user(kpath, path, OSNOS_PATH_MAX) != OSNOS_OK) {
+        return err(OSNOS_EFAULT);
+    }
+    kpath[OSNOS_PATH_MAX - 1] = 0;
+
+    vfs_stat_t st;
+    osnos_status_t s = vfs_stat(kpath, &st);
+    if (s != OSNOS_OK) return err(s);
+    return 0;
+}
+
+/*
+ * sys_time — POSIX time(2). Returns seconds "since the epoch" — but
+ * osnos has no RTC, so we report seconds since boot. Good enough for
+ * elapsed-time arithmetic; absolute clocks will need a real RTC.
+ */
+int64_t sys_time(int64_t *t) {
+    int64_t secs = (int64_t)(timer_ms() / 1000);
+    if (t) {
+        if (copy_to_user(t, &secs, sizeof(secs)) != OSNOS_OK) {
+            return err(OSNOS_EFAULT);
+        }
+    }
+    return secs;
+}
+
+/* Linux clock IDs (subset). */
+#define OSNOS_CLOCK_REALTIME  0
+#define OSNOS_CLOCK_MONOTONIC 1
+
+struct osnos_timespec {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+};
+
+/*
+ * sys_clock_gettime — POSIX clock_gettime(2). Today both REALTIME
+ * and MONOTONIC report the same value (ticks since boot, no RTC).
+ * Other clock IDs return -EINVAL.
+ */
+int64_t sys_clock_gettime(int clk_id, void *tp) {
+    if (clk_id != OSNOS_CLOCK_REALTIME &&
+        clk_id != OSNOS_CLOCK_MONOTONIC) return err(OSNOS_EINVAL);
+    if (!tp) return err(OSNOS_EFAULT);
+
+    uint64_t ms = timer_ms();
+    struct osnos_timespec ts;
+    ts.tv_sec  = (int64_t)(ms / 1000);
+    ts.tv_nsec = (int64_t)((ms % 1000) * 1000000);
+
+    if (copy_to_user(tp, &ts, sizeof(ts)) != OSNOS_OK) return err(OSNOS_EFAULT);
+    return 0;
+}
+
+/*
  * Today the only ioctl device is the controlling TTY at fd 0/1/2.
  * Anything else returns -ENOTTY. termios I/O goes via copy_*_user so
  * a faulting pointer becomes EFAULT, not a kernel panic.
@@ -1117,6 +1217,21 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
         case SYS_CHDIR:
             return pack(sys_chdir(
                 (const char *)frame->rdi));
+        case SYS_STAT:
+            return pack(sys_stat(
+                (const char *)frame->rdi,
+                (void *)frame->rsi));
+        case SYS_ACCESS:
+            return pack(sys_access(
+                (const char *)frame->rdi,
+                (int)frame->rsi));
+        case SYS_TIME:
+            return pack(sys_time(
+                (int64_t *)frame->rdi));
+        case SYS_CLOCK_GETTIME:
+            return pack(sys_clock_gettime(
+                (int)frame->rdi,
+                (void *)frame->rsi));
         case SYS_ACCEPT:
             return pack(sys_accept(
                 (int)frame->rdi,

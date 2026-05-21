@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "extable.h"
+#include "task.h"
 #include "vmm.h"
 
 /*
@@ -62,16 +63,31 @@ static int user_range_ok(uintptr_t addr, size_t n) {
     return end <= OSNOS_USER_VIRT_MAX;
 }
 
+/*
+ * When a kernel task (pml4 == 0) makes a syscall — today this only
+ * happens from the shell's self-test, which exercises sys_* directly —
+ * the "user pointer" is actually a kernel string literal in the high
+ * half. Skip the user-range check in that case so kernel callers can
+ * use the same syscall surface as user tasks. The fault-recovery span
+ * still protects against bad addresses.
+ */
+static int in_kernel_caller(void) {
+    task_t *t = task_current();
+    return !t || t->pml4 == 0;
+}
+
 osnos_status_t copy_from_user(void *dst, const void *user_src, size_t n) {
     if (!dst && n > 0) return OSNOS_EFAULT;
     if (!user_src && n > 0) return OSNOS_EFAULT;
-    if (!user_range_ok((uintptr_t)user_src, n)) return OSNOS_EFAULT;
+    if (!in_kernel_caller() &&
+        !user_range_ok((uintptr_t)user_src, n)) return OSNOS_EFAULT;
     return (osnos_status_t)__uaccess_copy_bytes(dst, user_src, (uint64_t)n);
 }
 
 osnos_status_t copy_to_user(void *user_dst, const void *src, size_t n) {
     if (!user_dst && n > 0) return OSNOS_EFAULT;
     if (!src && n > 0) return OSNOS_EFAULT;
-    if (!user_range_ok((uintptr_t)user_dst, n)) return OSNOS_EFAULT;
+    if (!in_kernel_caller() &&
+        !user_range_ok((uintptr_t)user_dst, n)) return OSNOS_EFAULT;
     return (osnos_status_t)__uaccess_copy_bytes(user_dst, src, (uint64_t)n);
 }

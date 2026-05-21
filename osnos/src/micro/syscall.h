@@ -14,6 +14,7 @@
 #define SYS_WRITE     1
 #define SYS_OPEN      2
 #define SYS_CLOSE     3
+#define SYS_STAT      4
 #define SYS_FSTAT     5
 #define SYS_LSEEK     8
 #define SYS_BRK      12
@@ -21,8 +22,11 @@
 #define SYS_GETPID   39
 #define SYS_EXIT     60
 #define SYS_KILL     62
+#define SYS_ACCESS   21
 #define SYS_GETCWD   79
 #define SYS_CHDIR    80
+#define SYS_TIME    201   /* osnos uses Linux's old time(2) slot */
+#define SYS_CLOCK_GETTIME 228
 #define SYS_RENAME   82
 #define SYS_MKDIR    83
 #define SYS_RMDIR    84
@@ -39,8 +43,8 @@
 #define SYS_LISTEN     50
 #define SYS_SETSOCKOPT 54
 
-/* osnos-specific (above 200 by convention). */
-#define SYS_ISATTY  201
+/* osnos-specific (above 250 to dodge Linux's #201 = time, #228 = clock_gettime). */
+#define SYS_ISATTY  250
 
 /*
  * Saved user GPR set, pushed by int80_entry / syscall_entry on every
@@ -149,6 +153,25 @@ int64_t sys_getdents(int fd, void *buf, size_t buf_size);
  * chdir refuses anything that doesn't resolve to a directory. */
 int64_t sys_getcwd  (char *buf, size_t size);
 int64_t sys_chdir   (const char *path);
+
+/* sys_stat — like fstat but takes a path. EFAULT on bad pointer,
+ * ENOENT if path doesn't exist. */
+int64_t sys_stat    (const char *path, void *out);
+
+/* sys_access — check that `path` exists. `mode` is the access bits
+ * mask (R_OK / W_OK / X_OK / F_OK) — osnos doesn't enforce yet, so
+ * the only failure modes are EFAULT and ENOENT. */
+int64_t sys_access  (const char *path, int mode);
+
+/* sys_time — seconds since boot (no RTC). Matches Linux's old
+ * `time(t_t *t)` slot: writes the value to *t too if non-NULL,
+ * and returns it. */
+int64_t sys_time    (int64_t *t);
+
+/* sys_clock_gettime — POSIX clock_gettime. Today only CLOCK_REALTIME
+ * (0) and CLOCK_MONOTONIC (1) are recognised; both return ticks
+ * since boot (no RTC). Writes a struct timespec to user memory. */
+int64_t sys_clock_gettime(int clk_id, void *tp);
 
 /*
  * Linux socket layer. Only AF_INET (2) + SOCK_DGRAM (2) lit up for now;

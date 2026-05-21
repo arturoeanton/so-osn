@@ -18,12 +18,16 @@
 #define SYS_WRITE      1
 #define SYS_OPEN       2
 #define SYS_CLOSE      3
+#define SYS_STAT       4
 #define SYS_FSTAT      5
+#define SYS_ACCESS    21
 #define SYS_LSEEK      8
 #define SYS_BRK       12
 #define SYS_IOCTL     16
 #define SYS_EXECVE    59
 #define SYS_NANOSLEEP 35
+#define SYS_TIME     201
+#define SYS_CLOCK_GETTIME 228
 #define SYS_GETPID    39
 #define SYS_EXIT      60
 #define SYS_KILL      62
@@ -33,7 +37,7 @@
 #define SYS_MKDIR     83
 #define SYS_RMDIR     84
 #define SYS_UNLINK    87
-#define SYS_ISATTY   201   /* osnos-specific */
+#define SYS_ISATTY   250   /* osnos-specific (above 250 to dodge Linux #201/#228) */
 #define SYS_GETDENTS 217
 #define SYS_SELECT     23
 #define SYS_SOCKET     41

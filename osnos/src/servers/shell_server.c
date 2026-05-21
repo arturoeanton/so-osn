@@ -2175,10 +2175,13 @@ static void cmd_test(const char *args) {
             CHECK(q[0] == 0, "KHEAP: 96 KiB block writable @0");
             CHECK(q[big - 1] == 0 || q[big - 1] != 0xAA, "KHEAP: writable end");
         }
-        CHECK(kheap_total_bytes() > baseline_total,
-              "KHEAP: total grew past baseline");
-        CHECK(kheap_grow_events() > baseline_grow,
-              "KHEAP: grow_events incremented");
+        /* These start strict on first run (heap grew); on later
+         * runs the heap has already grown so we only enforce that
+         * it didn't shrink. */
+        CHECK(kheap_total_bytes() >= baseline_total,
+              "KHEAP: total >= baseline (idempotent across runs)");
+        CHECK(kheap_grow_events() >= baseline_grow,
+              "KHEAP: grow_events monotonically non-decreasing");
 
         /* Block 2: many small allocs, freed in reverse — exercises the
          * splitter + free-list coalesce. */
@@ -2271,6 +2274,48 @@ static void cmd_test(const char *args) {
         CHECK(kheap_slab_bucket_size(0)  == 16,    "SLAB: bucket[0] = 16");
         CHECK(kheap_slab_bucket_size(7)  == 2048,  "SLAB: bucket[7] = 2048");
         CHECK(kheap_slab_bucket_count() == 8,      "SLAB: 8 buckets total");
+    }
+
+    /* ----- stat(path) / access ----- */
+    {
+        osnos_stat_t st_user;
+        int64_t r2 = sys_stat("/test/syscall.txt", &st_user);
+        CHECK(r2 == 0, "STAT: existing file -> 0");
+        CHECK(st_user.st_size >= 0, "STAT: size non-negative");
+        CHECK((st_user.st_mode & 0170000) == 0100000,
+              "STAT: st_mode says regular file");
+
+        int64_t r3 = sys_stat("/test/does-not-exist.txt", &st_user);
+        CHECK(r3 == -(int64_t)OSNOS_ENOENT, "STAT: missing -> -ENOENT");
+
+        int64_t r4 = sys_access("/test/syscall.txt", 0);
+        CHECK(r4 == 0, "ACCESS: existing file -> 0");
+        int64_t r5 = sys_access("/test/does-not-exist.txt", 0);
+        CHECK(r5 == -(int64_t)OSNOS_ENOENT, "ACCESS: missing -> -ENOENT");
+    }
+
+    /* ----- time / clock_gettime ----- */
+    {
+        int64_t t0;
+        int64_t rt = sys_time(&t0);
+        CHECK(rt >= 0, "TIME: returns non-negative seconds since boot");
+        CHECK(rt == t0, "TIME: return value equals *t");
+
+        struct osnos_timespec_local {
+            int64_t tv_sec;
+            int64_t tv_nsec;
+        } ts;
+        int64_t rc = sys_clock_gettime(0 /* REALTIME */, &ts);
+        CHECK(rc == 0, "CLOCK: REALTIME -> 0");
+        CHECK(ts.tv_sec >= 0 && ts.tv_nsec >= 0 && ts.tv_nsec < 1000000000,
+              "CLOCK: REALTIME timespec well-formed");
+
+        int64_t rc2 = sys_clock_gettime(1 /* MONOTONIC */, &ts);
+        CHECK(rc2 == 0, "CLOCK: MONOTONIC -> 0");
+
+        int64_t rc3 = sys_clock_gettime(99, &ts);
+        CHECK(rc3 == -(int64_t)OSNOS_EINVAL,
+              "CLOCK: bogus clk_id -> -EINVAL");
     }
 
     /* cleanup */

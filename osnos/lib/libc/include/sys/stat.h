@@ -46,3 +46,10 @@ struct stat {
 #define S_ISLNK(m)  (((m) & S_IFMT) == S_IFLNK)
 
 int fstat(int fd, struct stat *out);
+
+/*
+ * stat(path, struct stat *out) — like fstat but takes a path.
+ * Returns 0 on success, -1 + errno on failure (ENOENT if path
+ * doesn't exist, EFAULT on bad pointer).
+ */
+int stat(const char *path, struct stat *out);

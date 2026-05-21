@@ -22,6 +22,15 @@ int     rmdir (const char *path);
 int     mkdir (const char *path, mode_t mode);
 int     rename(const char *oldpath, const char *newpath);
 
+/* POSIX access(2) — checks the path resolves. `mode` is a bitmask of
+ * the F_OK/R_OK/W_OK/X_OK constants below. osnos doesn't enforce
+ * permission bits yet, so the only failure modes are ENOENT/EFAULT. */
+#define F_OK 0
+#define R_OK 4
+#define W_OK 2
+#define X_OK 1
+int     access(const char *path, int mode);
+
 /*
  * Linux brk(addr): set the program break to addr; returns the new
  * break, or the OLD break if the request was refused. sbrk(incr)
