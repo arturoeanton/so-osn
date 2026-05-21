@@ -2462,7 +2462,18 @@ static void cmd_exec(const char *args) {
     const char *rest = buf + i;
     while (*rest == ' ') rest++;
 
-    int64_t pid = proc_exec(path, rest);
+    /* Bare name (no leading '/') — assume /bin/<name>. Saves the user
+     * from typing the absolute path for every builtin ELF. Eventually
+     * this'll walk $PATH, but /bin/ is the only binary dir today. */
+    char fullpath[OSNOS_PATH_MAX];
+    if (path[0] && path[0] != '/') {
+        os_strlcpy(fullpath, "/bin/", sizeof(fullpath));
+        os_strlcat(fullpath, path, sizeof(fullpath));
+    } else {
+        os_strlcpy(fullpath, path, sizeof(fullpath));
+    }
+
+    int64_t pid = proc_exec(fullpath, rest);
     if (pid < 0) {
         shell_send_console_color("\nexec failed\n", 0xff5555);
         prompt();
@@ -2614,6 +2625,24 @@ static void run_command(const char *cmd) {
         while (*args == ' ') args++;
 
         commands[i].handler(args);
+        return;
+    }
+
+    /*
+     * No builtin shell command matched. Try treating the first token as
+     * an ELF in /bin: lets the user type `httpd` instead of
+     * `exec /bin/httpd`. We only auto-exec when the basename actually
+     * exists in the builtin registry, so typos still surface as
+     * "unknown command" instead of silently failing inside cmd_exec.
+     */
+    char first[OSNOS_NAME_MAX];
+    size_t k = 0;
+    while (cmd[k] && cmd[k] != ' ' && k + 1 < sizeof(first)) {
+        first[k] = cmd[k]; k++;
+    }
+    first[k] = 0;
+    if (first[0] && builtin_find(first)) {
+        cmd_exec(cmd);
         return;
     }
 
