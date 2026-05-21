@@ -10,6 +10,7 @@
 #include "../net/eth.h"
 #include "../net/icmp.h"
 #include "../net/socket.h"
+#include "../net/tcp.h"
 #include "../include/osnos_dirent.h"
 #include "../include/osnos_fcntl.h"
 #include "../include/osnos_elf.h"
@@ -1876,6 +1877,62 @@ static void cmd_test(const char *args) {
     } else {
         os_strlcat(buf, "  SKIP FAT tests (no /sd mount)\n", sizeof(buf));
         test_flush(buf, sizeof(buf), false, 0xaaaaaa);
+    }
+
+    /*
+     * ===== Socket + TCP retransmission tests (FASE 8.5.11) =====
+     * Pure state-machine inspection — no actual network traffic.
+     * These would still pass on a kernel booted without rtl8139, since
+     * we only allocate slots and check their initial flags.
+     */
+    {
+        int sd_d = sock_create(OSNOS_SOCK_DGRAM);
+        CHECK(sd_d >= 0, "SOCK: create UDP");
+        CHECK(sock_local_port(sd_d) == 0, "SOCK: UDP unbound port=0");
+        CHECK(sock_bind(sd_d, 0, 50001) == 0, "SOCK: bind UDP :50001");
+        CHECK(sock_local_port(sd_d) == 50001, "SOCK: UDP bound port=50001");
+        CHECK(sock_close(sd_d) == 0, "SOCK: close UDP");
+
+        int sd_s = sock_create(OSNOS_SOCK_STREAM);
+        CHECK(sd_s >= 0, "SOCK: create STREAM");
+        CHECK(sock_tcp_state_int(sd_s) == TCP_CLOSED,
+              "SOCK: fresh TCP state=CLOSED");
+        CHECK(sock_tcp_retx_len(sd_s) == 0,
+              "SOCK: fresh retx buffer empty");
+        CHECK(sock_tcp_retx_count(sd_s) == 0,
+              "SOCK: fresh retx count=0");
+
+        CHECK(sock_bind(sd_s, 0, 50002) == 0, "SOCK: bind TCP :50002");
+        CHECK(sock_local_port(sd_s) == 50002, "SOCK: TCP bound port");
+
+        CHECK(sock_listen(sd_s, 4) == 0, "SOCK: listen TCP");
+        CHECK(sock_tcp_state_int(sd_s) == TCP_LISTEN,
+              "SOCK: state=LISTEN after listen");
+
+        /* SOCK_STREAM not bound shouldn't accept listen. */
+        int sd_n = sock_create(OSNOS_SOCK_STREAM);
+        CHECK(sd_n >= 0, "SOCK: create another STREAM");
+        CHECK(sock_listen(sd_n, 4) != 0,
+              "SOCK: listen without bind → fails");
+        sock_close(sd_n);
+
+        /* Unknown socket descriptors return -1. */
+        CHECK(sock_tcp_state_int(7777) == -1,
+              "SOCK: bad sd → state=-1");
+        CHECK(sock_tcp_retx_len(7777) == -1,
+              "SOCK: bad sd → retx_len=-1");
+
+        /* close on LISTEN frees the slot (it's an immediate teardown
+         * since there's no peer to FIN with). */
+        CHECK(sock_close(sd_s) == 0, "SOCK: close LISTEN");
+
+        /* Retx counters are read-only from this seat — just sanity
+         * check the API doesn't crash. */
+        uint64_t r0 = sock_tcp_retx_total();
+        uint64_t r1 = sock_tcp_retx_drops();
+        CHECK(r0 >= 0, "SOCK: retx_total readable");
+        CHECK(r1 >= 0, "SOCK: retx_drops readable");
+        (void)r0; (void)r1;
     }
 
     /* cleanup */

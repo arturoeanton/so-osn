@@ -109,10 +109,18 @@ __asm__ (
 
 extern void timer_entry(void);
 
+/* Forward decl — keeping the timer subsystem ignorant of the network
+ * stack header here so the network layer can stay optional. */
+extern void sock_tick(uint64_t now_ms);
+
 void timer_handle(syscall_frame_t *frame) {
     ticks_counter++;
     irq_counter++;
     pic_send_eoi(IRQ_TIMER);
+
+    /* TCP retransmission timer: walk sockets, retransmit any segment
+     * that's been outstanding longer than TCP_RTO_MS. */
+    sock_tick(ticks_counter * (uint64_t)TIMER_TICK_MS);
 
     /*
      * Iret frame sits just past the syscall_frame_t we pushed:

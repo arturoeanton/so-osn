@@ -60,7 +60,19 @@ typedef struct {
     uint8_t          accept_q_tail;
     uint8_t          accept_q_count;
     uint8_t          backlog;
+
+    /* Last-sent TCP segment kept for retransmission. retx_len == 0
+     * means "nothing pending". When snd_una passes retx_seq+retx_len,
+     * the segment is acked and the buffer can be cleared. */
+    uint8_t          retx_buf[TCP_MSS];
+    uint16_t         retx_len;
+    uint32_t         retx_seq;
+    uint64_t         retx_sent_ms;
+    uint8_t          retx_count;
 } sock_t;
+
+static uint64_t g_retx_total;
+static uint64_t g_retx_drops;
 
 static sock_t socks[SOCK_MAX];
 static uint16_t ephemeral_next = 40000;
@@ -114,6 +126,10 @@ int sock_create(int type) {
         s->accept_q_tail = 0;
         s->accept_q_count = 0;
         s->backlog    = 0;
+        s->retx_len   = 0;
+        s->retx_seq   = 0;
+        s->retx_sent_ms = 0;
+        s->retx_count = 0;
         for (int k = 0; k < SOCK_RX_QUEUE_DEPTH; k++) s->rx[k].valid = false;
         return i;
     }
@@ -517,6 +533,10 @@ static int alloc_child_for_syn(int parent_idx,
         c->parent_sd = parent_idx;
         c->accept_q_head = c->accept_q_tail = c->accept_q_count = 0;
         c->backlog = 0;
+        c->retx_len = 0;
+        c->retx_seq = 0;
+        c->retx_sent_ms = 0;
+        c->retx_count = 0;
 
         c->remote_ip   = peer_ip;
         c->remote_port = peer_port;
@@ -652,6 +672,12 @@ void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
                 (int32_t)(ack - s->snd_una) > 0 &&
                 (int32_t)(ack - s->snd_nxt) <= 0) {
                 s->snd_una = ack;
+                /* Clear the retx buffer if the ACK covers it. */
+                if (s->retx_len > 0 &&
+                    (int32_t)(ack - (s->retx_seq + s->retx_len)) >= 0) {
+                    s->retx_len = 0;
+                    s->retx_count = 0;
+                }
             }
 
             /* In-order data only — drop anything else, peer retransmits. */
@@ -802,14 +828,27 @@ int sock_send(int sd, const void *buf, size_t len) {
         size_t chunk = len - sent;
         if (chunk > TCP_MSS) chunk = TCP_MSS;
 
+        uint32_t this_seq = s->snd_nxt;
         if (!tcp_send(s->remote_ip, s->remote_port, s->local_port,
-                       s->snd_nxt, s->rcv_nxt,
+                       this_seq, s->rcv_nxt,
                        TCP_FLAG_ACK | TCP_FLAG_PSH,
                        tcp_advertised_window(s),
                        p + sent, chunk)) {
             return sent > 0 ? (int)sent : -1;
         }
         s->snd_nxt += (uint32_t)chunk;
+
+        /* Stash this segment as the retransmission candidate. We only
+         * track the LAST one — simple but enough for our localhost-
+         * QEMU case. Real go-back-N would need a queue. */
+        cli();
+        s->retx_seq      = this_seq;
+        s->retx_len      = (uint16_t)chunk;
+        s->retx_sent_ms  = timer_ms();
+        s->retx_count    = 0;
+        for (size_t i = 0; i < chunk; i++) s->retx_buf[i] = p[sent + i];
+        sti();
+
         sent += chunk;
     }
     return (int)sent;
@@ -842,4 +881,78 @@ int sock_close_tcp(int sd) {
         s->zombie = true;
         return 0;
     }
+}
+
+/* ================================================================ */
+/* Retransmission timer hook + introspection                        */
+/* ================================================================ */
+
+void sock_tick(uint64_t now_ms) {
+    for (int i = 0; i < SOCK_MAX; i++) {
+        sock_t *s = &socks[i];
+        if (!s->used) continue;
+        if (s->type != OSNOS_SOCK_STREAM) continue;
+        if (s->retx_len == 0) continue;
+        if (s->tcp_state == TCP_CLOSED) { s->retx_len = 0; continue; }
+        /* Pending segment ack'd while we weren't looking. */
+        if ((int32_t)(s->snd_una - (s->retx_seq + s->retx_len)) >= 0) {
+            s->retx_len = 0;
+            continue;
+        }
+
+        uint64_t elapsed = now_ms - s->retx_sent_ms;
+        if (elapsed < TCP_RTO_MS) continue;
+
+        if (s->retx_count >= TCP_MAX_RETX) {
+            /* Give up — RST + close the connection. */
+            tcp_send(s->remote_ip, s->remote_port, s->local_port,
+                      s->snd_nxt, s->rcv_nxt,
+                      TCP_FLAG_RST | TCP_FLAG_ACK, 0, NULL, 0);
+            s->tcp_state = TCP_CLOSED;
+            s->retx_len = 0;
+            g_retx_drops++;
+            if (s->zombie) { s->used = false; s->zombie = false; }
+            continue;
+        }
+
+        /* Retransmit the last segment with the same seq number. */
+        tcp_send(s->remote_ip, s->remote_port, s->local_port,
+                  s->retx_seq, s->rcv_nxt,
+                  TCP_FLAG_ACK | TCP_FLAG_PSH,
+                  tcp_advertised_window(s),
+                  s->retx_buf, s->retx_len);
+        s->retx_sent_ms = now_ms;
+        s->retx_count++;
+        g_retx_total++;
+    }
+}
+
+uint64_t sock_tcp_retx_total(void) { return g_retx_total; }
+uint64_t sock_tcp_retx_drops(void) { return g_retx_drops; }
+
+int sock_tcp_state_int(int sd) {
+    sock_t *s = sock_at(sd);
+    if (!s) return -1;
+    if (s->type != OSNOS_SOCK_STREAM) return -1;
+    return (int)s->tcp_state;
+}
+
+int sock_tcp_retx_len(int sd) {
+    sock_t *s = sock_at(sd);
+    if (!s) return -1;
+    if (s->type != OSNOS_SOCK_STREAM) return -1;
+    return (int)s->retx_len;
+}
+
+int sock_tcp_retx_count(int sd) {
+    sock_t *s = sock_at(sd);
+    if (!s) return -1;
+    if (s->type != OSNOS_SOCK_STREAM) return -1;
+    return (int)s->retx_count;
+}
+
+uint16_t sock_tcp_get_local_port(int sd) {
+    sock_t *s = sock_at(sd);
+    if (!s) return 0;
+    return s->local_port;
 }

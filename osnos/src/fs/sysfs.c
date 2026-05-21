@@ -8,6 +8,7 @@
 #include "../net/arp.h"
 #include "../net/icmp.h"
 #include "../net/ip.h"
+#include "../net/socket.h"
 #include "../net/tcp.h"
 #include "../net/udp.h"
 #include "../micro/idt.h"
@@ -424,6 +425,12 @@ static void gen_net(char *out, size_t out_size) {
     os_strlcat(out, num, out_size);
     os_strlcat(out, " / ", out_size);
     os_format_u64(tcp_rx_drops(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, "\ntcp retx/drops: ", out_size);
+    os_format_u64(sock_tcp_retx_total(), num, sizeof(num));
+    os_strlcat(out, num, out_size);
+    os_strlcat(out, " / ", out_size);
+    os_format_u64(sock_tcp_retx_drops(), num, sizeof(num));
     os_strlcat(out, num, out_size);
     os_strlcat(out, "\n", out_size);
 }

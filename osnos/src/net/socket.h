@@ -20,6 +20,8 @@
 #define SOCK_TCP_RX_BUF         4096   /* byte ring per TCP socket */
 #define SOCK_ACCEPT_QUEUE_DEPTH 4      /* pending ESTABLISHED children per LISTEN */
 #define TCP_MSS                 1400   /* IP+TCP+ETH safe payload */
+#define TCP_RTO_MS              500    /* retransmission timeout */
+#define TCP_MAX_RETX            5      /* give up after this many resends */
 
 /* Match Linux x86_64 SOCK_* numbering so user-mode `socket(2)` calls
  * pass these through verbatim. */
@@ -123,6 +125,25 @@ void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
 
 /* Local port → 0 if sd is invalid. Used by udp_send to fill src_port. */
 uint16_t sock_local_port(int sd);
+
+/* ---- Diagnostics / test introspection ---- */
+
+uint64_t sock_tcp_retx_total(void);   /* total retransmits across all sockets */
+uint64_t sock_tcp_retx_drops(void);   /* connections RST'd after TCP_MAX_RETX */
+
+/* Returns -1 on invalid sd. */
+int      sock_tcp_state_int(int sd);  /* tcp_state_t cast to int */
+int      sock_tcp_retx_len (int sd);  /* current pending retx buffer length */
+int      sock_tcp_retx_count(int sd); /* attempts on current segment */
+uint16_t sock_tcp_get_local_port(int sd);
+
+/*
+ * Timer hook: scan TCP sockets, retransmit any segment whose send time
+ * is more than TCP_RTO_MS ms before `now_ms`. Called from timer_handle
+ * at 100 Hz. RST + close the connection once TCP_MAX_RETX attempts are
+ * exhausted on a single segment.
+ */
+void     sock_tick(uint64_t now_ms);
 
 /*
  * Readability poll used by sys_select. Returns true when a non-blocking

@@ -1195,7 +1195,14 @@ OK 8.5.9 DNS resolver + getaddrinfo con nombres — VERIFICADO en QEMU
      programa BSD-sockets que use getaddrinfo/connect/recv compila
      y resuelve nombres reales vía DNS.
 
-OK 8.5.10 /bin/httpd HTTP/1.0 server — VERIFICADO en QEMU
+OK 8.5.10 /bin/httpd HTTP/1.0 server — PARCIAL (1 request por run)
+   KNOWN LIMITATION: la SEGUNDA conexión consecutiva muestra
+   "send hdr FAILED errno=9" (EBADF). Entre recv() y send() de la
+   segunda conexión, el child socket slot se libera (used=false),
+   probablemente por un path de cleanup en la state machine TCP que
+   se gatilla por un RST o FIN-flag inesperado de slirp/curl. La
+   primera conexión sirve perfecto. Workaround: reiniciar httpd
+   entre requests. A debuggear en una sesión dedicada.
    - tests/httpd.c: bind+listen TCP port 80 (default), accept loop
      hasta MAX_CONNS=50 conexiones, parse de "GET /path HTTP/1.0\r\n",
      map a /sd/<path> (default /sd/index.html), abre el archivo
