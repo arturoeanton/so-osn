@@ -2,14 +2,22 @@
 
 > **Goal**: sacar `console_server`, `keyboard_server`, `fs_server` y
 > `shell_server` del ring 0 cooperativo y correrlos como ELFs ring-3
-> bajo `elfs/osn-server/`. El kernel queda con drivers + IPC + VFS
-> core; toda lógica de servicio vive en user-mode con syscalls bien
+> bajo `elfs/osn-server/`. El kernel queda con **drivers + IPC + VFS
+> core**; toda lógica de servicio vive en user-mode con syscalls bien
 > definidas.
 >
+> **Scope explícito**: FASE 10 toca SOLO los servers. Los drivers
+> (PS/2 keyboard hardware poll, framebuffer pixel push, ATA PIO,
+> RTL8139, PIT, LAPIC, PIC) se quedan en el kernel. Sacarlos a
+> ring 3 es **FASE 11** (mucho más complejo: requiere IRQ
+> delegation, MMIO mapping per-task, port I/O delegation, IRQ-driven
+> IPC). NO mezclar las dos fases en una sesión.
+>
 > Este es el último gran refactor antes de poder llamar a OSnOS un
-> microkernel "de verdad". Lo más importante es que cada sub-fase
-> sea **verificable de punta a punta** antes de pasar a la siguiente.
-> Si rompemos algo, sabemos exactamente cuándo.
+> microkernel "de verdad" (a nivel de servicios; a nivel de drivers
+> habrá que esperar a FASE 11). Lo más importante es que cada
+> sub-fase sea **verificable de punta a punta** antes de pasar a la
+> siguiente. Si rompemos algo, sabemos exactamente cuándo.
 
 ---
 
@@ -19,16 +27,23 @@
 2. [Diagrama before / after](#diagrama-before--after)
 3. [Inventario de symbols a tocar](#inventario-de-symbols-a-tocar)
 4. [Sub-fase 10.0 — Pre-reqs detallados](#sub-fase-100--pre-reqs-detallados)
+   - 10.0.a per-task fd tables
+   - 10.0.b pipe(2) syscall
+   - 10.0.c /dev/fb0 + /dev/input0
+   - 10.0.d **headers ABI compartidos**
+   - 10.0.e **cmd_test → /bin/kerntest ELF**
 5. [Sub-fase 10.1 — console_server a ring 3](#sub-fase-101--console_server-a-ring-3)
 6. [Sub-fase 10.2 — keyboard_server a ring 3](#sub-fase-102--keyboard_server-a-ring-3)
-7. [Sub-fase 10.3 — fs_server: eliminación](#sub-fase-103--fs_server-eliminación)
-8. [Sub-fase 10.4 — shell_server a ring 3](#sub-fase-104--shell_server-a-ring-3)
-9. [Sub-fase 10.5 — Cleanup + docs](#sub-fase-105--cleanup--docs)
-10. [ABI de IPC user-mode](#abi-de-ipc-user-mode)
-11. [Riesgos + mitigaciones](#riesgos--mitigaciones)
-12. [Test plan integral](#test-plan-integral)
-13. [Helpers + snippets de partida](#helpers--snippets-de-partida)
-14. [Checklist al retomar](#checklist-al-retomar)
+7. [🛑 Checkpoint — consolidar 10.1 + 10.2](#-checkpoint--consolidar-101--102-antes-de-seguir)
+8. [Sub-fase 10.3 — fs_server: eliminación](#sub-fase-103--fs_server-eliminación)
+9. [Sub-fase 10.4 — shell_server a ring 3](#sub-fase-104--shell_server-a-ring-3)
+10. [Sub-fase 10.5 — Cleanup + docs](#sub-fase-105--cleanup--docs)
+11. [ABI de IPC user-mode](#abi-de-ipc-user-mode)
+12. [Riesgos + mitigaciones](#riesgos--mitigaciones)
+13. [Test plan integral](#test-plan-integral)
+14. [Helpers + snippets de partida](#helpers--snippets-de-partida)
+15. [Checklist al retomar](#checklist-al-retomar)
+16. [Después de FASE 10 (incluye FASE 11 drivers)](#después-de-fase-10)
 
 ---
 
@@ -75,11 +90,27 @@ si el server ring-3 simplemente NO necesita esa capacidad).
 - ✅ Env passing via crt0.
 - ✅ libc Tier 1 + math + ctype + signal stubs.
 
-Falta:
+Falta (FASE 10 = scope de este plan):
 - ❌ Per-task fd tables.
 - ❌ Pipe(2) syscall expuesto a userland.
 - ❌ Dispositivos en `/dev` que abstraigan framebuffer + keyboard.
 - ❌ Syscalls IPC para tasks ring-3.
+- ❌ Headers ABI compartidos kernel ↔ ring-3 servers.
+- ❌ ELF separado para `cmd_test` (hoy live en shell, lo movemos
+  ANTES de tocar el shell).
+
+Lo que NO entra en FASE 10 (futuro FASE 11 = drivers a ring 3):
+- 🚫 Driver PS/2 (keyboard hardware poll + scancode decode).
+- 🚫 Driver framebuffer (pixel push, font glyphs, CSI parser).
+- 🚫 Driver ATA PIO + FAT16 backend.
+- 🚫 Driver RTL8139 + IP/TCP stack.
+- 🚫 Driver PIT / LAPIC / PIC.
+- 🚫 IRQ delegation, MMIO mapping, port-IO via syscall.
+
+Esos siguen kernel-side post-FASE-10. Los servers ring-3 los
+usan vía abstracciones de fd (`/dev/fb0`, `/dev/input0`) o via
+syscalls genéricos (open/read/write/ioctl) — el server no toca
+hardware directamente.
 
 ---
 
@@ -449,6 +480,132 @@ while (read(fd, &ev, sizeof(ev)) == sizeof(ev)) {
 
 ---
 
+### 10.0.d — Headers ABI compartidos kernel ↔ ring-3
+
+**Estimate**: 100 LOC, **~1 hr**.
+
+Hoy los servers kernel-side `#include "../micro/ipc.h"` con
+`ipc_type_t`, `ipc_msg_t`, `SERVER_*` IDs definidos del lado
+kernel. Cuando un server ring-3 quiera mandar IPC, necesita ver
+los mismos tipos + IDs. Hacer esto ANTES de migrar evita
+divergencia ABI silenciosa.
+
+#### Archivos nuevos
+
+- `src/include/osnos_ipc_abi.h` — definiciones COMPARTIDAS:
+  - `struct ipc_msg_t` (layout exacto, ABI estable)
+  - `enum ipc_type_t` (todos los `IPC_*` opcodes)
+  - `SERVER_*` IDs (`SERVER_FS=4`, etc.)
+- `lib/libc/include/osnos_ipc.h` — wrapper que `#include`s el
+  anterior, listo para uso desde ELFs ring-3.
+
+#### Cambios
+
+| Archivo | Cambio |
+|---|---|
+| `src/micro/ipc.h` | `#include "../include/osnos_ipc_abi.h"` y deja solo las funciones kernel-internas (`ipc_send`, `ipc_recv_block`, etc.) |
+| `lib/libc/include/osnos_ipc.h` | nuevo, expone `ipc_msg_t` + `SERVER_*` + helpers de syscall |
+| `src/include/osnos_status.h` | mover a `osnos_abi/` si no estaba accesible para user |
+| `src/include/osnos_keys.h` | idem — los keycodes son ABI |
+
+**Regla**: los headers en `src/include/` que terminan en `_abi.h`
+o que ya se compartían (keys, status) son la **frontera ABI**.
+Cambiarlos requiere coordinar kernel + libc + todos los ELFs.
+
+#### Test plan 10.0.d
+
+- `make clean && make` sin warnings.
+- Todos los tests siguen verdes (no debería cambiar nada
+  funcional — solo refactor de includes).
+
+#### Por qué hacerlo aquí
+
+Sin esto, en 10.1 vamos a duplicar definiciones entre kernel y
+servers ring-3, y la próxima vez que cambiemos `ipc_msg_t` (e.g.
+agregar `msg.timestamp`) tendríamos que tocar dos lugares y un
+mismatch silencioso corrompería todos los IPCs. ABI primero.
+
+---
+
+### 10.0.e — Mover cmd_test a `/bin/kerntest` ELF separado
+
+**Estimate**: ~200 LOC mover + 50 nuevo helper, **~2 hr**.
+
+Hoy `cmd_test` vive dentro de `shell_server.c` y llama
+syscalls + funciones kernel-internas con kernel-mode bypass. Es
+**la parte más complicada del shell**. Si la sacamos AHORA (antes
+de tocar nada del shell ring-3), el shell_server.c se queda más
+chico para 10.4, y `test` sigue funcionando idéntico de cara al
+usuario.
+
+#### Archivos nuevos
+
+- `elfs/tests/kerntest.c` — todos los 640 checks que hoy hace
+  `cmd_test`.
+- `src/include/osnos_taskinfo.h` — struct ABI para `sys_taskinfo`
+  (los CHECKs que leen task_slot necesitan equivalente userland).
+
+#### Archivos modificados
+
+- `src/servers/shell_server.c` — borrar `cmd_test` entero (~400
+  LOC). Reemplazar la entry del table por:
+  ```c
+  CMD("test", cmd_test_exec, "run /bin/kerntest"),
+  ```
+  donde `cmd_test_exec` simplemente hace `proc_execve("/bin/kerntest"...)`.
+
+#### Reescritura de checks
+
+Cada CHECK que tocaba kernel internals se traduce:
+
+| Antes (cmd_test) | Después (kerntest.c) |
+|---|---|
+| `osnos_fd_t *f = fd_get(fd)` | `struct stat st; fstat(fd, &st)` |
+| `task_slot(i)` | `sys_taskinfo(i, &info)` (nuevo syscall) |
+| `vfs_stat(path, ...)` | `stat(path, &st)` |
+| `vfs_read(path, buf, sz, &got)` | `int fd = open(path); read(fd, buf, sz)` |
+| `sock_close(idx)` | (no aplica — ELF no inspecciona) |
+| `kheap_used_bytes()` | parse `/sys/meminfo` |
+| `kheap_grow_events()` | parse `/sys/meminfo` |
+| `sys_open` con kernel ptr | `open()` normal (es ring 3 real) |
+
+Hay ~20 checks que necesitan `sys_taskinfo` o counters. Agregarlo
+acá adelanta el syscall a 10.0 en vez de 10.4.
+
+#### Syscall nuevo: SYS_TASKINFO
+
+Adelantado de 10.4. Signature:
+
+```c
+struct osnos_taskinfo {
+    uint64_t pid;
+    char     name[32];
+    uint8_t  state;          /* TASK_READY / RUNNING / BLOCKED / STOPPED / DEAD */
+    uint8_t  is_user;        /* pml4 != 0 */
+    uint8_t  pad[6];
+    uint64_t dispatches;     /* contador para top */
+};
+int64_t sys_taskinfo(size_t idx, struct osnos_taskinfo *out);
+```
+
+#### Test plan 10.0.e
+
+- Boot. `test` → `kerntest` ELF arranca y produce mismos 640
+  PASS que antes.
+- `libctest` ELF sigue ~110 pass.
+- Comportamiento user-visible **idéntico** — solo cambió que
+  ahora `test` es un ELF.
+
+#### Por qué hacerlo aquí (no en 10.4)
+
+Cuando lleguemos al refactor del shell (10.4), `cmd_test` ya está
+fuera. El shell queda con ~3375 LOC (de 3775) y todos los
+syscalls de inspección kernel quedan solo en kerntest.c —
+zero overlap con la lógica del shell. Reduce el riesgo del
+refactor grande sustancialmente.
+
+---
+
 ## Sub-fase 10.1 — console_server a ring 3
 
 **Estimate**: 100 LOC, **1 hr**.
@@ -617,6 +774,50 @@ service registry.
 
 ---
 
+## 🛑 Checkpoint — consolidar 10.1 + 10.2 antes de seguir
+
+**No tocar el shell hasta que console + keyboard ring-3 estén
+100% estables**. Los crashes del shell son catastróficos (el
+usuario queda sin UI); los crashes de console/keyboard ring-3
+también, pero al menos los podemos restartear sin perder la
+"interfaz primaria".
+
+### Criterios para pasar a 10.3 / 10.4
+
+- [ ] **Una sesión COMPLETA de uso normal** con console+kbd
+      ring-3, sin reboots por bugs. "Uso normal" = abrir/cerrar
+      ovi, browse FAT, ejecutar tests, navegar history, Ctrl+Z
+      varios procesos, `ps`/`top` ELFs.
+- [ ] Todos los tests verdes 3 veces consecutivas (test, libctest,
+      mmaptest, fptest×5 en paralelo, pipes multi-stage, redirs).
+- [ ] `ps` muestra console+kbd como tasks ring-3 (`pml4 != 0`)
+      y se ven sus dispatches creciendo.
+- [ ] Sin "lag visible" tipeando — si lo hay, aplicar la
+      mitigación R1 (keyboard batch) antes de pasar.
+- [ ] Borrar `console_server.c` + `keyboard_server.c` del
+      repo, no solo dejarlos sin uso.
+
+Si alguno falla, **NO empezar 10.3**. Es preferible quedarse
+una sesión más solidificando que arrancar 10.4 sobre cimientos
+frágiles — porque cuando el shell migre y crashee, vas a
+debuguear DOS cosas (shell nuevo + console/kbd reciente) en
+vez de UNA.
+
+### Si surgen mejoras durante esta pausa
+
+Cosas que pueden aparecer y vale la pena hacer **antes** de
+10.3:
+
+- Respawn loop para servers caídos en kmain (R3 mitigación).
+- Performance counters de IPC + context-switches para detectar
+  regresiones temprano.
+- Migrar más helpers del shell que ya sabemos vamos a necesitar
+  ring-3 (e.g., una `shell_send_console_color` que sea wrapper
+  de `printf` con escapes ANSI, lista para usar desde el shell
+  ring-3).
+
+---
+
 ## Sub-fase 10.3 — fs_server: eliminación
 
 **Estimate**: shell refactor ~200 LOC, **2 hr**.
@@ -656,32 +857,22 @@ cambios. Funcionalidad idéntica, solo cambia el path.
 
 ## Sub-fase 10.4 — shell_server a ring 3
 
-**Estimate**: ~1500 LOC modificadas, **5-7 hr** (sesión completa).
+**Estimate**: ~1100 LOC modificadas (sin cmd_test, que ya está
+fuera desde 10.0.e), **4-5 hr**.
 
-### Pre-requisito interno
+### Pre-requisito interno (ya cubierto)
 
-Tenemos que **separar** lo que es lógica del shell (line editor,
-history, command dispatch) de lo que es introspección kernel
-(`cmd_test`, `cmd_top` que mira task_slot[]).
+`cmd_test` está fuera en `/bin/kerntest` desde sub-fase **10.0.e**.
+El shell queda con ~3375 LOC de lógica pura (line editor, history,
+command dispatch, IPC handlers, parser de pipes/redirects). Nada
+de introspección kernel directa.
 
-#### Camino A — mover cmd_test a un ELF separado
-
-`cmd_test` queda en `elfs/tests/kerntest.c` y el shell hace exec
-de él. Eso es lo más limpio. Pero rompe la convención "type `test`
-para correr todos los tests".
-
-#### Camino B — exponer sys_taskinfo + sys_kheap_stats
-
-Nuevos syscalls de "leer estado del kernel" minimal. cmd_test
-queda en shellsrv pero llama syscalls en vez de tocar structs.
-
-**Recomendado**: Camino A. Más limpio, menos syscalls nuevos,
-más fácil testear.
+`cmd_top` — todavía vive en shell pero usa `sys_taskinfo` (también
+agregada en 10.0.e). Ya es ring-3 friendly.
 
 ### Archivos nuevos
 
 - `elfs/osn-server/shellsrv.c` — el shell propiamente dicho.
-- `elfs/tests/kerntest.c` — el "test" command de hoy, ahora ELF.
 
 ### Archivos eliminados
 
@@ -711,19 +902,14 @@ Internamente cada `cmd_*` (cmd_ls, cmd_cat, ...) sigue ahí pero
 ahora hace syscalls puros. Es **el grueso del trabajo**: ~50
 funciones a refactorear.
 
-### Tests del shell — qué pasa con cmd_test
+### Tests del shell
 
-cmd_test hoy hace:
-- vfs_* directo (no syscall) — convertir a syscalls.
-- fd_get(fd) directo — eliminar / mover a libctest.
-- task_slot(idx) — eliminar / mover a `/sys/tasks` reading.
-- sys_open/read/write con kernel-mode bypass — ya invoca syscalls,
-  pero el bypass de copy_*_user no aplica más (es ring 3 real).
+`cmd_test` ya está fuera como `/bin/kerntest` (sub-fase 10.0.e),
+así que **el shell ring-3 ni necesita pensarlo**. El `test`
+shell command es ahora solo `proc_execve("/bin/kerntest")` —
+una línea.
 
-**Realmente**: cuando el shell sea ring 3, sus invocaciones de
-sys_* SON syscalls normales. El bypass desaparece. Funciona for
-free. Lo que rompe son los tests que tocan `fd_get` / `task_slot`
-directo — esos pasan a `libctest` o a `kerntest` nuevo.
+`libctest` ya era ELF ring-3 desde siempre.
 
 ### Test 10.4
 
@@ -1065,9 +1251,27 @@ sesión es de 2-3 hr, dividir en:
 - Sesión 2: limpiar pipe_in/pipe_out hack + stdin_redir hack
   porque ahora son fds reales.
 - Sesión 3: pipe(2) expose + /dev/fb0 + /dev/input0.
+- Sesión 4: headers ABI (10.0.d) + extraer cmd_test a kerntest
+  ELF (10.0.e). **Importante hacer estos dos juntos** — la ABI
+  estable habilita el ELF y el ELF revela cualquier gap en la
+  ABI.
 
-Cada una se valida con el `test plan 10.0.a` antes de pasar a la
-siguiente.
+Cada una se valida con el `test plan` correspondiente antes de
+pasar a la siguiente.
+
+### Reglas importantes (resumen de los ajustes)
+
+1. **FASE 10 ≠ FASE 11.** Servers a ring 3 (este plan) vs drivers
+   a ring 3 (futuro). NO mezclar.
+2. **Headers ABI primero (10.0.d)** — antes de cualquier server
+   ring-3, dejar la frontera kernel/ring-3 bien definida.
+3. **NO migrar el shell** hasta que console + keyboard ring-3
+   hayan sobrevivido una sesión completa de uso real (ver
+   checkpoint entre 10.2 y 10.3).
+4. **Extraer cmd_test a /bin/kerntest cuanto antes** (10.0.e)
+   — reduce el alcance del refactor del shell sustancialmente
+   y deja la introspección kernel en un único ELF testeable
+   por separado.
 
 ---
 
@@ -1078,31 +1282,76 @@ siguiente.
 | 10.0.a per-task fd tables | 5-8 |
 | 10.0.b pipe(2) syscall | 2 |
 | 10.0.c /dev/fb0 + /dev/input0 | 2 |
+| 10.0.d headers ABI compartidos | 1 |
+| 10.0.e cmd_test → /bin/kerntest ELF | 2 |
 | 10.1 console_server | 1 |
 | 10.2 keyboard_server | 1 |
+| **Checkpoint** (consolidar 10.1+10.2) | 0 LOC, 1 sesión de uso real |
 | 10.3 fs_server (eliminar) | 2 |
-| 10.4 shell_server (BIG) | 5-7 |
+| 10.4 shell_server (sin cmd_test) | 4-5 |
 | 10.5 cleanup + docs | 1 |
-| **Total** | **19-24 hr** |
+| **Total** | **21-25 hr** |
 
-≈ **4-5 sesiones de trabajo concentrado de 4-5 hr cada una**.
+≈ **5-6 sesiones de trabajo concentrado de 4-5 hr cada una**.
+
+Distribución por sesión sugerida:
+
+- **Sesión 1**: 10.0.a (per-task fd tables) — el grande.
+- **Sesión 2**: 10.0.b + 10.0.c (pipe + /dev/*).
+- **Sesión 3**: 10.0.d + 10.0.e (ABI + kerntest extraction).
+- **Sesión 4**: 10.1 + 10.2 (console + keyboard). Termina con
+  el checkpoint.
+- **Sesión 5**: 10.3 + 10.4 (fs eliminar + shell ring-3).
+- **Sesión 6**: 10.5 (cleanup + docs) + testing largo.
 
 ---
 
 ## Después de FASE 10
 
-Naturales:
+### FASE 11 — Drivers a ring 3 (no entra en este plan)
+
+El gran refactor que sigue. Mucho más complejo que FASE 10
+porque toca:
+
+- **IRQ delegation**: hoy el timer IRQ corre en kernel y llama
+  scheduler_tick. Para PS/2 ring-3 necesitamos que el IRQ
+  handler kernel-side mande un IPC al driver, que despierta y
+  consume el scancode. Latency adicional, locking, IRQ
+  threading.
+- **MMIO mapping per-task**: el framebuffer es una región de
+  memoria fija del PCI. Para que un driver ring-3 lo escriba,
+  el kernel le tiene que mapear esas páginas en su pml4 con
+  permisos especiales.
+- **Port I/O delegation**: ATA usa `in`/`out` en CPL=0. Hay que
+  exponer un syscall `sys_inb`/`sys_outb` con whitelist por
+  task, o usar IOPB en TSS para dar acceso selectivo.
+- **DMA bouncing**: RTL8139 usa DMA. Driver ring-3 no puede
+  programar direcciones físicas directamente; necesita
+  buffer pool kernel-mediated.
+
+**Scope FASE 11**: portar PS/2, framebuffer, ATA, RTL8139, PIT
+a `elfs/osn-driver/`. Es **dos a tres veces** el trabajo de
+FASE 10. Mejor cerrarla cuando FASE 10 esté sólida + tengamos
+varias semanas de uso real validando que el modelo IPC
+escala.
+
+**No mezclar FASE 10 y FASE 11 en una sesión**. Cada una es
+un capítulo en sí mismo.
+
+### Otros pasos naturales post-FASE-10 (más cortos)
 
 - **fork()** real. Per-task fd tables ✓ + COW pml4 (nuevo trabajo).
-- **execve()** real con preservación de pid. Libc surface ya existe.
+- **execve()** real con preservación de pid. Libc surface ya
+  existe.
 - **Real init process**. Hoy kmain spawn shell directo; con fork
   podríamos tener `/bin/init` que spawn shell + servers.
+- **TCC port real** (cubierto en ROADMAP_APENDICE.md).
 
 Postponed:
 - PTY pairs (job control simple ya alcanza para mayoría de uso).
 - Real-time signals (signal queue, sigaction, etc).
-- SMP. Mucho más adelante; FASE 10 implica zero shared state, que
-  ayuda enorme cuando lleguemos.
+- SMP. Mucho más adelante; FASE 10/11 implican zero shared
+  state, que ayuda enorme cuando lleguemos.
 
 ---
 
