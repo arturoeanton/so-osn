@@ -148,6 +148,7 @@ DECLARE_ELF(kerntest);
 DECLARE_ELF(spawntest);
 DECLARE_ELF(consrv);
 DECLARE_ELF(kbdsrv);
+DECLARE_ELF(shellsrv);
 
 #undef DECLARE_ELF
 
@@ -217,6 +218,7 @@ static const builtin_t builtins[] = {
     ELF(spawntest,    "exercise SYS_SPAWN + fd inheritance (FASE 10.4 prereq)"),
     ELF(consrv,       "console server ring-3 (FASE 10.1) — spawned by kmain"),
     ELF(kbdsrv,       "keyboard policy server ring-3 (FASE 10.2) — spawned by kmain"),
+    ELF(shellsrv,     "ring-3 shell skeleton (FASE 10.4 chunk 1) — run as sub-shell"),
 };
 
 #undef USER

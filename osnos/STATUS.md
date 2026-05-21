@@ -103,10 +103,10 @@ canonical/raw, /home persistente cross-reboot.
 | Shell script | `osh` | 1 | intérprete de scripts |
 | Tools (coreutils-like) | hello, true, false, init, cat, touch, mkdir, rmdir, rm, mv, cp, ls, echo, calc, sleep, kill, top, ovi, tcc, head | 20 | en `/bin/` |
 | Net | tcpclient, udptest, echotcp, selecttest, selectserver, httpd | 6 | clientes/servidores TCP/UDP |
-| Tests | hello_libc, libctest, ttytest, envtest, fptest, mmaptest, pipetest, fbtest, inputtest, kerntest, user_hello (bare) | 11 | sanidad + ABI |
-| **Total ELFs** | | **40** | |
+| Tests | hello_libc, libctest, ttytest, envtest, fptest, mmaptest, pipetest, fbtest, inputtest, kerntest, spawntest, user_hello (bare) | 12 | sanidad + ABI |
+| **Total ELFs** | | **41** | |
 
-**Distinción clave**: de los 40 ELFs, `consrv` y `kbdsrv` son *servers* (long-running daemons spawneados al boot por kmain). Los otros 38 son programas one-shot.
+**Distinción clave**: de los 41 ELFs, `consrv` y `kbdsrv` son *servers* (long-running daemons spawneados al boot por kmain). Los otros 39 son programas one-shot.
 
 **Lo que falta migrar a ring 3 (FASE 10.4+):**
 - `shell_server.c` → ELF `shellsrv` (el más grande, ~3375 LOC sin cmd_test)

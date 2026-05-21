@@ -136,7 +136,8 @@ USER_ELF_LIBC_SRCS := \
     elfs/tests/kerntest.c \
     elfs/tests/spawntest.c \
     elfs/osn-server/consrv.c \
-    elfs/osn-server/kbdsrv.c
+    elfs/osn-server/kbdsrv.c \
+    elfs/osn-server/shellsrv.c
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS))
