@@ -284,7 +284,16 @@ static void check_fs(osnos_status_t status) {
     if (status != OSNOS_OK) report_fs_failure(status);
 }
 
-/* ---- history ---- */
+/* ---- history + rc scripts ---- */
+
+/* Persistent history file. Off during the load to avoid feeding the
+ * file back into itself; flipped on right after the load completes. */
+#define HISTORY_PATH "/home/.history"
+static int history_persistent = 0;
+
+/* Set while we replay .oshrc lines through run_command — squelches
+ * prompt redraws so the rc runs invisibly. */
+static int silent_mode = 0;
 
 static void history_save(const char *cmd) {
     if (cmd[0] == 0) return;
@@ -297,13 +306,99 @@ static void history_save(const char *cmd) {
     if (history_count < HISTORY_MAX) {
         os_strlcpy(history[history_count], cmd, OSNOS_INPUT_MAX);
         history_count++;
-        return;
+    } else {
+        for (size_t i = 0; i + 1 < HISTORY_MAX; i++) {
+            os_strlcpy(history[i], history[i + 1], OSNOS_INPUT_MAX);
+        }
+        os_strlcpy(history[HISTORY_MAX - 1], cmd, OSNOS_INPUT_MAX);
     }
 
-    for (size_t i = 0; i + 1 < HISTORY_MAX; i++) {
-        os_strlcpy(history[i], history[i + 1], OSNOS_INPUT_MAX);
+    /* Append to the on-disk history so the next boot can replay it.
+     * The guard skips during the initial load (we don't want to grow
+     * the file just by reading it). */
+    if (history_persistent) {
+        char line[OSNOS_INPUT_MAX + 1];
+        size_t n = 0;
+        for (size_t i = 0; cmd[i] && n + 1 < sizeof(line); i++) line[n++] = cmd[i];
+        line[n++] = '\n';
+        vfs_append(HISTORY_PATH, line, n);
     }
-    os_strlcpy(history[HISTORY_MAX - 1], cmd, OSNOS_INPUT_MAX);
+}
+
+/* Load history lines from disk into the in-memory ring on shell boot.
+ * Keeps only the last HISTORY_MAX entries — older lines stay in the
+ * file but won't show in arrow navigation. */
+static void load_persistent_history(void) {
+    vfs_stat_t st;
+    if (vfs_stat(HISTORY_PATH, &st) != OSNOS_OK) return;
+    if (st.type != VFS_NODE_REG)                 return;
+
+    /* Read at most a generous slab. If the file is huge we just take
+     * the last 8 KiB which is plenty for HISTORY_MAX=16 short lines. */
+    static char buf[8192];
+    size_t got = 0;
+    if (vfs_read(HISTORY_PATH, buf, sizeof(buf), &got) != OSNOS_OK) return;
+    if (got == 0) return;
+
+    /* Walk lines and push them through the in-memory ring. */
+    size_t i = 0;
+    while (i < got) {
+        size_t j = i;
+        while (j < got && buf[j] != '\n') j++;
+        if (j > i) {
+            char line[OSNOS_INPUT_MAX];
+            size_t copy = j - i;
+            if (copy >= sizeof(line)) copy = sizeof(line) - 1;
+            for (size_t k = 0; k < copy; k++) line[k] = buf[i + k];
+            line[copy] = 0;
+            /* Re-use history_save's dedup + ring shift, but with the
+             * persistence flag off (set by caller). */
+            history_save(line);
+        }
+        i = (j < got) ? j + 1 : j;
+    }
+}
+
+/* Execute lines from /home/.oshrc as if the user had typed them.
+ * Re-entry guard: a flag prevents recursive invocation if a .oshrc
+ * line ever tries to trigger another oshrc reload. */
+#define OSHRC_PATH "/home/.oshrc"
+static int oshrc_running = 0;
+
+static void run_command(const char *cmd);  /* forward */
+
+static void run_oshrc(void) {
+    if (oshrc_running) return;
+    vfs_stat_t st;
+    if (vfs_stat(OSHRC_PATH, &st) != OSNOS_OK) return;
+    if (st.type != VFS_NODE_REG)               return;
+
+    static char rcbuf[4096];
+    size_t got = 0;
+    if (vfs_read(OSHRC_PATH, rcbuf, sizeof(rcbuf) - 1, &got) != OSNOS_OK) return;
+    rcbuf[got] = 0;
+
+    oshrc_running = 1;
+    silent_mode   = 1;
+
+    size_t i = 0;
+    while (i < got) {
+        size_t j = i;
+        while (j < got && rcbuf[j] != '\n') j++;
+        rcbuf[j] = 0;  /* destructive split — fine, rcbuf is scratch */
+
+        /* Trim leading whitespace. */
+        char *p = &rcbuf[i];
+        while (*p == ' ' || *p == '\t') p++;
+        /* Skip blanks and comments. */
+        if (*p != 0 && *p != '#') {
+            run_command(p);
+        }
+        i = (j < got) ? j + 1 : j;
+    }
+
+    silent_mode   = 0;
+    oshrc_running = 0;
 }
 
 static void redraw_input(const char *new_input) {
@@ -2707,6 +2802,7 @@ static void cmd_reboot(const char *args) {
 /* ---- dispatch ---- */
 
 static void prompt(void) {
+    if (silent_mode) return;
     shell_send_console_color("osnos:", 0x00ff66);
     shell_send_console_color(current_path, 0x00ffff);
     shell_send_console_color("> ", 0x00ff66);
@@ -2777,6 +2873,17 @@ void shell_server_init(void) {
 
     shell_send_console_color("osnos microkernel shell\n", 0xffffff);
     shell_send_console_color("type help\n\n", 0xaaaaaa);
+
+    /* Restore persistent history. The flag stays off during the load
+     * so we don't grow the file just by reading it; flip it on so
+     * subsequent commands append. */
+    history_persistent = 0;
+    load_persistent_history();
+    history_persistent = 1;
+
+    /* Run user startup script if present. Silent mode keeps the
+     * boot screen tidy — no prompts between each replayed command. */
+    run_oshrc();
 
     prompt();
 }

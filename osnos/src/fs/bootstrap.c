@@ -68,11 +68,20 @@ void bootstrap_fs(void) {
         seed_if_absent("/home/README.TXT",
             "Welcome to osnos.\nYour home lives on FAT16 — files persist across reboots.\n");
         seed_if_absent("/home/HELLO.TXT", "Hello from FAT-backed /home!\n");
+        /* Sample shell rc — user-editable. shell_server_init looks
+         * for /home/.oshrc and replays each line at boot. */
+        seed_if_absent("/home/.oshrc",
+            "# osnos shell startup\n"
+            "# Lines run silently at every shell boot. Edit me!\n"
+            "# export FOO=bar\n"
+            "# cd /sd\n");
     } else {
         /* Diskless: same ramfs-backed /home as before. */
         vfs_mkdir("/home");
         seed_file("/home/README.TXT",
             "Welcome to osnos.\nThis is a tiny RAM filesystem (no disk attached).\n");
         seed_file("/home/HELLO.TXT", "Hello from ramfs!\n");
+        seed_file("/home/.oshrc",
+            "# osnos shell startup (RAM-only — won't persist across reboots)\n");
     }
 }

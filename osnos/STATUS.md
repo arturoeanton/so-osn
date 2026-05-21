@@ -1,5 +1,45 @@
 ## Estado actual
 
+### Resumen ejecutivo
+
+OSnOS hoy es un kernel x86_64 hobby con ring-3 ELFs, scheduler
+preempt, FAT16 persistente, stack TCP/IP completo, line discipline
+POSIX, y un shell con history + rc files.
+
+**Fases cerradas (orden cronológico inverso):**
+
+| Fase | Subsistema | Líneas (≈) |
+|------|-----------|------------|
+| Shell rc + history | `.history`, `.oshrc` con guard anti-recursión | 100 |
+| /home alias | aliasfs (bind-mount VFS) → `/home`=`/sd/home` | 200 |
+| libc exec family | execv/execve/execvp con PATH walk | 80 |
+| env passing + PATH | shell env, envp end-to-end, getenv/setenv | 250 |
+| Reorg elfs/ | shell/tools/net/tests/osn-server subdirs | (refactor) |
+| TTY 1+2 | termios ABI + canonical/raw + ISIG | 400 |
+| kheap Fase B | slab allocator 8 buckets power-of-2 | 200 |
+| kheap Fase A | growth dinámico cap 4 MiB | 60 |
+| FASE 8.5.x | networking completo (RTL8139→TCP→DNS→HTTP) | ~2300 |
+| FASE 9 | scheduler preempt CPL=3 + sleep/Ctrl+C/bg | 600 |
+| FASE 8 | ATA PIO + FAT16 r/w + persistencia | 1100 |
+| FASE 7 | libc + ELF ring-3 + crt0 + 25 tools | 1500 |
+| FASE 2-6 | VFS + microkernel + IPC + paging + ELF | 2500 |
+
+**Tests**: 603/603 pass (KHEAP + SLAB + SOCK + VFS + libc + ramfs + FAT).
+
+**Demos que funcionan end-to-end** (compilan código upstream sin
+modificar): `selectserver.c` de Beej, curl/Firefox contra
+`/bin/httpd`, `tcpclient google.com 80` con DNS real, ttytest
+canonical/raw, /home persistente cross-reboot.
+
+**TODOs no-bloqueantes** (postergados):
+- sys_execve real (libc surface lista, requiere coupling fg_pid)
+- TTY 3+ (PTY pairs, sessions, process groups)
+- FASE 10 (servers a ring 3 en elfs/osn-server/)
+- fork() real (sin fork hoy)
+- IPv6, TLS, DHCP (en ROADMAP_APENDICE.md)
+
+---
+
 ### Boot + drivers
 OK boot con Limine + QEMU
 OK framebuffer + font bitmap
@@ -795,7 +835,10 @@ OK 8.9 self-test extendido — VERIFICADO en QEMU
    - SKIP automático del bloque FAT si /sd no está montado (boot sin
      sd.img).
 
-### FASE 8.5 — Networking (post-FAT) — EN PROGRESO
+### FASE 8.5 — Networking (post-FAT) — CERRADA
+   (Sub-items individuales detallados abajo; ítems opcionales como
+   IPv6 / DHCP / TLS movidos a ROADMAP_APENDICE.md.)
+
 
 OK 8.5.1 PCI scan + RTL8139 driver — VERIFICADO en QEMU
    - src/micro/pmm.c: pmm_alloc_pages_contig(n_pages). Linear scan
@@ -1516,6 +1559,52 @@ OK libc exec family + execvp PATH walk
      reemplazar la imagen). Postponed — no bloquea nada inmediato
      porque el shell ya hace proc_execve kernel-internal para
      spawn de niños.
+
+### FASE shell rc + history persistente — CERRADA
+OK .history (historial persistente) + .oshrc (startup script)
+   - **history_save** ahora hace vfs_append("/home/.history", line+"\n")
+     después del push al ring en memoria. Guard `history_persistent`
+     evita que el flag se grabe a sí mismo durante el load inicial.
+   - **load_persistent_history()** se ejecuta al inicio del shell:
+     vfs_read del archivo, parsea por '\n', cada línea va por
+     history_save (con flag off) reusando dedup + ring shift.
+     Soporta hasta 8 KiB de buffer; las últimas HISTORY_MAX (=16)
+     entries quedan disponibles en flechas up/down.
+   - **run_oshrc()**: lee /home/.oshrc al boot, trim leading
+     whitespace, ignora líneas vacías y comments (`#`). Cada línea
+     se pasa por run_command como si la hubiera tipeado el user.
+     Guard `oshrc_running` previene reentrancia. `silent_mode` flag
+     hace `prompt()` no-op durante el replay → el boot queda limpio.
+   - **bootstrap_fs**: seed_if_absent crea /home/.oshrc con sample
+     comentado en primer boot (FAT path). En diskless seedea uno
+     mínimo en ramfs. .history se crea al primer comando que
+     ejecute el usuario (vfs_append crea el archivo si falta).
+   - **Naming**: .history (compat semantic con bash/zsh: nombre
+     común, contenido propio), .oshrc (claramente del osnos shell).
+   - Survivability: con FAT, ambos persisten via /home → /sd/home.
+     Tipo en un boot, recuperá con flecha ↑ tras reboot. .oshrc
+     queda como el lugar natural para "cd a tu workdir" o
+     "export VARS" automáticos.
+
+### FASE /home alias — CERRADA
+OK aliasfs (bind-mount VFS backend) + /home → /sd/home
+   - **src/fs/aliasfs.{c,h}**: nuevo backend con un translate()
+     interno que sustituye `mount_prefix` por `target_prefix` en
+     cualquier path entrante. Todas las ops (stat/readdir/read/
+     write/mkdir/rmdir/unlink/append/rename) traducen + delegan
+     vía vfs_*, así que cualquier backend abajo sirve (FAT16 en
+     este caso). Lifecycle: aliasfs_t en BSS del bootstrap, vive
+     forever junto con su mount slot.
+   - **src/fs/bootstrap.c**:
+     - Con FAT montado: vfs_mkdir("/sd/home"); aliasfs_init mapea
+       /home → /sd/home; vfs_mount("/home", &aliasfs_ops, slot).
+       Seed de README.TXT / HELLO.TXT solo si ausentes
+       (seed_if_absent: stat-then-write) — preserva ediciones
+       entre reboots.
+     - Sin FAT: ramfs como antes (path corto).
+   - Efecto user-visible: `echo persistente > /home/note` queda
+     en /sd/home/note y sobrevive reboots. `ls /home` y `ls
+     /sd/home` muestran lo mismo.
 
 ### Reorganización elfs/ (desde tests/)
    tests/ se renombró a elfs/ con subcategorías:
