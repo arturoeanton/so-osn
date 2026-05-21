@@ -53,7 +53,14 @@ USER_CFLAGS := -g -O2 -pipe \
 	-ffunction-sections -fdata-sections \
 	-target x86_64-unknown-none-elf \
 	-m64 -march=x86-64 -mabi=sysv \
-	-mno-80387 -mno-mmx -mno-sse -mno-sse2 -mno-red-zone
+	-mno-red-zone
+# Ring-3 ELFs get x87 + SSE + SSE2 (the SysV x86_64 ABI default).
+# The kernel itself stays -mno-80387 -mno-sse* (set per-file), so
+# kernel code never touches FP registers; user tasks can use
+# double/float freely once kmain enables the FPU (CR0/CR4 bits).
+# Per-task FXSAVE isn't implemented yet, so mixing FP across
+# multiple concurrent user tasks may corrupt state — single-task
+# FP (like TCC compiling in the foreground) is fine.
 
 USER_LDFLAGS := -m elf_x86_64 -nostdlib -static -no-pie \
 	-z noexecstack --gc-sections
@@ -109,6 +116,8 @@ USER_ELF_LIBC_SRCS := \
     elfs/tools/kill.c \
     elfs/tools/top.c \
     elfs/tools/ovi.c \
+    elfs/tools/tcc.c \
+    elfs/tools/head.c \
     elfs/net/udptest.c \
     elfs/net/echotcp.c \
     elfs/net/selecttest.c \

@@ -2318,6 +2318,93 @@ static void cmd_test(const char *args) {
               "CLOCK: bogus clk_id -> -EINVAL");
     }
 
+    /* ----- exec ELF desde VFS (no solo /bin/) ----- */
+    {
+        /* Take an existing builtin ELF blob and copy it onto the
+         * VFS as /test/hello-vfs. Then exec by absolute path:
+         * proc_execve must fall through the builtin lookup, slurp
+         * the blob via vfs_read, and load it like any /bin entry. */
+        extern const uint8_t _binary_hello_elf_start[];
+        extern const uint8_t _binary_hello_elf_end[];
+        size_t blob_n = (size_t)(_binary_hello_elf_end - _binary_hello_elf_start);
+        osnos_status_t ws = vfs_write("/test/hello-vfs",
+                                       (const char *)_binary_hello_elf_start,
+                                       blob_n);
+        CHECK(ws == OSNOS_OK, "EXEC_VFS: blob written to /test");
+
+        /* We don't actually dispatch the spawned task here (the
+         * shell can't yield mid-test cleanly), but proc_execve
+         * goes far enough to validate the ELF + allocate the
+         * task slot. A non-negative return == path resolved and
+         * elf_load liked the bytes. */
+        int64_t pid = proc_execve("/test/hello-vfs", "", 0);
+        CHECK(pid >= 1, "EXEC_VFS: pid allocated from arbitrary path");
+
+        /* If we got a pid, immediately tear the task down so it
+         * doesn't actually run during the test. */
+        if (pid >= 1) {
+            task_t *child = task_by_pid((uint64_t)pid);
+            if (child) child->state = TASK_DEAD;
+        }
+
+        /* Negative paths. */
+        int64_t bad = proc_execve("/test/nope.bin", "", 0);
+        CHECK(bad < 0, "EXEC_VFS: missing file -> negative");
+
+        sys_unlink("/test/hello-vfs");
+    }
+
+    /* ----- write con offset real (lseek + write replaces bytes) ----- */
+    {
+        /* Fresh small file: write "AAAAAAAAAA". */
+        int64_t fd = sys_open("/test/seek.txt",
+                               O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        CHECK(fd >= 3, "WRITE_OFFSET: open new file");
+        const char *aaa = "AAAAAAAAAA";
+        int64_t w = sys_write((int)fd, aaa, 10);
+        CHECK(w == 10, "WRITE_OFFSET: initial 10 bytes");
+        sys_close((int)fd);
+
+        /* Reopen rw, seek to offset 3, overwrite "BB". */
+        fd = sys_open("/test/seek.txt", O_WRONLY, 0);
+        CHECK(fd >= 3, "WRITE_OFFSET: reopen wr");
+        int64_t s = sys_lseek((int)fd, 3, 0 /* SEEK_SET */);
+        CHECK(s == 3, "WRITE_OFFSET: lseek to 3");
+        w = sys_write((int)fd, "BB", 2);
+        CHECK(w == 2, "WRITE_OFFSET: write 2 at offset 3");
+        sys_close((int)fd);
+
+        /* Read back, expect "AAABBAAAAA" (length 10). */
+        fd = sys_open("/test/seek.txt", O_RDONLY, 0);
+        CHECK(fd >= 3, "WRITE_OFFSET: reopen rd");
+        char check[16] = {0};
+        int64_t r = sys_read((int)fd, check, sizeof(check) - 1);
+        CHECK(r == 10, "WRITE_OFFSET: read back 10 bytes");
+        check[r > 0 ? r : 0] = 0;
+        CHECK(os_streq(check, "AAABBAAAAA"),
+              "WRITE_OFFSET: middle bytes overwritten in place");
+        sys_close((int)fd);
+
+        /* Sparse-hole write: seek past EOF, write. */
+        fd = sys_open("/test/seek.txt", O_WRONLY, 0);
+        sys_lseek((int)fd, 15, 0);
+        w = sys_write((int)fd, "Z", 1);
+        CHECK(w == 1, "WRITE_OFFSET: write past EOF");
+        sys_close((int)fd);
+
+        fd = sys_open("/test/seek.txt", O_RDONLY, 0);
+        char hole[32] = {0};
+        r = sys_read((int)fd, hole, sizeof(hole) - 1);
+        CHECK(r == 16, "WRITE_OFFSET: file extended to 16 bytes");
+        CHECK(hole[10] == 0 && hole[11] == 0 && hole[14] == 0,
+              "WRITE_OFFSET: sparse hole filled with zeros");
+        CHECK(hole[15] == 'Z',
+              "WRITE_OFFSET: trailing Z at offset 15");
+        sys_close((int)fd);
+
+        sys_unlink("/test/seek.txt");
+    }
+
     /* ----- dup / dup2 / fcntl ----- */
     {
         int64_t base = sys_open("/test/syscall.txt", O_RDONLY, 0);
@@ -2708,20 +2795,187 @@ static void cmd_tcptest(const char *args) {
     prompt();
 }
 
-static void cmd_exec(const char *args) {
-    if (args[0] == 0) {
-        shell_send_console_color("\nusage: exec /bin/PROG [args] [&]\n", 0xff5555);
+/*
+ * Pull a single ">>", ">", or "<" operator off `buf` (in place),
+ * if present, and copy its right-hand argument (the path) into
+ * `path_out`. The matched operator + path are erased from `buf`
+ * so subsequent parsing sees them gone.
+ *
+ *   "echo hi > /tmp/log" → buf="echo hi ", path_out="/tmp/log"
+ *
+ * `op` is the matched token ("<", ">", ">>"). Returns 1 on match,
+ * 0 if not found. Trailing whitespace gets trimmed so the next
+ * extraction sees a clean buffer.
+ */
+static int extract_redir(char *buf, const char *op, char *path_out,
+                          size_t path_out_size) {
+    size_t op_len = os_strlen(op);
+    char *found = 0;
+    for (char *p = buf; *p; p++) {
+        /* >> must take precedence over single >. Skip if this >
+         * is actually the first char of >>. */
+        if (op_len == 1 && op[0] == '>' && p[1] == '>') continue;
+        if (os_strncmp(p, op, op_len) == 0) { found = p; break; }
+    }
+    if (!found) return 0;
+
+    /* Walk past the operator + any whitespace to find the path. */
+    char *path_start = found + op_len;
+    while (*path_start == ' ' || *path_start == '\t') path_start++;
+    char *path_end = path_start;
+    while (*path_end && *path_end != ' ' && *path_end != '\t' &&
+           *path_end != '<' && *path_end != '>') path_end++;
+
+    size_t n = (size_t)(path_end - path_start);
+    if (n == 0 || n + 1 > path_out_size) return 0;
+    for (size_t i = 0; i < n; i++) path_out[i] = path_start[i];
+    path_out[n] = 0;
+
+    /* Erase the "op path" span by shifting the tail down. */
+    char *tail = path_end;
+    char *dst = found;
+    while (*tail) *dst++ = *tail++;
+    *dst = 0;
+
+    /* Trim trailing whitespace. */
+    size_t blen = os_strlen(buf);
+    while (blen > 0 && (buf[blen - 1] == ' ' || buf[blen - 1] == '\t')) {
+        buf[--blen] = 0;
+    }
+    return 1;
+}
+
+/*
+ * Promote a relative redirect path to absolute against the shell's
+ * current cwd. The user typed `echo hi > log.txt` from /home; we
+ * need /home/log.txt for the kernel VFS.
+ */
+static void absolutize_redir(char *path, size_t path_size) {
+    if (!path[0] || path[0] == '/') return;   /* already absolute */
+    char tmp[OSNOS_PATH_MAX];
+    if (!make_absolute_path(path, tmp, sizeof(tmp))) return;
+    os_strlcpy(path, tmp, path_size);
+}
+
+/*
+ * Resolve a bare token like "cat" into the full "/bin/cat" path.
+ * Absolute paths come through unchanged. Output goes into `out`.
+ */
+static void resolve_bin(const char *name, char *out, size_t out_size) {
+    if (name[0] == '/') {
+        os_strlcpy(out, name, out_size);
+    } else {
+        os_strlcpy(out, "/bin/", out_size);
+        os_strlcat(out, name, out_size);
+    }
+}
+
+/*
+ * Parse and dispatch `cmd1 | cmd2`. Both stages run concurrently
+ * via proc_execve_pipe. The shell tracks the downstream pid as
+ * fg_pid; the prompt redraws when it exits. The upstream pid is
+ * tracked in pipeline_lpid so we can ignore its IPC_PROC_EXITED
+ * without printing a "[pid] done" line. Only 2-stage pipelines
+ * for now; `a | b | c` reports an error.
+ */
+static uint64_t pipeline_lpid = 0;   /* upstream pid of an active pipeline */
+
+static void run_pipeline(const char *left_raw, const char *right_raw) {
+    /* Trim leading/trailing whitespace from both sides. */
+    while (*left_raw == ' ' || *left_raw == '\t') left_raw++;
+    while (*right_raw == ' ' || *right_raw == '\t') right_raw++;
+
+    if (left_raw[0] == 0 || right_raw[0] == 0) {
+        shell_send_console_color("\npipe: empty stage\n", 0xff5555);
         prompt();
         return;
     }
+
+    /* Each side: first whitespace-delimited token is the cmd, rest
+     * the args. resolve_bin maps "cat" → "/bin/cat". */
+    char  left_tok[OSNOS_PATH_MAX];
+    char right_tok[OSNOS_PATH_MAX];
+    size_t li = 0, ri = 0;
+    while (left_raw[li]  && left_raw[li]  != ' ' && li + 1 < sizeof(left_tok))  {
+        left_tok[li] = left_raw[li];  li++;
+    }
+    left_tok[li] = 0;
+    while (right_raw[ri] && right_raw[ri] != ' ' && ri + 1 < sizeof(right_tok)) {
+        right_tok[ri] = right_raw[ri]; ri++;
+    }
+    right_tok[ri] = 0;
+
+    const char *left_args  = left_raw  + li;  while (*left_args  == ' ') left_args++;
+    const char *right_args = right_raw + ri;  while (*right_args == ' ') right_args++;
+
+    if (!builtin_find(left_tok[0] == '/' ? left_tok + 5 : left_tok) ||
+        !builtin_find(right_tok[0] == '/' ? right_tok + 5 : right_tok)) {
+        shell_send_console_color("\npipe: at least one stage is not an ELF\n",
+                                  0xff5555);
+        prompt();
+        return;
+    }
+
+    char left_path [OSNOS_PATH_MAX];
+    char right_path[OSNOS_PATH_MAX];
+    resolve_bin(left_tok,  left_path,  sizeof(left_path));
+    resolve_bin(right_tok, right_path, sizeof(right_path));
+
+    const char *env_snapshot[SHELL_ENV_MAX + 1];
+    shell_env_snapshot(env_snapshot);
+
+    int64_t lpid = -1;
+    int64_t rpid = proc_execve_pipe(left_path, left_args,
+                                     right_path, right_args,
+                                     env_snapshot, &lpid);
+    if (rpid < 0) {
+        shell_send_console_color("\npipe: spawn failed\n", 0xff5555);
+        prompt();
+        return;
+    }
+
+    /* fg_pid = downstream task. When it exits, the pipeline is
+     * done from the user's POV (the upstream may already have
+     * exited or be just trailing). pipeline_lpid lets the
+     * IPC_PROC_EXITED handler silently drop the upstream's
+     * exit notification. */
+    pipeline_lpid = (uint64_t)lpid;
+    fg_pid        = (uint64_t)rpid;
+    shell_send_console("\n");
+}
+
+static void cmd_exec(const char *args) {
+    if (args[0] == 0) {
+        shell_send_console_color("\nusage: exec /bin/PROG [args] [< in] [> out] [&]\n", 0xff5555);
+        prompt();
+        return;
+    }
+
+    char buf[OSNOS_INPUT_MAX];
+    os_strlcpy(buf, args, sizeof(buf));
+
+    /* Extract redirects FIRST so the trailing '&' parse below sees
+     * a buf with no `> path` tail. Order matters: try `>>` before
+     * `>` so the latter doesn't swallow the first '>' of '>>'. */
+    char stdin_path[OSNOS_PATH_MAX]  = {0};
+    char stdout_path[OSNOS_PATH_MAX] = {0};
+    int  stdout_append = 0;
+
+    if (extract_redir(buf, ">>", stdout_path, sizeof(stdout_path))) {
+        stdout_append = 1;
+    } else {
+        extract_redir(buf, ">", stdout_path, sizeof(stdout_path));
+    }
+    extract_redir(buf, "<", stdin_path, sizeof(stdin_path));
+
+    absolutize_redir(stdin_path,  sizeof(stdin_path));
+    absolutize_redir(stdout_path, sizeof(stdout_path));
 
     /*
      * Detect trailing '&'. The shell strips it so the child receives a
      * clean argv. Background tasks don't set fg_pid; the shell prompts
      * immediately and survives the child's eventual exit asynchronously.
      */
-    char buf[OSNOS_INPUT_MAX];
-    os_strlcpy(buf, args, sizeof(buf));
     size_t blen = os_strlen(buf);
     while (blen > 0 && buf[blen - 1] == ' ') buf[--blen] = 0;
     int background = 0;
@@ -2744,9 +2998,7 @@ static void cmd_exec(const char *args) {
     const char *rest = buf + i;
     while (*rest == ' ') rest++;
 
-    /* Bare name (no leading '/') — assume /bin/<name>. Saves the user
-     * from typing the absolute path for every builtin ELF. Eventually
-     * this'll walk $PATH, but /bin/ is the only binary dir today. */
+    /* Bare name (no leading '/') — assume /bin/<name>. */
     char fullpath[OSNOS_PATH_MAX];
     if (path[0] && path[0] != '/') {
         os_strlcpy(fullpath, "/bin/", sizeof(fullpath));
@@ -2757,7 +3009,18 @@ static void cmd_exec(const char *args) {
 
     const char *env_snapshot[SHELL_ENV_MAX + 1];
     shell_env_snapshot(env_snapshot);
-    int64_t pid = proc_execve(fullpath, rest, env_snapshot);
+
+    /* Redirects → kernel helper that pre-creates / truncates the
+     * stdout file and bolts the paths onto the new task struct. */
+    int64_t pid;
+    if (stdin_path[0] || stdout_path[0]) {
+        pid = proc_execve_redir(fullpath, rest, env_snapshot,
+                                 stdin_path[0]  ? stdin_path  : 0,
+                                 stdout_path[0] ? stdout_path : 0,
+                                 stdout_append);
+    } else {
+        pid = proc_execve(fullpath, rest, env_snapshot);
+    }
     if (pid < 0) {
         shell_send_console_color("\nexec failed\n", 0xff5555);
         prompt();
@@ -2898,6 +3161,55 @@ static void run_command(const char *cmd) {
         return;
     }
 
+    /*
+     * Pipe short-circuit: a `|` splits the line into two ELF stages
+     * that run concurrently with a kernel pipe shuttling stdout →
+     * stdin. Only 2-stage pipelines today (`a | b`; `a | b | c`
+     * would need a multi-stage scheduler). The split is greedy on
+     * the FIRST '|' so `a | b | c` reports "not an ELF" later.
+     */
+    {
+        char buf_p[OSNOS_INPUT_MAX];
+        os_strlcpy(buf_p, cmd, sizeof(buf_p));
+        char *bar = 0;
+        for (char *p = buf_p; *p; p++) if (*p == '|') { bar = p; break; }
+        if (bar) {
+            *bar = 0;
+            run_pipeline(buf_p, bar + 1);
+            return;
+        }
+    }
+
+    /*
+     * Redirect short-circuit: if the line contains `<`, `>`, or `>>`,
+     * skip the shell-builtin dispatch entirely. Shell builtins like
+     * `cat` / `ls` write to the console directly (no syscall path),
+     * so they can't honour redirects. cmd_exec falls back to the
+     * /bin/<name> ELF, whose sys_read/sys_write DO see the per-task
+     * redirect paths.
+     */
+    int has_redir = 0;
+    for (const char *p = cmd; *p; p++) {
+        if (*p == '<' || *p == '>') { has_redir = 1; break; }
+    }
+    if (has_redir) {
+        /* Extract first token and confirm it maps to an ELF before
+         * we dispatch — otherwise typos like `foo > out` still
+         * surface as "unknown command". */
+        char first[OSNOS_NAME_MAX];
+        size_t k = 0;
+        while (cmd[k] && cmd[k] != ' ' && k + 1 < sizeof(first)) {
+            first[k] = cmd[k]; k++;
+        }
+        first[k] = 0;
+        if (first[0] && builtin_find(first)) {
+            cmd_exec(cmd);
+            return;
+        }
+        /* No matching ELF — fall through to the normal dispatcher
+         * so the error path runs. */
+    }
+
     for (size_t i = 0; i < COMMAND_COUNT; i++) {
         if (os_strncmp(cmd, commands[i].name, commands[i].name_len) != 0) {
             continue;
@@ -2999,8 +3311,15 @@ void shell_server_tick(void) {
      *     The next keystroke / Enter will scroll naturally.
      */
     if (msg.type == IPC_PROC_EXITED) {
+        /* Upstream of a 2-stage pipeline: silently swallow. The
+         * downstream's exit triggers the prompt. */
+        if (pipeline_lpid && msg.arg1 == pipeline_lpid) {
+            pipeline_lpid = 0;
+            return;
+        }
         if (msg.arg1 == fg_pid) {
             fg_pid = 0;
+            pipeline_lpid = 0;   /* clear in case downstream died first */
             prompt();
         } else {
             char num[16];

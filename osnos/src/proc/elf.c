@@ -4,8 +4,16 @@
 #include "../micro/pmm.h"
 #include "../micro/vmm.h"
 
-#define USER_STACK_VIRT  0x7FFFE000ULL   /* 1 page below 0x80000000 */
-#define USER_STACK_TOP   0x7FFFF000ULL   /* one page = 4 KiB */
+/*
+ * User stack: 64 KiB (16 pages) sitting right below 0x80000000.
+ * Larger ELFs (TCC, real script interpreters, etc.) blow through
+ * the original 4 KiB easily. Each task gets its own private set —
+ * no sharing — so the per-task cost is paid only by ring-3 tasks.
+ */
+#define USER_STACK_PAGES 16
+#define USER_STACK_SIZE  (USER_STACK_PAGES * PAGE_SIZE)
+#define USER_STACK_TOP   0x80000000ULL
+#define USER_STACK_VIRT  (USER_STACK_TOP - USER_STACK_SIZE)
 
 static int validate_ehdr(const Elf64_Ehdr *eh, size_t blob_size) {
     if (blob_size < sizeof(Elf64_Ehdr))             return 0;
@@ -116,16 +124,20 @@ osnos_status_t elf_load(const uint8_t *data,
         }
     }
 
-    /* User stack: one page right below USER_STACK_TOP, RW + user. */
-    uint64_t stack_phys = pmm_alloc_page();
-    if (!stack_phys) {
-        address_space_destroy(pml4);
-        return OSNOS_ENOMEM;
-    }
-    if (!vmm_map(pml4, USER_STACK_VIRT, stack_phys, PTE_W | PTE_U)) {
-        pmm_free_page(stack_phys);
-        address_space_destroy(pml4);
-        return OSNOS_ENOMEM;
+    /* User stack: USER_STACK_PAGES pages below USER_STACK_TOP, RW+U.
+     * Allocated page-by-page so we get distinct frames; mapped
+     * contiguous virtual range so the program sees one big stack. */
+    for (uint64_t va = USER_STACK_VIRT; va < USER_STACK_TOP; va += PAGE_SIZE) {
+        uint64_t stack_phys = pmm_alloc_page();
+        if (!stack_phys) {
+            address_space_destroy(pml4);
+            return OSNOS_ENOMEM;
+        }
+        if (!vmm_map(pml4, va, stack_phys, PTE_W | PTE_U)) {
+            pmm_free_page(stack_phys);
+            address_space_destroy(pml4);
+            return OSNOS_ENOMEM;
+        }
     }
 
     *pml4_out      = pml4;

@@ -15,6 +15,8 @@
 #include "uaccess.h"
 #include "fd.h"
 #include "ipc.h"
+#include "kmalloc.h"
+#include "pipe.h"
 #include "pmm.h"
 #include "scheduler.h"
 #include "task.h"
@@ -133,6 +135,21 @@ int64_t sys_write(int fd, const void *buf, size_t count) {
     if (fd == OSNOS_FD_STDIN) return err(OSNOS_EBADF);
 
     if (fd == OSNOS_FD_STDOUT || fd == OSNOS_FD_STDERR) {
+        task_t *cur = task_current();
+        /* Pipe takes priority over file redirect over console. */
+        if (cur && cur->pipe_out) {
+            int64_t r = pipe_write(cur->pipe_out, buf, count);
+            if (r < 0) return r;   /* already a -errno */
+            return r;
+        }
+        /* Redirected stdout (shell parsed `cmd > file` / `cmd >> file`). */
+        if (cur && cur->stdout_redir[0] != 0) {
+            osnos_status_t s = vfs_append(cur->stdout_redir,
+                                           (const char *)buf, count);
+            if (s != OSNOS_OK) return err(s);
+            cur->stdout_redir_off += count;
+            return (int64_t)count;
+        }
         return write_to_console((const char *)buf, count);
     }
 
@@ -141,17 +158,70 @@ int64_t sys_write(int fd, const void *buf, size_t count) {
 
     int access = f->flags & O_ACCMODE;
     if (access == O_RDONLY) return err(OSNOS_EBADF);
+    if (count == 0) return 0;
 
     /*
-     * Today every write is append-from-current-position. Combined with
-     * O_TRUNC at open time, this matches `fopen("w")` and `fopen("a")`
-     * semantics. Random-access write (lseek + write into the middle)
-     * is not supported — backends would need offset-aware ops.
+     * sys_write at arbitrary file offsets.
+     *
+     * Backends don't have a write_at(offset) primitive yet, so we
+     * emulate via read-modify-write:
+     *   1. Stat the file to get its current size.
+     *   2. Fast path: if write lands exactly at EOF (or O_APPEND
+     *      forces it there), call vfs_append — no read needed.
+     *   3. Slow path: read the whole file into a kmalloc'd scratch
+     *      buffer, splice the new bytes at f->offset (zero-filling
+     *      any sparse hole between existing EOF and f->offset),
+     *      and replace the file with vfs_write.
+     *
+     * Bounded by SYS_WRITE_RMW_MAX so a stray giant write doesn't
+     * monopolise the kernel heap. Enough headroom for TCC-sized
+     * ELFs (~50–200 KiB) and any normal editor save.
      */
-    osnos_status_t s = vfs_append(f->path, (const char *)buf, count);
+    #define SYS_WRITE_RMW_MAX (4 * 1024 * 1024)   /* 4 MiB */
+
+    vfs_stat_t st;
+    size_t existing = 0;
+    if (vfs_stat(f->path, &st) == OSNOS_OK) {
+        if (st.type != VFS_NODE_REG) return err(OSNOS_EISDIR);
+        existing = st.size;
+    }
+
+    size_t off = f->offset;
+    if (f->flags & O_APPEND) off = existing;   /* POSIX: O_APPEND wins */
+
+    /* Fast path: pure append. */
+    if (off == existing) {
+        osnos_status_t s = vfs_append(f->path, (const char *)buf, count);
+        if (s != OSNOS_OK) return err(s);
+        f->offset = off + count;
+        return (int64_t)count;
+    }
+
+    /* Slow path: read-modify-write. */
+    size_t total = (off + count > existing) ? off + count : existing;
+    if (total > SYS_WRITE_RMW_MAX) return err(OSNOS_EFBIG);
+
+    char *scratch = (char *)kmalloc(total);
+    if (!scratch) return err(OSNOS_ENOMEM);
+
+    /* Pull existing bytes. vfs_read fills as much as the file holds;
+     * anything beyond `got` we zero-fill so the sparse-hole region
+     * is well-defined. */
+    if (existing > 0) {
+        size_t got = 0;
+        osnos_status_t s = vfs_read(f->path, scratch, total, &got);
+        if (s != OSNOS_OK) { kfree(scratch); return err(s); }
+        for (size_t i = got; i < existing; i++) scratch[i] = 0;
+    }
+    for (size_t i = existing; i < off; i++) scratch[i] = 0;
+    const char *src = (const char *)buf;
+    for (size_t i = 0; i < count; i++) scratch[off + i] = src[i];
+
+    osnos_status_t s = vfs_write(f->path, scratch, total);
+    kfree(scratch);
     if (s != OSNOS_OK) return err(s);
 
-    f->offset += count;
+    f->offset = off + count;
     return (int64_t)count;
 }
 
@@ -163,6 +233,30 @@ int64_t sys_read(int fd, void *buf, size_t count) {
     if (!buf && count > 0) return err(OSNOS_EFAULT);
 
     if (fd == OSNOS_FD_STDIN) {
+        task_t *cur = task_current();
+        /* Pipe takes priority over file redirect over TTY. */
+        if (cur && cur->pipe_in) {
+            int64_t r = pipe_read(cur->pipe_in, buf, count);
+            return r;  /* already EOF (0) / -EAGAIN / -errno */
+        }
+        /* Redirected stdin (shell parsed `cmd < file`). */
+        if (cur && cur->stdin_redir[0] != 0) {
+            static char rd_scratch[1024];
+            size_t got = 0;
+            osnos_status_t s = vfs_read(cur->stdin_redir,
+                                         rd_scratch, sizeof(rd_scratch), &got);
+            if (s != OSNOS_OK) return err(s);
+            if (cur->stdin_redir_off >= got) return 0;   /* EOF */
+            size_t remaining = got - cur->stdin_redir_off;
+            size_t n = (count < remaining) ? count : remaining;
+            char *out = (char *)buf;
+            for (size_t i = 0; i < n; i++) {
+                out[i] = rd_scratch[cur->stdin_redir_off + i];
+            }
+            cur->stdin_redir_off += n;
+            return (int64_t)n;
+        }
+
         /*
          * Single-shot poll: kernel-side stdin is non-blocking. If
          * nothing is buffered we report EAGAIN and let the libc

@@ -26,6 +26,7 @@ typedef enum {
     OSNOS_EACCES         = 13,  /* permission denied */
     OSNOS_EFAULT         = 14,  /* bad address */
     OSNOS_EBUSY          = 16,  /* resource busy */
+    OSNOS_ENOEXEC        = 8,   /* exec format error */
     OSNOS_EEXIST         = 17,  /* file exists */
     OSNOS_ENOTDIR        = 20,  /* not a directory */
     OSNOS_EISDIR         = 21,  /* is a directory */
@@ -33,6 +34,7 @@ typedef enum {
     OSNOS_ENFILE         = 23,  /* file table overflow */
     OSNOS_EMFILE         = 24,  /* too many open files */
     OSNOS_ENOSPC         = 28,  /* no space left on device */
+    OSNOS_EPIPE          = 32,  /* broken pipe (writer w/o readers) */
     OSNOS_EROFS          = 30,  /* read-only file system */
     OSNOS_ENAMETOOLONG   = 36,  /* file name too long */
     OSNOS_ENOTEMPTY      = 39,  /* directory not empty */
@@ -45,6 +47,7 @@ typedef enum {
     OSNOS_ENETDOWN       = 100,
     OSNOS_ECONNRESET     = 104,
     OSNOS_ENOTTY         = 25,  /* not a typewriter (bad ioctl) */
+    OSNOS_EFBIG          = 27,  /* file too large */
     OSNOS_ERANGE         = 34,  /* result too large (getcwd buffer) */
     OSNOS_ETIMEDOUT      = 110,
     OSNOS_ECONNREFUSED   = 111,

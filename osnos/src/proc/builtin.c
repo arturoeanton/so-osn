@@ -128,6 +128,8 @@ DECLARE_ELF(sleep);
 DECLARE_ELF(kill);
 DECLARE_ELF(top);
 DECLARE_ELF(ovi);
+DECLARE_ELF(tcc);
+DECLARE_ELF(head);
 DECLARE_ELF(libctest);
 DECLARE_ELF(udptest);
 DECLARE_ELF(echotcp);
@@ -186,6 +188,8 @@ static const builtin_t builtins[] = {
     ELF(kill,  "kill PID (sets task kill_pending; delivers at next return)"),
     ELF(top,   "live task viewer (Ctrl+C to exit)"),
     ELF(ovi,   "vim-style modal text editor: ovi FILE"),
+    ELF(tcc,   "C compiler (TinyCC) — STUB, real port pending"),
+    ELF(head,  "print the first N lines of stdin / FILE"),
     ELF(libctest, "libc smoke test (FILE*, qsort, setjmp, inet_pton, etc.)"),
     ELF(udptest,  "UDP echo on port 1234 via socket/bind/recvfrom/sendto"),
     ELF(echotcp,  "TCP echo on port 80 via socket/bind/listen/accept/recv/send"),

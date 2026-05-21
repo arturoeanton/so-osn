@@ -92,14 +92,9 @@ static osnos_status_t ramfs_vfs_write(
     size_t buf_size
 ) {
     (void)priv;
-
-    char tmp[RAMFS_DATA_SIZE];
-    size_t n = buf_size;
-    if (n + 1 > sizeof(tmp)) n = sizeof(tmp) - 1;
-    for (size_t i = 0; i < n; i++) tmp[i] = buf[i];
-    tmp[n] = 0;
-
-    if (!ramfs_write_file(path, tmp)) return OSNOS_ENOSPC;
+    /* Binary-safe: keep embedded NULs (sparse-hole writes, ELF
+     * blobs) intact instead of letting strlen truncate them. */
+    if (!ramfs_write_file_bin(path, buf, buf_size)) return OSNOS_ENOSPC;
     return OSNOS_OK;
 }
 
@@ -110,14 +105,7 @@ static osnos_status_t ramfs_vfs_append(
     size_t buf_size
 ) {
     (void)priv;
-
-    char tmp[RAMFS_DATA_SIZE];
-    size_t n = buf_size;
-    if (n + 1 > sizeof(tmp)) n = sizeof(tmp) - 1;
-    for (size_t i = 0; i < n; i++) tmp[i] = buf[i];
-    tmp[n] = 0;
-
-    if (!ramfs_append_file(path, tmp)) return OSNOS_ENOSPC;
+    if (!ramfs_append_file_bin(path, buf, buf_size)) return OSNOS_ENOSPC;
     return OSNOS_OK;
 }
 

@@ -16,5 +16,12 @@ static inline int isspace(int c) {
 static inline int isprint(int c) { return c >= 0x20 && c < 0x7f; }
 static inline int iscntrl(int c) { return (unsigned)c < 0x20 || c == 0x7f; }
 
+static inline int isblank(int c) { return c == ' ' || c == '\t'; }
+static inline int isgraph(int c) { return c > 0x20 && c < 0x7f; }
+static inline int ispunct(int c) {
+    return isprint(c) && !isalnum(c) && !isspace(c);
+}
+static inline int isascii(int c) { return (unsigned)c < 0x80; }
+
 static inline int tolower(int c) { return isupper(c) ? c + ('a' - 'A') : c; }
 static inline int toupper(int c) { return islower(c) ? c - ('a' - 'A') : c; }

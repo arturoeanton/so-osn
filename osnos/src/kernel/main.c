@@ -12,10 +12,12 @@
 #include "../servers/console_server.h"
 #include "../servers/keyboard_server.h"
 #include "../servers/shell_server.h"
+#include "../micro/fpu.h"
 #include "../micro/gdt.h"
 #include "../micro/idt.h"
 #include "../micro/ipc.h"
 #include "../micro/kmalloc.h"
+#include "../micro/pipe.h"
 #include "../micro/pmm.h"
 #include "../micro/reaper.h"
 #include "../micro/task.h"
@@ -120,6 +122,7 @@ void kmain(void) {
     idt_init();
     uaccess_init();        /* registers copy_*_user span in the extable */
     syscall_msr_init();    /* enables EFER.SCE + STAR/LSTAR/FMASK */
+    fpu_init();            /* CR0/CR4 + FNINIT — lets ring-3 use double/SSE */
     pic_init();            /* remap 8259 to 0x20-0x2F, mask all lines */
     lapic_init();          /* enable LAPIC + LINT0=ExtINT (q35 needs this) */
     timer_init();          /* PIT @ 100 Hz, installs IDT[0x20], unmask IRQ0 */
@@ -128,6 +131,7 @@ void kmain(void) {
     net_init();            /* register RX dispatch + ARP cache */
 
     ipc_init();
+    pipe_init();           /* shell-pipeline kernel object */
     task_init();
     reaper_init();
     scheduler_init();

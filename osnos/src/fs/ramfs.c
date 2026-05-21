@@ -210,6 +210,38 @@ bool ramfs_write_file(const char *name, const char *data) {
     return ramfs_create_file(name, data);
 }
 
+bool ramfs_write_file_bin(const char *name, const void *buf, size_t n) {
+    if (n + 1 > RAMFS_DATA_SIZE) return false;
+    const unsigned char *src = (const unsigned char *)buf;
+    for (size_t i = 0; i < RAMFS_MAX_FILES; i++) {
+        if (files[i].used && !files[i].is_dir && os_streq(files[i].name, name)) {
+            for (size_t k = 0; k < n; k++) files[i].data[k] = (char)src[k];
+            files[i].data[n] = 0;   /* NUL sentinel for legacy string readers */
+            files[i].size = n;
+            return true;
+        }
+    }
+    /* Create new entry, then overwrite to set the binary-correct size. */
+    if (!ramfs_create_file(name, "")) return false;
+    return ramfs_write_file_bin(name, buf, n);
+}
+
+bool ramfs_append_file_bin(const char *name, const void *buf, size_t n) {
+    const unsigned char *src = (const unsigned char *)buf;
+    for (size_t i = 0; i < RAMFS_MAX_FILES; i++) {
+        if (files[i].used && !files[i].is_dir && os_streq(files[i].name, name)) {
+            if (files[i].size + n + 1 > RAMFS_DATA_SIZE) return false;
+            size_t pos = files[i].size;
+            for (size_t k = 0; k < n; k++) files[i].data[pos + k] = (char)src[k];
+            files[i].data[pos + n] = 0;
+            files[i].size = pos + n;
+            return true;
+        }
+    }
+    if (!ramfs_create_file(name, "")) return false;
+    return ramfs_append_file_bin(name, buf, n);
+}
+
 bool ramfs_append_file(const char *name, const char *data) {
     for (size_t i = 0; i < RAMFS_MAX_FILES; i++) {
         if (files[i].used && !files[i].is_dir && os_streq(files[i].name, name)) {

@@ -22,6 +22,11 @@
 #include <inttypes.h>
 #include <netinet/in.h>
 #include <setjmp.h>
+#include <ctype.h>
+#include <float.h>
+#include <limits.h>
+#include <math.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -334,6 +339,113 @@ int main(int argc, char **argv) {
             check("tmpfile-write", fwrite("xx", 1, 2, tf) == 2);
             fclose(tf);
         }
+    }
+
+    /* ---------------- ctype ---------------- */
+    {
+        check("ctype-isalpha-a", isalpha('a'));
+        check("ctype-isalpha-9", !isalpha('9'));
+        check("ctype-isdigit-5", isdigit('5'));
+        check("ctype-isspace-tab", isspace('\t') && isspace(' '));
+        check("ctype-isblank-tab", isblank('\t') && !isblank('\n'));
+        check("ctype-ispunct-comma", ispunct(',') && !ispunct('a'));
+        check("ctype-isgraph-A", isgraph('A') && !isgraph(' '));
+        check("ctype-tolower", tolower('Z') == 'z');
+        check("ctype-toupper", toupper('z') == 'Z');
+    }
+
+    /* ---------------- limits ---------------- */
+    {
+        check("limits-INT_MAX",  INT_MAX  == 2147483647);
+        check("limits-CHAR_BIT", CHAR_BIT == 8);
+        check("limits-PATH_MAX", PATH_MAX == 128);
+        check("limits-LONG_MAX", LONG_MAX == 9223372036854775807L);
+    }
+
+    /* ---------------- signal (stubs) ---------------- */
+    {
+        check("signal-sig-numbers", SIGINT == 2 && SIGTERM == 15);
+        errno = 0;
+        sighandler_t prev = signal(SIGUSR1, SIG_DFL);
+        check("signal-default-noop", prev == SIG_DFL);
+        errno = 0;
+        prev = signal(SIGUSR1, (sighandler_t)0x12345);
+        check("signal-non-default-enosys",
+              prev == SIG_ERR && errno == ENOSYS);
+    }
+
+    /* ---------------- math (requires FPU init from kernel) ---------------- */
+    {
+        /* If FPU isn't initialised, any double op will #UD and the
+         * task dies before we reach the FAIL print. So getting here
+         * with sensible values already proves FPU works. */
+        check("math-fabs",   fabs(-2.5) == 2.5);
+        check("math-floor",  floor(3.7) == 3.0);
+        check("math-ceil",   ceil(3.2)  == 4.0);
+        check("math-floor-neg", floor(-1.5) == -2.0);
+        check("math-fmod",   fmod(7.0, 3.0) == 1.0);
+
+        double r = sqrt(16.0);
+        check("math-sqrt-16", r > 3.99 && r < 4.01);
+        r = sqrt(2.0);
+        check("math-sqrt-2", r > 1.41 && r < 1.42);
+
+        r = pow(2.0, 10.0);
+        check("math-pow-2-10", r > 1023.5 && r < 1024.5);
+
+        /* sin(0)=0, cos(0)=1, sin(pi/2)≈1. */
+        check("math-sin-0", fabs(sin(0.0)) < 1e-9);
+        check("math-cos-0", fabs(cos(0.0) - 1.0) < 1e-9);
+        check("math-sin-pi2", fabs(sin(M_PI_2) - 1.0) < 1e-3);
+
+        /* exp(0)=1, exp(1)≈e. */
+        check("math-exp-0", fabs(exp(0.0) - 1.0) < 1e-9);
+        check("math-exp-1", fabs(exp(1.0) - M_E) < 1e-3);
+
+        /* log(e)=1, log(1)=0. */
+        check("math-log-1", fabs(log(1.0)) < 1e-9);
+        check("math-log-e", fabs(log(M_E) - 1.0) < 1e-3);
+
+        check("math-isnan", isnan(NAN));
+        check("math-isinf", isinf(INFINITY));
+        check("math-isfinite", isfinite(1.0) && !isfinite(INFINITY));
+    }
+
+    /* ---------------- write con offset ---------------- */
+    {
+        const char *p = "/tmp/seek-test.txt";
+        int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        check("seek-open",  fd >= 3);
+        ssize_t w = write(fd, "AAAAAAAAAA", 10);
+        check("seek-init-write", w == 10);
+        check("seek-lseek-3", lseek(fd, 3, SEEK_SET) == 3);
+        w = write(fd, "BB", 2);
+        check("seek-mid-write", w == 2);
+        close(fd);
+
+        fd = open(p, O_RDONLY);
+        char buf[16] = {0};
+        ssize_t r = read(fd, buf, sizeof(buf) - 1);
+        check("seek-read-len-10", r == 10);
+        check("seek-content-AAABBAAAAA",
+              strcmp(buf, "AAABBAAAAA") == 0);
+        close(fd);
+
+        unlink(p);
+    }
+
+    /* ---------------- big stack (64 KiB) ---------------- */
+    {
+        /* If the user stack was still 4 KiB, this volatile array
+         * would overflow into unmapped memory and the task would
+         * die before we print PASS. */
+        volatile char big[16 * 1024];
+        for (size_t i = 0; i < sizeof(big); i += 4096) big[i] = (char)i;
+        check("stack-16k", big[0] == 0 && big[12288] == 0);
+        volatile char bigger[32 * 1024];
+        bigger[0] = 7;
+        bigger[sizeof(bigger) - 1] = 9;
+        check("stack-32k", bigger[0] == 7 && bigger[sizeof(bigger)-1] == 9);
     }
 
     /* ---------------- summary ---------------- */

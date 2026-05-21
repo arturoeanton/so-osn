@@ -33,7 +33,11 @@
 
 #define RAMFS_MAX_FILES 32
 #define RAMFS_NAME_SIZE OSNOS_PATH_MAX
-#define RAMFS_DATA_SIZE 512
+/* Bumped from 512 to 128 KiB so the libc-linked ELFs (which embed
+ * stdio/malloc/math and weigh ~100 KiB each) fit in /tmp for the
+ * exec-from-VFS round-trip test. 32 slots × 128 KiB = 4 MiB BSS,
+ * still small relative to the kernel image. */
+#define RAMFS_DATA_SIZE (128 * 1024)
 
 typedef struct {
     bool used;
@@ -48,6 +52,16 @@ void ramfs_init(void);
 bool ramfs_create_file(const char *name, const char *data);
 bool ramfs_write_file(const char *name, const char *data);
 bool ramfs_append_file(const char *name, const char *data);
+
+/*
+ * Binary-safe counterparts. The classic API above relies on strlen
+ * to derive sizes, so embedded NULs (sparse-hole writes, ELF blobs)
+ * silently get truncated. The _bin variants take an explicit size
+ * and copy raw bytes.
+ */
+bool ramfs_write_file_bin (const char *name, const void *buf, size_t n);
+bool ramfs_append_file_bin(const char *name, const void *buf, size_t n);
+
 bool ramfs_touch(const char *name);
 bool ramfs_delete_file(const char *name);
 

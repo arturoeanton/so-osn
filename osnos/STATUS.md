@@ -10,6 +10,9 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| Shell pipes `a \| b` | pipe ring-buffer kernel object (4 KiB × 16), task pipe_in/out, concurrent stages, /bin/head ELF | 350 |
+| Shell redirection | `cmd > file`, `>>`, `< file` parser + proc_execve_redir + per-task stdin/stdout paths | 250 |
+| TCC prep (1-6) | write+offset, exec VFS, stack 64 KiB, FPU init, ctype/limits/float/signal/math.h, ramfs bin fix | 900 |
 | Libc gaps 4+5+6 | dup/dup2 (#32/#33), fcntl básico (#72), mkstemp/tmpfile | 220 |
 | Libc gaps 1+2+3 | strerror completo (33 errnos), stat(path)/access, time/clock_gettime, fix nlink_t ABI | 250 |
 | Arrow keys + getcwd/chdir | keyboard_server → ESC[A-D al TTY; SYS_GETCWD/CHDIR per-task | 120 |
@@ -29,11 +32,13 @@ POSIX, y un shell con history + rc files.
 | FASE 7 | libc + ELF ring-3 + crt0 + 25 tools | 1500 |
 | FASE 2-6 | VFS + microkernel + IPC + paging + ELF | 2500 |
 
-**Tests**: 624/624 pass (KHEAP + SLAB + SOCK + VFS + libc + ramfs +
-FAT + STAT/ACCESS + TIME/CLOCK + DUP/DUP2 + FCNTL). Idempotente —
-`test` se puede correr N veces seguidas sin falsos negativos.
-libctest ELF user-side cubre strerror/stat/access/time/clock_gettime
-+ dup/fcntl/mkstemp/tmpfile libc-side.
+**Tests**: **640/640 kernel pass** (KHEAP + SLAB + SOCK + VFS + libc
++ ramfs + FAT + STAT/ACCESS + TIME/CLOCK + DUP/DUP2 + FCNTL +
+WRITE_OFFSET + EXEC_VFS). Idempotente — `test` se puede correr N
+veces seguidas sin falsos negativos. **libctest user-side** ~110
+checks cubre strerror/stat/access/time/clock_gettime/dup/fcntl/
+mkstemp/tmpfile + ctype/limits/signal/math libc-side, todos en
+verde. Ver **AUDIT.md** para checklist de verificación end-to-end.
 
 **Demos que funcionan end-to-end** (compilan código upstream sin
 modificar): `selectserver.c` de Beej, curl/Firefox contra
@@ -45,14 +50,21 @@ canonical/raw, /home persistente cross-reboot.
 - TTY 3+ (PTY pairs, sessions, process groups)
 - FASE 10 (servers a ring 3 en elfs/osn-server/)
 - fork() real (sin fork hoy)
-- write con offset real (hoy sys_write→vfs_append; lseek+write no
-  reescribe a mitad de archivo — requiere `vfs_write_at` por backend)
+- Multi-stage pipes (`a | b | c`) — hoy solo 2-stage
+- pipe(2) syscall expuesto a user (necesita per-task fd tables)
+- Mezclar pipes con redirects: `a < in.txt | b > out.txt`
+- Shell builtins (cat/ls/echo/...) que respeten redirects (hoy
+  solo los ELFs los honran; el short-circuit en run_command salta
+  al ELF cuando hay `<`/`>` / `|`)
+- FXSAVE/FXRSTOR per-task (hoy FP funciona single-task, multi-task
+  puede corromper FP regs entre context switches)
 - Open file description shared offsets para dup POSIX-strict
 - O_NONBLOCK runtime real (hoy fcntl lo almacena pero sys_read/write
   no lo respetan)
 - tmpfile unlink-on-close (necesita anonymous FD layer)
 - RTC real (hoy time/clock_gettime = segundos desde boot)
-- IPv6, TLS, DHCP (en ROADMAP_APENDICE.md)
+- mmap/munmap (muchos programas modernos lo asumen)
+- IPv6, TLS, DHCP, TinyCC self-hosting (todo en ROADMAP_APENDICE.md)
 
 ---
 
@@ -1601,6 +1613,200 @@ OK .history (historial persistente) + .oshrc (startup script)
      Tipo en un boot, recuperá con flecha ↑ tras reboot. .oshrc
      queda como el lugar natural para "cd a tu workdir" o
      "export VARS" automáticos.
+
+### FASE Shell pipes `cmd1 | cmd2` — CERRADA
+OK Pipe kernel object — src/micro/pipe.{c,h}
+   - Pool estático de 16 `pipe_t`. Cada uno: ring buffer 4 KiB
+     (POSIX PIPE_BUF mínimo), head/tail/level cursores, refcounts
+     `ref_w` y `ref_r`.
+   - `pipe_create()`: reserva slot con ref_w=ref_r=1. Las refs
+     pertenecen a las dos tasks que el shell va a spawnear.
+   - `pipe_write(p, buf, n)`: copia bytes al ring. Retorna `n`
+     bytes aceptados (puede ser menos que pedido si lleno).
+     -EAGAIN si lleno + readers vivos. -EPIPE si no quedan
+     readers (writer escribiendo a pipe huérfano).
+   - `pipe_read(p, buf, n)`: drena del ring. Retorna 0 (EOF) si
+     buffer vacío + writers cerrados. -EAGAIN si vacío + writers
+     vivos.
+   - `pipe_close_writer/_reader`: dec refcounts. Cuando ambos
+     llegan a 0, el slot se libera al pool.
+   - `pipe_init()` llamado desde kmain después de ipc_init.
+
+OK Task pipe endpoints — task_t.pipe_in / pipe_out
+   - Punteros opcionales en `task_t`. Quien tiene `pipe_out !=
+     NULL` es upstream (escribe al pipe); `pipe_in != NULL` es
+     downstream (lee del pipe).
+   - `sys_write(fd=1)`: prioridad **pipe_out → stdout_redir →
+     console**. La primera no-NULL gana.
+   - `sys_read(fd=0)`: prioridad **pipe_in → stdin_redir → TTY**.
+   - `proc_exit_current_user` llama pipe_close_*er por cada
+     endpoint para que el peer vea EOF/EPIPE en lugar de loop
+     infinito en EAGAIN.
+
+OK proc_execve_pipe — helper kernel para spawnear pipeline
+   - `proc_execve_pipe(left_path, left_args, right_path, right_args,
+     envp, left_pid_out)`:
+     1. pipe_create() → pipe.
+     2. proc_execve(left) → lpid. Setea lt->pipe_out = pipe.
+     3. proc_execve(right) → rpid. Setea rt->pipe_in = pipe.
+     4. Retorna rpid (downstream — su exit marca fin pipeline).
+   - Si left fail → cierra ambas refs (pipe libre). Si right fail
+     → mata left + cierra ambas refs. Ningún recurso queda colgado.
+
+OK Shell parser y dispatch
+   - `run_command`: short-circuit por `|` antes que redirects o
+     builtins. Split en el primer `|` (greedy), trim ambos lados,
+     llama `run_pipeline`.
+   - `run_pipeline`: parse cada lado en (cmd, args). Verifica que
+     ambos sean ELFs registrados (sino "pipe: at least one stage
+     is not an ELF" — typos atrapados temprano). Resolve_bin
+     mapea "cat" → "/bin/cat". Llama proc_execve_pipe.
+   - `pipeline_lpid` static guarda el upstream pid. El handler
+     `IPC_PROC_EXITED` lo descarta silenciosamente cuando muere
+     (no imprime "[pid] done"), mientras espera al downstream
+     (que es el fg_pid).
+
+OK Limitaciones documentadas
+   - **Solo 2-stage** (`a | b`). `a | b | c` reporta error —
+     necesitaría multi-stage pipeline scheduler.
+   - Pipe sin redirects: `a < in.txt | b > out.txt` no parsea
+     todavía (parser de `|` corre antes que el de redirects).
+   - Sin pipe(2) syscall expuesto: pipes son internal del shell.
+     Cuando lleguen per-task fd tables, exponer pipe(2) será un
+     wrapper trivial.
+
+OK /bin/head ELF para probar pipes
+   - `head [-n N] [FILE]`: prime N líneas (default 10) de stdin
+     o files. Útil para `cat /home/x.txt | head -n 2`.
+
+### FASE Shell redirection (> >> <) — CERRADA
+OK Per-task stdin/stdout redirect path en task_t
+   - `task_t` agrega `stdin_redir[OSNOS_PATH_MAX]`,
+     `stdout_redir[OSNOS_PATH_MAX]`, `stdout_append`,
+     `stdin_redir_off`, `stdout_redir_off`. Vacíos por default →
+     comportamiento normal TTY/console.
+   - `sys_write(fd=1)`: si task->stdout_redir set, escribe vía
+     `vfs_append` al archivo. Sino, va al console_server como
+     siempre.
+   - `sys_read(fd=0)`: si task->stdin_redir set, lee del archivo
+     con offset tracking + retorna 0 (EOF) al exhaurirse.
+
+OK proc_execve_redir helper en src/proc/exec.{c,h}
+   - Wrapper sobre `proc_execve` que: pre-trunca/crea el stdout
+     file (honra `>` vs `>>`), valida que stdin_path exista,
+     spawnea via proc_execve, y mete los paths en el task struct
+     del child antes de que arranque.
+   - Fast path: si ningún redirect, mismo costo que proc_execve.
+
+OK Parser en cmd_exec del shell
+   - `extract_redir(buf, op, out)`: tokenizador in-place. Busca
+     `>>` antes que `>` para evitar swallowing. Soporta:
+     `cmd > file`, `cmd >> file`, `cmd < file`, combinaciones.
+   - `absolutize_redir`: paths relativos resueltos contra cwd
+     del shell.
+   - Background (`&`) y redirects coexisten:
+     `httpd > /home/log.txt &` funciona.
+
+OK Short-circuit en run_command
+   - Si la línea contiene `<` o `>`, salta el dispatch de shell
+     builtins (que escriben al console directo, no honran
+     redirects) y va al exec ELF. Solo activa si el primer token
+     matchea un ELF registrado — typos siguen surfaceando
+     "unknown command" claro.
+
+OK Fix de /bin/cat para leer stdin
+   - POSIX cat sin args lee stdin → stdout. Antes era "usage:
+     cat FILE". Sin esto, `cat < file > other` no podía
+     funcionar.
+
+### FASE TCC prep (items 1-6) — CERRADA
+OK Path 1 — sys_write con offset real
+   - **src/micro/syscall.c**: refactor de `sys_write`. Si
+     `f->offset == existing_size` (o O_APPEND): fast path
+     `vfs_append`. Else: read-modify-write con scratch kmalloc'd:
+     vfs_read full file, zero-fill sparse hole entre EOF y offset,
+     copia bytes, vfs_write con tamaño total. Cap 4 MiB → EFBIG.
+   - **Bug colateral arreglado**: `ramfs_vfs_write/append` usaba
+     `strlen` (string-oriented) — sparse-hole writes con NULs se
+     truncaban. Nuevas APIs `ramfs_write_file_bin` /
+     `ramfs_append_file_bin` con tamaño explícito.
+
+OK Path 2 — proc_execve acepta paths arbitrarios
+   - **src/proc/exec.c**: si path no es /bin/X (o no hay builtin),
+     `vfs_stat` + `vfs_read` el ELF a un scratch kmalloc'd y
+     pasa a `task_create_user_elf` como blob in-memory. Cap 2 MiB.
+     EISDIR/ENOEXEC/E2BIG según corresponda.
+   - Permite `exec /sd/home/myprog` ahora que TCC genera ELFs en
+     disco.
+
+OK Path 3 — User stack 64 KiB
+   - **src/proc/elf.c**: `USER_STACK_PAGES=16`, allocates 16
+     páginas contiguas en `[0x7FFF0000, 0x80000000)`. Antes era
+     1 página (4 KiB) — TCC necesita decenas de KiB para parsing
+     recursivo.
+
+OK Path 4 — FPU init para ring-3
+   - **src/micro/fpu.{c,h}** (nuevo): `fpu_init()` setea
+     CR0.EM=0/MP=1/NE=1/TS=0 + CR4.OSFXSR=1/OSXMMEXCPT=1 + FNINIT +
+     LDMXCSR(0x1F80). Llamado desde `kmain` post syscall_msr_init.
+   - **GNUmakefile USER_CFLAGS**: removido `-mno-sse -mno-sse2
+     -mno-80387 -mno-mmx`. Kernel sigue `-mno-*` (compiled per-file).
+     User ELFs ahora tienen x87+SSE2.
+   - **Caveat documentado**: sin FXSAVE per-task, dos user tasks
+     concurrentes con FP pueden corromper regs entre sí. Single-task
+     FP funciona.
+   - **Bonus**: `lib/libc/math.c` puede usar double real ahora —
+     antes fallaba en undefined symbols __adddf3 etc.
+
+OK Path 5 — Headers libc faltantes
+   - `lib/libc/include/limits.h` (nuevo): CHAR_BIT, INT_MAX,
+     LONG_MAX, PATH_MAX, NAME_MAX, ARG_MAX, ...
+   - `lib/libc/include/float.h` (nuevo): FLT_MAX, DBL_EPSILON,
+     LDBL_MANT_DIG, ...
+   - `lib/libc/include/signal.h` (nuevo): SIG* constants Linux +
+     signal() / raise() decls.
+   - `lib/libc/signal.c` (nuevo): signal() retorna SIG_ERR/ENOSYS
+     para non-default; raise() → kill(getpid(), sig).
+   - `lib/libc/include/ctype.h`: + isblank, isgraph, ispunct, isascii.
+
+OK Path 6 — math.h básico
+   - `lib/libc/include/math.h` (nuevo): M_PI, M_E, M_LN2, INFINITY,
+     NAN, isnan/isinf/isfinite, fabs/floor/ceil/trunc/round/fmod,
+     sqrt/pow/exp/log/log2/log10, sin/cos/tan/atan/atan2, +
+     float variantes.
+   - `lib/libc/math.c` (nuevo, ~200 LOC): impls iterativas/Taylor.
+     sqrt vía Newton, exp/log con range reduction, sin/cos con
+     reducción mod 2π + Taylor. Accuracy "good enough" — no
+     IEEE-precise.
+
+OK ELF /bin/tcc — placeholder (no es port real)
+   - `elfs/tools/tcc.c`: stub que demuestra la cadena libc + stack
+     big + FPU + exec funciona end-to-end. **NO compila C**. Real
+     port movido a **ROADMAP_APENDICE.md → Self-hosting → TinyCC**
+     porque requiere mmap, FXSAVE/FXRSTOR per-task, signal
+     handlers reales, y un bootstrap tooling — ninguno bloquea el
+     día a día del kernel. Las piezas que sí están listas para el
+     futuro port (stack 64 KiB, FPU ring-3, write+offset, exec
+     desde VFS, math/limits/float/signal headers) son útiles
+     INDEPENDIENTEMENTE de TCC.
+
+OK Tests para los 6 items
+   - **cmd_test (kernel)**: 11 nuevos:
+     - WRITE_OFFSET × 8: open/write base, lseek+overwrite mid,
+       read-back, sparse-hole past EOF, length post-extend.
+     - EXEC_VFS × 3: blob written, pid allocated, missing → fail.
+   - **libctest (user)**: 49 nuevos:
+     - ctype × 9 (isalpha, isdigit, isblank, ispunct, isgraph,
+       tolower, toupper, ...).
+     - limits × 4 (INT_MAX, CHAR_BIT, PATH_MAX, LONG_MAX).
+     - signal × 3 (sig numbers, SIG_DFL noop, non-default ENOSYS).
+     - math × 18 (fabs, floor, ceil, fmod, sqrt×2, pow, sin×3,
+       cos, exp×2, log×2, isnan/isinf/isfinite).
+     - seek × 5 (write con offset libc-side).
+     - stack × 2 (16k y 32k arrays automáticos — fail si stack
+       sigue siendo 4 KiB).
+   - **`test` ahora suma ~643**, **libctest ~110**. AUDIT.md
+     documenta el flujo de verificación end-to-end.
 
 ### FASE Libc gaps 4+5+6 — CERRADA
 OK dup / dup2 — Linux syscalls #32 / #33

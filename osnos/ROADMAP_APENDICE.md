@@ -112,6 +112,34 @@ tenga base estable (todas las fases 1-12 del ROADMAP principal cerradas).
 - **TLS / openssl-equivalent** — librería de criptografía + TLS
   1.2/1.3 client + server. Requiere primero un RNG sólido.
 
+## Self-hosting
+
+- **TinyCC / self-hosting parcial** — bundlear `/bin/tcc` real
+  (no el stub actual) para que osnos pueda compilar `.c` adentro
+  sin depender del host. Buena cantidad del scaffolding está hecho
+  (libc decente, exec-from-VFS, user stack 64 KiB, FPU ring-3).
+  Pre-requisitos específicos antes de intentarlo:
+  - **mmap opcional** — TCC default usa mmap para source y output
+    sections; build con `--no-mmap` lo evita pero requiere parches.
+    Implementar mmap anónimo (MAP_PRIVATE | MAP_ANONYMOUS) es
+    ~200 LOC y desbloquea muchos otros programas además de TCC.
+  - **FXSAVE/FXRSTOR per-task** — hoy FPU funciona single-task;
+    TCC compilando mientras corre otra task con FP corrompe regs.
+    Real per-task save: 512 B/task aligned 16, hook en context
+    switch.
+  - **Más headers POSIX** — `sys/mman.h`, `ucontext.h`, `dirent.h`
+    extendida, `pwd.h` stub, `time.h` con `mktime`/`localtime`.
+  - **signal real** — TCC usa `signal(SIGSEGV, ...)` + `longjmp`
+    para error recovery. Hoy `signal()` retorna ENOSYS; necesita
+    handler table per-task + delivery sobre return-to-userland.
+  - **Tooling cross-compile** — script bootstrap que tome el
+    tarball de tcc, parchee headers, compile con clang `-target
+    osnos`, embed como `_binary_tcc_elf_start/end`.
+
+  Estimate: **~1-2 días concentrados** una vez los pre-reqs estén,
+  ~1 semana arrancando en frío. Self-hosting completo (`make osnos`
+  corriendo dentro de osnos) sería FASE 13+.
+
 ## Performance
 
 - **vDSO** — funciones rápidas como `gettimeofday` que no requieren

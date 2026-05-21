@@ -118,6 +118,34 @@ typedef struct {
      * the libc having to know $PWD. Kernel tasks (servers) ignore
      * this field; only user tasks read it. */
     char      cwd[OSNOS_PATH_MAX];
+
+    /*
+     * Per-task stdin/stdout redirection — populated by the shell
+     * when parsing `cmd < in.txt > out.txt`. When set, sys_read(0)
+     * pulls from the file instead of the TTY, and sys_write(1)
+     * writes to the file instead of the console.
+     *
+     * Empty string ([0] == 0) means "no redirect, use normal
+     * TTY/console path". stdout_append distinguishes `>` (truncate
+     * at exec time, then track offset) from `>>` (append from
+     * current EOF). Offsets are tracked per-task too, since the fd
+     * table itself stays global today.
+     */
+    char      stdin_redir [OSNOS_PATH_MAX];
+    char      stdout_redir[OSNOS_PATH_MAX];
+    int       stdout_append;     /* 1 for `>>`, 0 for `>` */
+    uint64_t  stdin_redir_off;   /* read cursor into stdin file */
+    uint64_t  stdout_redir_off;  /* write cursor into stdout file */
+
+    /*
+     * Pipe endpoints for `cmd1 | cmd2`. When the shell wires a
+     * pipeline, the producer gets pipe_out set; the consumer gets
+     * pipe_in. sys_write(1) / sys_read(0) consult these BEFORE the
+     * file-redirect path so the in-kernel pipe object short-
+     * circuits any TTY/console traffic. NULL = no pipe.
+     */
+    struct pipe *pipe_in;
+    struct pipe *pipe_out;
 } task_t;
 
 void task_init(void);

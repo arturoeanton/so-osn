@@ -1,5 +1,6 @@
 #include "exec.h"
 
+#include "../fs/vfs.h"
 #include "../include/osnos_status.h"
 #include "../lib/string.h"
 #include "../micro/fd.h"
@@ -7,6 +8,7 @@
 #include "../micro/ipc.h"
 #include "elf.h"
 #include "../micro/kmalloc.h"
+#include "../micro/pipe.h"
 #include "../micro/pmm.h"
 #include "../micro/reaper.h"
 #include "../micro/scheduler.h"
@@ -517,6 +519,12 @@ void proc_exit_current_user(int exit_code) {
         fd_free(fd);
     }
 
+    /* Close any pipe endpoints the task held so the peer sees EOF
+     * (reader exit) or EPIPE (writer exit) and can make progress
+     * instead of looping on EAGAIN forever. */
+    if (t->pipe_out) { pipe_close_writer(t->pipe_out); t->pipe_out = 0; }
+    if (t->pipe_in)  { pipe_close_reader(t->pipe_in);  t->pipe_in  = 0; }
+
     t->state             = TASK_DEAD;
     t->pml4              = 0;
     t->kernel_stack_top  = 0;
@@ -553,37 +561,81 @@ void proc_exit_current_user(int exit_code) {
 /* proc_exec — dispatches user blob vs user ELF                     */
 /* ---------------------------------------------------------------- */
 
+/*
+ * Maximum ELF blob we'll slurp from the VFS for an out-of-/bin
+ * exec. Has to fit in the kernel heap (whose cap is 4 MiB today),
+ * minus headroom for argv/envp/per-task structures. 2 MiB is
+ * comfortably enough for TCC-class binaries (~200 KiB) and any
+ * reasonable hand-written program.
+ */
+#define EXEC_VFS_BLOB_MAX (2 * 1024 * 1024)
+
 int64_t proc_execve(const char *path, const char *args,
                      const char *const *envp) {
     if (!path) return -(int64_t)OSNOS_EFAULT;
-    if (!os_strstarts(path, "/bin/")) return -(int64_t)OSNOS_ENOENT;
 
-    const char *name = path + 5;
-    const builtin_t *b = builtin_find(name);
-    if (!b) return -(int64_t)OSNOS_ENOENT;
-
-    /* Drop any keystrokes that were typed while the shell was line-
-     * editing (including the Enter that fired this exec). Otherwise a
-     * select()-driven child sees stdin "readable" before the user
-     * actually means to send it any input. */
     stdin_clear();
 
-    /* User ELF — parse PT_LOADs, build argv block, spawn ring-3 task. */
-    if (b->elf_start) {
-        return task_create_user_elf(b->name,
-                                    b->elf_start,
-                                    (size_t)(b->elf_end - b->elf_start),
-                                    args,
-                                    envp);
+    /* Path 1 — builtin /bin/ entry (zero-copy: the ELF blob sits
+     * in the kernel image already). Tried first because it's the
+     * fast path and how the shell launches every "type the name"
+     * command today. */
+    if (os_strstarts(path, "/bin/")) {
+        const char *name = path + 5;
+        const builtin_t *b = builtin_find(name);
+        if (b) {
+            if (b->elf_start) {
+                return task_create_user_elf(b->name,
+                                            b->elf_start,
+                                            (size_t)(b->elf_end - b->elf_start),
+                                            args,
+                                            envp);
+            }
+            if (b->user_start) {
+                (void)args;
+                return task_create_user(b->name, b->user_start, b->user_end);
+            }
+            return -(int64_t)OSNOS_ENOENT;
+        }
+        /* Fall through — maybe /bin is a mount with non-builtin
+         * entries one day. Today binfs only serves builtins. */
     }
 
-    /* Flat user blob — map bytes verbatim into one page, spawn task. */
-    if (b->user_start) {
-        (void)args;   /* hand-asm blobs don't read argv */
-        return task_create_user(b->name, b->user_start, b->user_end);
+    /*
+     * Path 2 — arbitrary path on the VFS. Read the file into a
+     * kernel-side scratch buffer and hand the bytes to elf_load,
+     * which copies them into the new task's address space page
+     * by page. The scratch is freed before this function returns
+     * regardless of outcome.
+     */
+    vfs_stat_t st;
+    osnos_status_t s = vfs_stat(path, &st);
+    if (s != OSNOS_OK)              return -(int64_t)s;
+    if (st.type == VFS_NODE_DIR)    return -(int64_t)OSNOS_EISDIR;
+    if (st.type != VFS_NODE_REG)    return -(int64_t)OSNOS_ENOEXEC;
+    if (st.size == 0)               return -(int64_t)OSNOS_ENOEXEC;
+    if (st.size > EXEC_VFS_BLOB_MAX) return -(int64_t)OSNOS_E2BIG;
+
+    size_t blob_size = (size_t)st.size;
+    uint8_t *blob = (uint8_t *)kmalloc(blob_size);
+    if (!blob) return -(int64_t)OSNOS_ENOMEM;
+
+    size_t got = 0;
+    s = vfs_read(path, (char *)blob, blob_size, &got);
+    if (s != OSNOS_OK || got != blob_size) {
+        kfree(blob);
+        return -(int64_t)(s != OSNOS_OK ? s : OSNOS_EIO);
     }
 
-    return -(int64_t)OSNOS_ENOENT;
+    /* Derive a short display name from the basename. */
+    const char *base = path;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/') base = p + 1;
+    }
+
+    int64_t pid = task_create_user_elf(base, blob, blob_size, args, envp);
+    kfree(blob);
+    return pid;
 }
 
 /* Legacy wrapper — proc_exec is now proc_execve with an empty
@@ -591,4 +643,103 @@ int64_t proc_execve(const char *path, const char *args,
  * proc_execve and pass their own envp. */
 int64_t proc_exec(const char *path, const char *args) {
     return proc_execve(path, args, 0);
+}
+
+/*
+ * proc_execve_redir — same as proc_execve, plus arranges that the
+ * spawned task's sys_read(0) / sys_write(1) talk to files instead
+ * of the TTY/console.
+ *
+ * Strategy: spawn via the existing proc_execve, then bolt the
+ * redirect paths onto the child's task struct before it actually
+ * runs. Since proc_execve returns immediately with the child in
+ * READY state, we can mutate task_by_pid(pid) safely.
+ */
+int64_t proc_execve_pipe(const char *left_path,  const char *left_args,
+                          const char *right_path, const char *right_args,
+                          const char *const *envp,
+                          int64_t *left_pid_out)
+{
+    if (left_pid_out) *left_pid_out = -1;
+
+    pipe_t *pipe = pipe_create();
+    if (!pipe) return -(int64_t)OSNOS_ENOMEM;
+    /* pipe_create starts with ref_w=ref_r=1 — those references
+     * belong to the two tasks we're about to spawn. Each task's
+     * exit handler drops the relevant side. */
+
+    /* Spawn LEFT — writer. */
+    int64_t lpid = proc_execve(left_path, left_args, envp);
+    if (lpid < 0) {
+        /* Pipe never attached; drop both refs to free the slot. */
+        pipe_close_writer(pipe);
+        pipe_close_reader(pipe);
+        return lpid;
+    }
+    task_t *lt = task_by_pid((uint64_t)lpid);
+    if (lt) lt->pipe_out = pipe;
+
+    /* Spawn RIGHT — reader. */
+    int64_t rpid = proc_execve(right_path, right_args, envp);
+    if (rpid < 0) {
+        /* Tear down left: it'll discover EPIPE when it tries to
+         * write, or just exit normally if it doesn't write much.
+         * Either way we can't run the pipeline. Free our refs. */
+        if (lt) {
+            lt->pipe_out = 0;
+            lt->kill_pending = 1;
+        }
+        pipe_close_writer(pipe);
+        pipe_close_reader(pipe);
+        return rpid;
+    }
+    task_t *rt = task_by_pid((uint64_t)rpid);
+    if (rt) rt->pipe_in = pipe;
+
+    if (left_pid_out) *left_pid_out = lpid;
+    return rpid;
+}
+
+int64_t proc_execve_redir(const char *path, const char *args,
+                           const char *const *envp,
+                           const char *stdin_path,
+                           const char *stdout_path,
+                           int stdout_append)
+{
+    /* Pre-create / truncate the stdout file. POSIX `>` truncates,
+     * `>>` leaves existing content; either way the file must exist
+     * before the child starts writing. */
+    if (stdout_path && stdout_path[0]) {
+        vfs_stat_t st;
+        bool exists = (vfs_stat(stdout_path, &st) == OSNOS_OK);
+        if (!exists || !stdout_append) {
+            osnos_status_t s = vfs_write(stdout_path, "", 0);
+            if (s != OSNOS_OK) return -(int64_t)s;
+        }
+    }
+    /* For stdin: just verify the file is readable; sys_read does the
+     * actual pull. Catches `cmd < nope.txt` cleanly. */
+    if (stdin_path && stdin_path[0]) {
+        vfs_stat_t st;
+        if (vfs_stat(stdin_path, &st) != OSNOS_OK) {
+            return -(int64_t)OSNOS_ENOENT;
+        }
+    }
+
+    int64_t pid = proc_execve(path, args, envp);
+    if (pid < 0) return pid;
+
+    task_t *t = task_by_pid((uint64_t)pid);
+    if (!t) return pid;
+
+    if (stdout_path && stdout_path[0]) {
+        os_strlcpy(t->stdout_redir, stdout_path, OSNOS_PATH_MAX);
+        t->stdout_append    = stdout_append;
+        t->stdout_redir_off = 0;
+    }
+    if (stdin_path && stdin_path[0]) {
+        os_strlcpy(t->stdin_redir, stdin_path, OSNOS_PATH_MAX);
+        t->stdin_redir_off = 0;
+    }
+    return pid;
 }
