@@ -140,6 +140,7 @@ DECLARE_ELF(httpd);
 DECLARE_ELF(ttytest);
 DECLARE_ELF(envtest);
 DECLARE_ELF(fptest);
+DECLARE_ELF(mmaptest);
 
 #undef DECLARE_ELF
 
@@ -201,6 +202,7 @@ static const builtin_t builtins[] = {
     ELF(ttytest,      "demo termios canonical vs raw mode"),
     ELF(envtest,      "dump environ + setenv/unsetenv smoke test"),
     ELF(fptest,       "stress per-task FXSAVE/FXRSTOR (run twice in //)"),
+    ELF(mmaptest,     "smoke test anonymous mmap/munmap"),
 };
 
 #undef USER

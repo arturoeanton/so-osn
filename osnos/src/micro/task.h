@@ -160,6 +160,22 @@ typedef struct {
      * dispatch loads a sane FPU rather than uninitialised bytes.
      */
     uint8_t   fpu_state[512] __attribute__((aligned(16)));
+
+    /*
+     * Anonymous mmap regions. Bump-allocator: mmap_next points at
+     * the next free virtual address, mmap_regions[] remembers each
+     * live region so munmap can free its pages. VA isn't reclaimed
+     * on munmap — simple, leaky, but enough for typical workloads
+     * (TCC, scratch buffers, "big malloc-replacement") that mmap a
+     * few times and free at exit. Refill of the slot table when an
+     * entry munmaps so the cap of 16 is per-snapshot, not lifetime.
+     */
+#define TASK_MMAP_MAX 16
+    uint64_t  mmap_next;
+    struct {
+        uint64_t addr;       /* 0 = empty slot */
+        uint64_t len;
+    } mmap_regions[TASK_MMAP_MAX];
 } task_t;
 
 void task_init(void);

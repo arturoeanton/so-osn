@@ -530,6 +530,16 @@ void proc_exit_current_user(int exit_code) {
     if (t->pipe_out) { pipe_close_writer(t->pipe_out); t->pipe_out = 0; }
     if (t->pipe_in)  { pipe_close_reader(t->pipe_in);  t->pipe_in  = 0; }
 
+    /* mmap regions ride on the user pml4 we destroy below, so the
+     * physical pages would already get freed by address_space_destroy.
+     * Still, zero out the bookkeeping so a slot recycler sees a clean
+     * task struct. */
+    for (int i = 0; i < TASK_MMAP_MAX; i++) {
+        t->mmap_regions[i].addr = 0;
+        t->mmap_regions[i].len  = 0;
+    }
+    t->mmap_next = 0;
+
     t->state             = TASK_DEAD;
     t->pml4              = 0;
     t->kernel_stack_top  = 0;

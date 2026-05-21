@@ -10,6 +10,7 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| mmap/munmap anónimo | SYS_MMAP/MUNMAP, bump-allocator en `0x20000000`, libc + sys/mman.h + 12 tests | 250 |
 | Pipes + redirects mezclados | `a < in.txt \| b \| c > out.txt`, middle-stage redir validado, `echo -e` shell builtin | 200 |
 | O_NONBLOCK runtime | libc cachea O_NONBLOCK per-fd; read() respeta sin syscall extra | 50 |
 | Multi-stage pipes | `a \| b \| c \| d` (hasta 4) — proc_execve_pipeline + shell N-split | 180 |
@@ -61,7 +62,9 @@ canonical/raw, /home persistente cross-reboot.
 - Open file description shared offsets para dup POSIX-strict
 - tmpfile unlink-on-close (necesita anonymous FD layer)
 - RTC real (hoy time/clock_gettime = segundos desde boot)
-- mmap/munmap (muchos programas modernos lo asumen)
+- mmap file-backed + MAP_FIXED + partial unmap (hoy solo anónimo
+  con bump-allocator y addr-exact munmap)
+- mremap (no hay)
 - IPv6, TLS, DHCP, TinyCC self-hosting (todo en ROADMAP_APENDICE.md)
 
 ---
@@ -1611,6 +1614,42 @@ OK .history (historial persistente) + .oshrc (startup script)
      Tipo en un boot, recuperá con flecha ↑ tras reboot. .oshrc
      queda como el lugar natural para "cd a tu workdir" o
      "export VARS" automáticos.
+
+### FASE mmap anónimo — CERRADA
+OK SYS_MMAP (#9) + SYS_MUNMAP (#11) — anonymous only
+   - `sys_mmap(addr, len, prot, flags, fd, off)`:
+     - Acepta `MAP_ANONYMOUS | MAP_PRIVATE` (o SHARED, mismo trato).
+     - File-backed (`fd != -1` o sin MAP_ANONYMOUS): -ENOSYS.
+     - MAP_FIXED y `addr` hint: ignorados — la ubicación es el
+       bump cursor del task.
+     - Bump-allocator entre USER_MMAP_BASE (`0x20000000`) y
+       USER_MMAP_LIMIT (`0x40000000`, 1 GiB window).
+     - Zero-fills cada página antes de mapear (POSIX guarantee).
+     - PROT_WRITE → PTE_W; PROT_NONE/READ son default.
+     - Unwind clean: si falla pmm_alloc o vmm_map en medio,
+       libera lo ya mapeado.
+   - `sys_munmap(addr, len)`: busca región por addr exacto en
+     `task_t.mmap_regions[16]`. Si match, unmap + free pages,
+     marca slot vacío. Partial unmaps NO soportados (POSIX
+     permite; complicaría bookkeeping).
+   - `task_t.mmap_regions[16]` + `mmap_next` cursor. Slot
+     recyclable después de munmap pero VA no se reusa (bump
+     allocator simple).
+
+OK Cleanup en proc_exit_current_user
+   - Las páginas físicas las libera `address_space_destroy`
+     porque viven en el pml4 del task. Bookkeeping se zerea
+     para que un recycle del slot vea task limpio.
+
+OK libc + headers
+   - `lib/libc/include/sys/mman.h` con PROT_* / MAP_* / MAP_FAILED.
+   - `lib/libc/mman.c` wrappers thin sobre osnos_syscall6/2.
+
+OK Test /bin/mmaptest (12 checks)
+   - mmap básico 12 KiB + zero-init verificado en 3 offsets.
+   - Scribble + read-back todos los bytes.
+   - munmap → re-mmap fresh memory está cero otra vez.
+   - File-backed mmap rechazado con ENOSYS.
 
 ### FASE Multi-stage pipes + O_NONBLOCK runtime — CERRADA
 OK `proc_execve_pipeline(paths[], args[], n, envp, pids_out)` kernel

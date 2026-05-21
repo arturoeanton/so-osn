@@ -37,6 +37,7 @@ typedef enum {
     OSNOS_EPIPE          = 32,  /* broken pipe (writer w/o readers) */
     OSNOS_EROFS          = 30,  /* read-only file system */
     OSNOS_ENAMETOOLONG   = 36,  /* file name too long */
+    OSNOS_ENOSYS         = 38,  /* function not implemented */
     OSNOS_ENOTEMPTY      = 39,  /* directory not empty */
     /* Networking (Linux errno-base) — used by the socket syscalls. */
     OSNOS_ENOTSOCK       = 88,  /* not a socket */

@@ -965,6 +965,128 @@ int64_t sys_clock_gettime(int clk_id, void *tp) {
     return 0;
 }
 
+/* ----- mmap / munmap (anonymous only) ----- */
+
+#define USER_MMAP_BASE  0x20000000ULL  /* between heap and stack */
+#define USER_MMAP_LIMIT 0x40000000ULL  /* 1 GiB window — plenty for now */
+
+/* mmap flag bits — Linux asm-generic/mman-common.h. */
+#define OSNOS_MAP_SHARED    0x01
+#define OSNOS_MAP_PRIVATE   0x02
+#define OSNOS_MAP_FIXED     0x10
+#define OSNOS_MAP_ANONYMOUS 0x20
+
+/* mmap prot bits. */
+#define OSNOS_PROT_NONE  0x0
+#define OSNOS_PROT_READ  0x1
+#define OSNOS_PROT_WRITE 0x2
+#define OSNOS_PROT_EXEC  0x4
+
+#define MMAP_MAP_FAILED ((int64_t)-1)
+
+int64_t sys_mmap(void *addr, size_t length, int prot, int flags,
+                  int fd, int64_t offset) {
+    (void)addr;   /* hint ignored (no MAP_FIXED) */
+    (void)offset;
+
+    task_t *t = task_current();
+    if (!t || !t->pml4) return -(int64_t)OSNOS_EPERM;
+
+    if (length == 0) return -(int64_t)OSNOS_EINVAL;
+    /* File-backed mmap not yet implemented. */
+    if (fd != -1 || !(flags & OSNOS_MAP_ANONYMOUS)) {
+        return -(int64_t)OSNOS_ENOSYS;
+    }
+    /* MAP_FIXED ignored: the bump cursor decides where everything
+     * lands. Real FIXED needs a free-page tracker. */
+
+    size_t pages = (length + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (pages == 0) return -(int64_t)OSNOS_EINVAL;
+
+    /* Initialise bump cursor on first call. */
+    if (t->mmap_next == 0) t->mmap_next = USER_MMAP_BASE;
+
+    if (t->mmap_next + pages * PAGE_SIZE > USER_MMAP_LIMIT) {
+        return -(int64_t)OSNOS_ENOMEM;
+    }
+
+    /* Reserve a region slot. */
+    int slot = -1;
+    for (int i = 0; i < TASK_MMAP_MAX; i++) {
+        if (t->mmap_regions[i].addr == 0) { slot = i; break; }
+    }
+    if (slot < 0) return -(int64_t)OSNOS_ENOMEM;
+
+    uint64_t pte_flags = PTE_U;
+    if (prot & OSNOS_PROT_WRITE) pte_flags |= PTE_W;
+    /* PROT_READ is always implicit on x86_64 paged memory; PROT_EXEC
+     * needs NX management, postponed. */
+
+    uint64_t base_va = t->mmap_next;
+
+    /* Allocate + map page by page. On any failure, unwind. */
+    for (size_t i = 0; i < pages; i++) {
+        uint64_t phys = pmm_alloc_page();
+        if (!phys) {
+            /* Undo. */
+            for (size_t j = 0; j < i; j++) {
+                uint64_t va = base_va + j * PAGE_SIZE;
+                uint64_t p  = vmm_lookup(t->pml4, va) & PTE_ADDR_MASK;
+                vmm_unmap(t->pml4, va);
+                if (p) pmm_free_page(p);
+            }
+            return -(int64_t)OSNOS_ENOMEM;
+        }
+        /* Zero-fill — mmap'd memory is observably zero. */
+        uint8_t *kvirt = (uint8_t *)(phys + pmm_hhdm_offset());
+        for (size_t b = 0; b < PAGE_SIZE; b++) kvirt[b] = 0;
+
+        if (!vmm_map(t->pml4, base_va + i * PAGE_SIZE, phys, pte_flags)) {
+            pmm_free_page(phys);
+            /* Same unwind as above. */
+            for (size_t j = 0; j < i; j++) {
+                uint64_t va = base_va + j * PAGE_SIZE;
+                uint64_t p  = vmm_lookup(t->pml4, va) & PTE_ADDR_MASK;
+                vmm_unmap(t->pml4, va);
+                if (p) pmm_free_page(p);
+            }
+            return -(int64_t)OSNOS_ENOMEM;
+        }
+    }
+
+    t->mmap_regions[slot].addr = base_va;
+    t->mmap_regions[slot].len  = pages * PAGE_SIZE;
+    t->mmap_next += pages * PAGE_SIZE;
+    return (int64_t)base_va;
+}
+
+int64_t sys_munmap(void *addr, size_t length) {
+    task_t *t = task_current();
+    if (!t || !t->pml4) return -(int64_t)OSNOS_EPERM;
+    if (length == 0) return -(int64_t)OSNOS_EINVAL;
+
+    uint64_t target = (uint64_t)addr;
+    /* Find a region whose start matches. POSIX accepts partial
+     * unmaps (`munmap(addr + N, len - N)`); we don't — keeps the
+     * bookkeeping trivial. */
+    for (int i = 0; i < TASK_MMAP_MAX; i++) {
+        if (t->mmap_regions[i].addr != target) continue;
+        uint64_t reg_len = t->mmap_regions[i].len;
+        size_t pages = (reg_len + PAGE_SIZE - 1) / PAGE_SIZE;
+        for (size_t p = 0; p < pages; p++) {
+            uint64_t va  = target + p * PAGE_SIZE;
+            uint64_t pte = vmm_lookup(t->pml4, va);
+            uint64_t phys = pte & PTE_ADDR_MASK;
+            vmm_unmap(t->pml4, va);
+            if (phys) pmm_free_page(phys);
+        }
+        t->mmap_regions[i].addr = 0;
+        t->mmap_regions[i].len  = 0;
+        return 0;
+    }
+    return -(int64_t)OSNOS_EINVAL;
+}
+
 /* fcntl cmds — Linux asm-generic/fcntl.h. */
 #define OSNOS_F_DUPFD 0
 #define OSNOS_F_GETFD 1
@@ -1393,6 +1515,18 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
                 (int)frame->rdi,
                 (int)frame->rsi,
                 (int64_t)frame->rdx));
+        case SYS_MMAP:
+            return pack(sys_mmap(
+                (void *)frame->rdi,
+                (size_t)frame->rsi,
+                (int)frame->rdx,
+                (int)frame->r10,
+                (int)frame->r8,
+                (int64_t)frame->r9));
+        case SYS_MUNMAP:
+            return pack(sys_munmap(
+                (void *)frame->rdi,
+                (size_t)frame->rsi));
         case SYS_ACCEPT:
             return pack(sys_accept(
                 (int)frame->rdi,

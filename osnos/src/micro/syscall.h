@@ -16,6 +16,8 @@
 #define SYS_CLOSE     3
 #define SYS_STAT      4
 #define SYS_FSTAT     5
+#define SYS_MMAP      9
+#define SYS_MUNMAP   11
 #define SYS_LSEEK     8
 #define SYS_BRK      12
 #define SYS_DUP      32
@@ -175,6 +177,20 @@ int64_t sys_time    (int64_t *t);
  * (0) and CLOCK_MONOTONIC (1) are recognised; both return ticks
  * since boot (no RTC). Writes a struct timespec to user memory. */
 int64_t sys_clock_gettime(int clk_id, void *tp);
+
+/*
+ * mmap / munmap — POSIX. Today only the anonymous flavour is
+ * supported (MAP_ANONYMOUS | MAP_PRIVATE/SHARED, fd == -1). File-
+ * backed mmap returns -ENOSYS. MAP_FIXED is not supported either.
+ *
+ * `addr` is a hint only (or NULL for "pick one"); the kernel
+ * places the mapping at the task's bump cursor (USER_MMAP_BASE).
+ * Return value is the user virtual address, or -errno cast as a
+ * pointer-sized signed int.
+ */
+int64_t sys_mmap   (void *addr, size_t length, int prot, int flags,
+                     int fd, int64_t offset);
+int64_t sys_munmap (void *addr, size_t length);
 
 /*
  * dup / dup2. Both return the new fd on success, -1 on error. Today

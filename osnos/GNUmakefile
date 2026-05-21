@@ -128,7 +128,8 @@ USER_ELF_LIBC_SRCS := \
     elfs/tests/libctest.c \
     elfs/tests/ttytest.c \
     elfs/tests/envtest.c \
-    elfs/tests/fptest.c
+    elfs/tests/fptest.c \
+    elfs/tests/mmaptest.c
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS))
