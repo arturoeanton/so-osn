@@ -324,6 +324,9 @@ static int do_hist(int argc, char **argv);
 typedef int (*cmd_fn)(int, char **);
 typedef struct { const char *name; cmd_fn fn; const char *help; } cmd_t;
 
+static int  do_test(int argc, char **argv);
+static void wait_pid(long pid);     /* defined alongside the pipeline runner */
+
 static const cmd_t COMMANDS[] = {
     { "help",    do_help, "list available commands"     },
     { "exit",    do_exit, "leave shellsrv"              },
@@ -333,6 +336,7 @@ static const cmd_t COMMANDS[] = {
     { "cat",     do_cat,  "print file contents"         },
     { "echo",    do_echo, "echo arguments (no escapes)" },
     { "history", do_hist, "show command history"        },
+    { "test",    do_test, "run /bin/kerntest ABI suite" },
 };
 
 static int should_exit = 0;
@@ -403,47 +407,85 @@ static int do_hist(int argc, char **argv) {
     return 0;
 }
 
-/* ---- dispatch ---- */
+static int do_test(int argc, char **argv) {
+    /* The legacy kernel-shell `test` builtin (cmd_test in
+     * shell_server.c) lives in ring 0 and reaches into kernel
+     * internals — it can't be invoked from a ring-3 task. /bin/kerntest
+     * covers the user-visible ABI surface; we spawn that here so
+     * `test` keeps working from shellsrv. */
+    (void)argc; (void)argv;
+    char *fake_argv[] = { "kerntest", 0 };
+    leave_raw();
+    long pid = osn_spawn("/bin/kerntest", "", 0, -1, -1);
+    enter_raw();
+    if (pid <= 0) {
+        fprintf(stderr, "test: kerntest unavailable: %s\n", strerror(errno));
+        return 1;
+    }
+    wait_pid(pid);
+    (void)fake_argv;
+    return 0;
+}
 
-static void dispatch(char *line) {
-    char *argv[16];
-    int argc = split_args(line, argv, 16);
-    if (argc == 0) return;
+/* ---- pipeline parser ---- */
 
-    for (size_t i = 0; i < sizeof(COMMANDS)/sizeof(COMMANDS[0]); i++) {
-        if (strcmp(argv[0], COMMANDS[i].name) == 0) {
-            (void)COMMANDS[i].fn(argc, argv);
-            return;
+#define MAX_STAGES   4
+#define MAX_ARGV    16
+
+typedef struct {
+    char *argv[MAX_ARGV + 1];
+    int   argc;
+    char *stdin_file;
+    char *stdout_file;
+    int   stdout_append;
+} stage_t;
+
+/* Split `line` by `|` into N stage strings (in-place: replaces `|` with
+ * NUL). Each stage string is later tokenised + redirect-extracted by
+ * stage_parse. Returns N or -1 on too-many-stages. */
+static int line_split_stages(char *line, char *stage_raw[MAX_STAGES]) {
+    int n = 0;
+    stage_raw[n++] = line;
+    for (char *p = line; *p; p++) {
+        if (*p == '|') {
+            *p = 0;
+            p++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (n >= MAX_STAGES) return -1;
+            stage_raw[n++] = p;
+            /* `p` will be incremented by the for-loop again, so step
+             * back one. */
+            p--;
         }
     }
+    return n;
+}
 
-    /* Not a builtin — spawn /bin/<argv[0]> via osn_spawn. We must
-     * restore the user's normal TTY before the child runs so its
-     * canonical-mode reads still work; the child's `read()` would
-     * otherwise see byte-at-a-time + no echo. */
-    char path[PATH_MAX];
-    if (argv[0][0] == '/') {
-        safe_copy(path, argv[0], sizeof(path));
-    } else {
-        safe_copy(path, "/bin/", sizeof(path));
-        safe_cat (path, argv[0],  sizeof(path));
-    }
-    char args[256];
-    args[0] = 0;
-    for (int i = 1; i < argc; i++) {
-        if (i > 1) safe_cat(args, " ", sizeof(args));
-        safe_cat(args, argv[i], sizeof(args));
-    }
+static void stage_parse(char *raw, stage_t *st) {
+    st->argc = 0;
+    st->stdin_file = 0;
+    st->stdout_file = 0;
+    st->stdout_append = 0;
+    char *toks[MAX_ARGV * 2 + 4];
+    int   tn = split_args(raw, toks, (int)(sizeof(toks)/sizeof(toks[0])));
 
-    leave_raw();
-    long pid = osn_spawn(path, args, 0, -1, -1);
-    if (pid <= 0) {
-        fprintf(stderr, "shellsrv: %s: %s\n",
-                argv[0], pid < 0 ? strerror(errno) : "no such command");
-        enter_raw();
-        return;
+    for (int i = 0; i < tn; i++) {
+        if (strcmp(toks[i], "<") == 0 && i + 1 < tn) {
+            st->stdin_file = toks[++i];
+        } else if (strcmp(toks[i], ">") == 0 && i + 1 < tn) {
+            st->stdout_file   = toks[++i];
+            st->stdout_append = 0;
+        } else if (strcmp(toks[i], ">>") == 0 && i + 1 < tn) {
+            st->stdout_file   = toks[++i];
+            st->stdout_append = 1;
+        } else {
+            if (st->argc < MAX_ARGV) st->argv[st->argc++] = toks[i];
+        }
     }
-    /* Wait for the child to exit. */
+    st->argv[st->argc] = 0;
+}
+
+static void wait_pid(long pid) {
     for (;;) {
         int alive = 0;
         for (size_t i = 0; i < 16; i++) {
@@ -458,7 +500,138 @@ static void dispatch(char *line) {
         struct timespec ts = { 0, 20 * 1000000 };
         nanosleep(&ts, 0);
     }
-    enter_raw();
+}
+
+/* Build "/bin/<name>" or pass absolute. */
+static void resolve_cmd_path(const char *name, char *out, size_t cap) {
+    if (name[0] == '/') {
+        safe_copy(out, name, cap);
+    } else {
+        safe_copy(out, "/bin/", cap);
+        safe_cat (out, name,    cap);
+    }
+}
+
+/* Pack argv[1..argc-1] into a single space-separated args string
+ * (proc_execve convention — single args blob). */
+static void pack_args(stage_t *st, char *out, size_t cap) {
+    out[0] = 0;
+    for (int i = 1; i < st->argc; i++) {
+        if (i > 1) safe_cat(out, " ", cap);
+        safe_cat(out, st->argv[i], cap);
+    }
+}
+
+static void run_pipeline(stage_t *stages, int n) {
+    long pids[MAX_STAGES];
+    int  npids = 0;
+    int  pipe_in_fd = -1;            /* read end of pipe FROM previous stage */
+
+    for (int i = 0; i < n; i++) {
+        stage_t *st = &stages[i];
+        if (st->argc == 0) {
+            fprintf(stderr, "shellsrv: empty stage in pipeline\n");
+            goto cleanup;
+        }
+
+        /* Stdin: previous pipe (if any) overrides any < redirect on
+         * a non-first stage — same semantics as bash. */
+        int stdin_fd = pipe_in_fd;
+        if (i == 0 && st->stdin_file) {
+            stdin_fd = open(st->stdin_file, O_RDONLY);
+            if (stdin_fd < 0) {
+                fprintf(stderr, "shellsrv: %s: %s\n",
+                        st->stdin_file, strerror(errno));
+                goto cleanup;
+            }
+        }
+
+        /* Stdout: pipe to next stage, OR final-stage redirect, OR
+         * default (let it flow to TTY). */
+        int stdout_fd  = -1;
+        int next_pipe_in = -1;
+        if (i < n - 1) {
+            int p[2];
+            if (pipe(p) != 0) {
+                fprintf(stderr, "shellsrv: pipe(): %s\n", strerror(errno));
+                if (stdin_fd >= 3) close(stdin_fd);
+                goto cleanup;
+            }
+            stdout_fd    = p[1];
+            next_pipe_in = p[0];
+        } else if (st->stdout_file) {
+            int flags = O_WRONLY | O_CREAT |
+                        (st->stdout_append ? O_APPEND : O_TRUNC);
+            stdout_fd = open(st->stdout_file, flags, 0644);
+            if (stdout_fd < 0) {
+                fprintf(stderr, "shellsrv: %s: %s\n",
+                        st->stdout_file, strerror(errno));
+                if (stdin_fd >= 3) close(stdin_fd);
+                goto cleanup;
+            }
+        }
+
+        char path[PATH_MAX];
+        char args[256];
+        resolve_cmd_path(st->argv[0], path, sizeof(path));
+        pack_args(st, args, sizeof(args));
+
+        leave_raw();
+        long pid = osn_spawn(path, args, 0, stdin_fd, stdout_fd);
+        enter_raw();
+        if (pid <= 0) {
+            fprintf(stderr, "shellsrv: %s: %s\n",
+                    st->argv[0],
+                    pid < 0 ? strerror(errno) : "no such command");
+            /* osn_spawn left fds untouched on failure → free what we
+             * opened ourselves. */
+            if (stdin_fd  >= 3) close(stdin_fd);
+            if (stdout_fd >= 3) close(stdout_fd);
+            if (next_pipe_in >= 0) close(next_pipe_in);
+            goto cleanup;
+        }
+        pids[npids++] = pid;
+        pipe_in_fd = next_pipe_in;
+    }
+
+    for (int k = 0; k < npids; k++) wait_pid(pids[k]);
+    if (pipe_in_fd >= 0) close(pipe_in_fd);
+    return;
+
+cleanup:
+    if (pipe_in_fd >= 0) close(pipe_in_fd);
+    for (int k = 0; k < npids; k++) wait_pid(pids[k]);
+}
+
+/* ---- dispatch ---- */
+
+static void dispatch(char *line) {
+    /* Pipe-aware path: split into stages, parse each, run pipeline.
+     * Builtins only run when there's exactly one stage AND no
+     * redirects — otherwise we fall through to /bin/<name> ELF so
+     * redirects + pipes can wire its fds. */
+    char *raw[MAX_STAGES];
+    int n = line_split_stages(line, raw);
+    if (n <= 0) {
+        if (n < 0) fprintf(stderr, "shellsrv: too many pipeline stages\n");
+        return;
+    }
+
+    stage_t stages[MAX_STAGES];
+    for (int i = 0; i < n; i++) stage_parse(raw[i], &stages[i]);
+
+    if (n == 1 && !stages[0].stdin_file && !stages[0].stdout_file) {
+        stage_t *st = &stages[0];
+        if (st->argc == 0) return;
+        for (size_t i = 0; i < sizeof(COMMANDS)/sizeof(COMMANDS[0]); i++) {
+            if (strcmp(st->argv[0], COMMANDS[i].name) == 0) {
+                (void)COMMANDS[i].fn(st->argc, st->argv);
+                return;
+            }
+        }
+    }
+
+    run_pipeline(stages, n);
 }
 
 /* ---- main ---- */

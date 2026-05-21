@@ -147,18 +147,15 @@ int64_t sys_write(int fd, const void *buf, size_t count) {
 
     if (fd == OSNOS_FD_STDOUT || fd == OSNOS_FD_STDERR) {
         task_t *cur = task_current();
-        /* Pipe end attached to fd 1 (set by proc_execve_pipeline for
-         * upstream stages). Same logic as fd 0 above — moved off
-         * task_t.pipe_out into the per-task fd table. Note: only
-         * STDOUT (fd 1) carries the pipe ref; fd 2 (stderr) stays
-         * routed to the console even inside a pipeline, which is
-         * closer to POSIX than the previous "both go to the pipe"
-         * behaviour. */
         osnos_fd_t *sout = cur ? fd_get(cur, fd) : 0;
+        /* Pipe end attached to fd 1 (set by proc_execve_pipeline or
+         * sys_spawn fd inheritance). */
         if (sout && sout->is_pipe && sout->pipe_ref && sout->pipe_side == 1) {
             return pipe_write(sout->pipe_ref, buf, count);
         }
-        /* Redirected stdout (shell parsed `cmd > file` / `cmd >> file`). */
+        /* Legacy task-level stdout redirect (used by the in-kernel
+         * shell pre-FASE-10.4; ring-3 shellsrv uses fd inheritance
+         * instead). */
         if (cur && cur->stdout_redir[0] != 0) {
             osnos_status_t s = vfs_append(cur->stdout_redir,
                                            (const char *)buf, count);
@@ -166,7 +163,13 @@ int64_t sys_write(int fd, const void *buf, size_t count) {
             cur->stdout_redir_off += count;
             return (int64_t)count;
         }
-        return write_to_console((const char *)buf, count);
+        /* Default stdin/stdout/stderr → console. Anything else (file
+         * fd handed to the child via osn_spawn) falls through to the
+         * regular VFS path below. */
+        if (!sout || sout->is_special) {
+            return write_to_console((const char *)buf, count);
+        }
+        /* fall through with `sout` as our fd entry */
     }
 
     osnos_fd_t *f = fd_get(task_current(), fd);
@@ -262,15 +265,13 @@ int64_t sys_read(int fd, void *buf, size_t count) {
 
     if (fd == OSNOS_FD_STDIN) {
         task_t *cur = task_current();
-        /* Pipe end attached to fd 0 (set by proc_execve_pipeline for
-         * downstream stages). Takes priority over file redirect over
-         * TTY. The fd slot is the new home of what used to live in
-         * task_t.pipe_in — same kernel pipe object, same semantics. */
         osnos_fd_t *sin = cur ? fd_get(cur, OSNOS_FD_STDIN) : 0;
+        /* Pipe end attached to fd 0 (set by proc_execve_pipeline or
+         * sys_spawn fd inheritance). */
         if (sin && sin->is_pipe && sin->pipe_ref && sin->pipe_side == 0) {
             return pipe_read(sin->pipe_ref, buf, count);
         }
-        /* Redirected stdin (shell parsed `cmd < file`). */
+        /* Legacy task-level stdin redirect (kernel shell). */
         if (cur && cur->stdin_redir[0] != 0) {
             static char rd_scratch[1024];
             size_t got = 0;
@@ -288,16 +289,16 @@ int64_t sys_read(int fd, void *buf, size_t count) {
             return (int64_t)n;
         }
 
-        /*
-         * Single-shot poll: kernel-side stdin is non-blocking. If
-         * nothing is buffered we report EAGAIN and let the libc
-         * wrapper loop with nanosleep, which yields to the scheduler
-         * so keyboard_server can feed the TTY between attempts. That
-         * lets blocking reads "just work" without preempting in CPL=0.
-         */
-        size_t n = stdin_pop((char *)buf, count);
-        if (n == 0 && count > 0) return err(OSNOS_EAGAIN);
-        return (int64_t)n;
+        /* If fd 0 has been overridden with a regular file fd (via
+         * osn_spawn fd inheritance), fall through to the file-read
+         * path below. Only the default is_special slot drains the
+         * TTY. */
+        if (!sin || sin->is_special) {
+            size_t n = stdin_pop((char *)buf, count);
+            if (n == 0 && count > 0) return err(OSNOS_EAGAIN);
+            return (int64_t)n;
+        }
+        /* fall through with `sin` as our fd */
     }
     if (fd == OSNOS_FD_STDOUT || fd == OSNOS_FD_STDERR) {
         return err(OSNOS_EBADF);
