@@ -97,10 +97,15 @@ Boot path (`src/kernel/main.c`, `kmain`):
   - `osnos_elf.h` — ELF64 layout subset (Elf64_Ehdr / Elf64_Phdr + PT_*/PF_*/ET_*/EM_X86_64 constants), used by the loader.
   - `osnos_path.h` — `osnos_path_t { buf, len }` sketch, used by future VFS.
   - `font.h`, `theme.h`.
-- `tests/` — user-mode programs that the build compiles into ring-3 ELFs and embeds in the kernel:
-  - `tests/user_hello.c` + `tests/user_hello.lds` → `/bin/hello_elf` (bare, no libc).
-  - `tests/hello_libc.c` + `tests/hello_libc.lds` → `/bin/hello_libc` (linked with the libc).
-  - Pattern: any `tests/<name>.c` paired with `tests/<name>.lds` will be picked up by the make rule `$(BUILD)/tests/%.elf` and embedded via objcopy as `_binary_<name>_elf_start/end`. Add it to `USER_ELF_SRCS` (bare) or `USER_ELF_LIBC_SRCS` (libc-linked) in `GNUmakefile`.
+- `elfs/` — user-mode programs that the build compiles into ring-3 ELFs and embeds in the kernel. Organized in subcategories:
+  - `elfs/shell/` — `osh` (script interpreter).
+  - `elfs/tools/` — coreutils-style: `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `touch`, `echo`, `true`, `false`, `sleep`, `kill`, `top`, `calc`, `init`, `hello`.
+  - `elfs/net/` — `tcpclient`, `udptest`, `echotcp`, `selecttest`, `selectserver`, `httpd`.
+  - `elfs/tests/` — libc + termios demos: `libctest`, `ttytest`, `hello_libc`, `user_hello` (bare).
+  - `elfs/osn-server/` — FASE 10 placeholder (servers migrated to ring 3).
+  - `elfs/libc.lds` — linker script shared by all libc-linked ELFs.
+  - `elfs/tests/user_hello.lds` — bare ELF demo's own linker script.
+  - Pattern: any `elfs/<category>/<name>.c` paired with `elfs/libc.lds` (or its own `.lds` if bare) gets picked up by `$(BUILD)/elfs/%.elf` and embedded via objcopy as `_binary_<name>_elf_start/end`. Basenames must stay unique across categories. Add to `USER_ELF_SRCS` (bare) or `USER_ELF_LIBC_SRCS` (libc-linked) in `GNUmakefile`.
 - `lib/libc/` — osnos user-side libc (FASE 7). Compiled separately with `USER_CFLAGS` (ring-3 freestanding, NOT `-mcmodel=kernel`). Bundled into `build/lib/libc/libosnos_c.a` via `ar`, plus a standalone `crt0.S.o`.
   - `include/`: `stdio.h`, `stdlib.h`, `string.h`, `unistd.h`, `fcntl.h`, `errno.h`, `sys/{types,stat}.h`. These are what user code `#include`s — *not* visible to the kernel build.
   - `syscall.h`: internal `osnos_syscall0..4` inline helpers. Linux x86_64 numbers; matches `src/micro/syscall.h`.
@@ -143,7 +148,7 @@ Three flavors live in `src/proc/builtin.c`'s `builtins[]`:
 
 Adding a new ELF builtin:
 
-1. Drop `tests/<name>.c` and `tests/<name>.lds` (use `tests/user_hello.lds` as a template for bare ELFs, or `tests/hello_libc.lds` for libc-linked ones).
+1. Drop `elfs/<category>/<name>.c` (pick the category that fits: `tools`, `net`, `shell`, `tests`). For bare ELFs also drop your own `.lds` next to it (template: `elfs/tests/user_hello.lds`); libc-linked ones share `elfs/libc.lds`.
 2. Append the source to **`USER_ELF_SRCS`** (bare, has its own `_start`) or **`USER_ELF_LIBC_SRCS`** (libc-linked, provides `int main(...)`) in `GNUmakefile`.
 3. Declare the `_binary_<sanitized>_elf_start/end` extern in `src/proc/builtin.c` and add the `USERELF(...)` registry entry.
 

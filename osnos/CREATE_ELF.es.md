@@ -3,6 +3,14 @@
 Una guía paso a paso para escribir un programa C, compilarlo en Linux
 como ELF64, embedderlo en el kernel y correrlo en ring 3 sobre osnos.
 
+> **Nota de organización (post-FASE 8.5)**: este doc fue escrito cuando
+> los ELFs vivían en `tests/`. Ese directorio se renombró a `elfs/` con
+> subcategorías: `elfs/shell/` (osh), `elfs/tools/` (coreutils), `elfs/net/`
+> (sockets), `elfs/tests/` (libc + termios smoke tests, donde está
+> `user_hello.lds`), `elfs/osn-server/` (placeholder FASE 10). El linker
+> script compartido es `elfs/libc.lds`. Donde el tutorial dice
+> "`tests/`", leer "`elfs/<categoría>/`". El resto del flujo es idéntico.
+
 Hay **dos formas** de escribir un ELF en osnos:
 
 1. **Libc-linked (lo normal)** — escribís `int main(int argc, char **argv)`

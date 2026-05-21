@@ -27,6 +27,7 @@
 #include "../micro/idt.h"
 #include "../micro/ipc.h"
 #include "../micro/kmalloc.h"
+#include "../micro/tty.h"
 #include "../micro/pmm.h"
 #include "../micro/reaper.h"
 #include "../micro/syscall.h"
@@ -1057,13 +1058,29 @@ static void cmd_test(const char *args) {
     for (int i = 0; i < allocated; i++) sys_close(fds[i]);
 
     /* stdin ring buffer */
-    /* drain whatever might be there from real keypresses before testing */
+    /*
+     * stdin via the TTY layer (FASE TTY 1+2). The legacy stdin_push
+     * fed bytes directly into a ring buffer; with line discipline in
+     * place pushed chars go through canonical mode. To verify the
+     * data path deterministically, flip the TTY into raw mode for the
+     * duration of these checks.
+     */
+    struct osnos_termios saved_termios;
+    tty_get_termios(&saved_termios);
+    {
+        struct osnos_termios raw = saved_termios;
+        raw.c_lflag &= ~(TTY_ICANON | TTY_ECHO | TTY_ISIG);
+        tty_set_termios(&raw);
+    }
+    tty_clear();   /* drop anything that landed before the test */
+
+    /* Empty TTY → sys_read returns -EAGAIN (FASE TTY 1+2: stdin is
+     * single-shot non-blocking from the kernel's POV; libc loops). */
     char drain[64];
-    while (sys_read(OSNOS_FD_STDIN, drain, sizeof(drain)) > 0) { }
+    r = sys_read(OSNOS_FD_STDIN, drain, sizeof(drain));
+    CHECK(r == -(int64_t)OSNOS_EAGAIN, "stdin empty -> EAGAIN");
 
-    r = sys_read(OSNOS_FD_STDIN, iobuf, sizeof(iobuf));
-    CHECK(r == 0, "stdin empty -> 0");
-
+    /* Push three bytes in raw mode → all three should be readable. */
     stdin_push('a');
     stdin_push('b');
     stdin_push('c');
@@ -1072,7 +1089,9 @@ static void cmd_test(const char *args) {
     CHECK(r == 3 && os_streq(iobuf, "abc"), "stdin reads buffered chars");
 
     r = sys_read(OSNOS_FD_STDIN, iobuf, sizeof(iobuf));
-    CHECK(r == 0, "stdin drained -> 0");
+    CHECK(r == -(int64_t)OSNOS_EAGAIN, "stdin drained -> EAGAIN");
+
+    tty_set_termios(&saved_termios);
 
     /* sys_exit: mark current task DEAD, then restore (otherwise shell dies) */
     task_t *self = task_current();
@@ -2604,6 +2623,8 @@ static void run_command(const char *cmd) {
     prompt();
 }
 
+uint64_t shell_fg_pid(void) { return fg_pid; }
+
 void shell_server_init(void) {
     input_len = 0;
     history_count = 0;
@@ -2671,6 +2692,15 @@ void shell_server_tick(void) {
     }
 
     if (msg.type != IPC_KEY_EVENT) {
+        return;
+    }
+
+    /* While a user task is foreground, keystrokes belong to it (via the
+     * TTY → sys_read path). Dropping IPC_KEY_EVENT here avoids:
+     *   - double-echo (shell + TTY both drawing the same char),
+     *   - line editor eating keys from under the running ELF,
+     *   - Ctrl+C cancelling shell input AND signalling the fg task. */
+    if (fg_pid != 0) {
         return;
     }
 

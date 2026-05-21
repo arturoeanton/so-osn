@@ -126,8 +126,15 @@ fijos definidos en el script).
     │   ├── include/        #   stdio.h, stdlib.h, string.h, unistd.h, ...
     │   └── *.c             #   wrappers de syscalls + stdio + malloc
     │
-    ├── tests/              # programas user-mode embebidos en el kernel
-    │                       # cada tests/<name>.c + <name>.lds → /bin/<name>
+    ├── elfs/               # programas user-mode embebidos en el kernel
+    │   ├── shell/          #   osh (mini script interpreter)
+    │   ├── tools/          #   ls cat cp mv rm mkdir top calc echo ...
+    │   ├── net/            #   tcpclient httpd selectserver udptest ...
+    │   ├── tests/          #   libctest ttytest hello_libc user_hello
+    │   ├── osn-server/     #   FASE 10: servers movidos a ring 3
+    │   └── libc.lds        #   linker script compartido
+    │                       # objcopy strippea el dir; ELFs accesibles
+    │                       # como /bin/<basename> sin importar carpeta
     │
     ├── build/              # outputs (gitignored)
     │
@@ -266,7 +273,8 @@ al usuario.
 
 ### 2. Agregar un programa de usuario en ring 3 (ELF + libc)
 
-Crear `tests/miprog.c`:
+Crear `elfs/<categoria>/miprog.c` (elegí la categoría: `tools`, `net`,
+`shell`, `tests`):
 
 ```c
 #include <stdio.h>

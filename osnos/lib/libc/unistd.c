@@ -20,8 +20,16 @@ static long set_errno(long r) {
 }
 
 ssize_t read(int fd, void *buf, size_t n) {
-    return (ssize_t)set_errno(
-        osnos_syscall3(SYS_READ, fd, (long)buf, (long)n));
+    for (;;) {
+        long r = osnos_syscall3(SYS_READ, fd, (long)buf, (long)n);
+        if (r >= 0) return (ssize_t)r;
+        if (-r != EAGAIN) { errno = (int)(-r); return -1; }
+        /* Block: nanosleep yields to the scheduler so the keyboard
+         * server can land bytes in the TTY, then we retry. 20 ms
+         * matches what select/accept/recv use. */
+        struct timespec ts = { 0, 20 * 1000000 };
+        nanosleep(&ts, 0);
+    }
 }
 
 ssize_t write(int fd, const void *buf, size_t n) {

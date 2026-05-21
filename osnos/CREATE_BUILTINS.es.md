@@ -9,9 +9,9 @@ ya no existen. Todo en `/bin/` corre en ring 3.
 Los dos modos vivos hoy:
 
 1. **USERELF** — el modo por defecto. Tu programa es un ELF libc-linked
-   (`int main(int argc, char **argv)`). Es lo que usan los ~20 tools
-   en `tests/`. Documentado en detalle en **`CREATE_ELF.es.md`** — esta
-   doc no lo repite.
+   (`int main(int argc, char **argv)`). Es lo que usan los ~25 tools
+   en `elfs/{shell,tools,net,tests}/`. Documentado en detalle en
+   **`CREATE_ELF.es.md`** — esta doc no lo repite.
 2. **USER** — un blob de asm "flat" embebido en el kernel. Sin libc,
    sin crt0, sin linker script. Se usa sólo para probar el path
    end-to-end de la ABI: `ring3hello`, `ring3int80`, `ring3fault`.
@@ -149,7 +149,8 @@ ABI de syscalls (sin tocar VFS/IPC directo), para que migrar a ELF
 fuera un copy-paste cuando llegara FASE 6.
 
 En FASE 7.5 todos esos fueron migrados a ELFs libc-linked en
-`tests/<n>.c`. El cleanup removió:
+`elfs/tools/<n>.c` (después renombrado de `tests/` con subcategorías).
+El cleanup removió:
 
 - `KERN` macro
 - el campo `main` del `builtin_t`

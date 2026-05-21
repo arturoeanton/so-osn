@@ -70,40 +70,53 @@ LIBC_CRT0    := $(BUILD)/$(LIBC_DIR)/crt0.S.o
 
 # User-mode ELF programs embedded into the kernel image.
 #
+# Layout under elfs/:
+#   shell/      mini interpreters and command shells
+#   tools/      Unix-style utilities (ls, cat, mv, ...)
+#   net/        networking demos (httpd, selectserver, ...)
+#   tests/      libc smoke tests and termios demos
+#   osn-server/ reserved for FASE 10 (servers moved to ring 3)
+#
+# Linker scripts:
+#   elfs/libc.lds            shared by every libc-linked ELF
+#   elfs/tests/user_hello.lds bare ELF demo, hand-rolled _start
+#
 #   USER_ELF_SRCS      : bare ELFs (own _start, no libc)
 #   USER_ELF_LIBC_SRCS : libc-linked ELFs (crt0 + main + libosnos_c.a)
 #
-# Each <name>.c under tests/ paired with tests/<name>.lds becomes:
-#   $(BUILD)/tests/<name>.elf    ring-3 ELF64 ET_EXEC
-#   $(BUILD)/tests/<name>.elf.o  same bytes wrapped as data; symbols
-#                                _binary_<name>_elf_start/end
-USER_ELF_SRCS      := tests/user_hello.c
-USER_ELF_LIBC_SRCS := tests/hello_libc.c \
-                      tests/hello.c \
-                      tests/echo.c \
-                      tests/true.c \
-                      tests/false.c \
-                      tests/init.c \
-                      tests/cat.c \
-                      tests/touch.c \
-                      tests/mkdir.c \
-                      tests/rmdir.c \
-                      tests/rm.c \
-                      tests/mv.c \
-                      tests/cp.c \
-                      tests/ls.c \
-                      tests/calc.c \
-                      tests/osh.c \
-                      tests/sleep.c \
-                      tests/kill.c \
-                      tests/top.c \
-                      tests/libctest.c \
-                      tests/udptest.c \
-                      tests/echotcp.c \
-                      tests/selecttest.c \
-                      tests/selectserver.c \
-                      tests/tcpclient.c \
-                      tests/httpd.c
+# objcopy strips the directory when wrapping the ELF into a .o, so the
+# symbol the kernel sees is _binary_<basename>_elf_start regardless of
+# where the source lives. Basenames MUST stay unique across categories.
+USER_ELF_SRCS      := elfs/tests/user_hello.c
+
+USER_ELF_LIBC_SRCS := \
+    elfs/shell/osh.c \
+    elfs/tools/hello.c \
+    elfs/tools/echo.c \
+    elfs/tools/true.c \
+    elfs/tools/false.c \
+    elfs/tools/init.c \
+    elfs/tools/cat.c \
+    elfs/tools/touch.c \
+    elfs/tools/mkdir.c \
+    elfs/tools/rmdir.c \
+    elfs/tools/rm.c \
+    elfs/tools/mv.c \
+    elfs/tools/cp.c \
+    elfs/tools/ls.c \
+    elfs/tools/calc.c \
+    elfs/tools/sleep.c \
+    elfs/tools/kill.c \
+    elfs/tools/top.c \
+    elfs/net/udptest.c \
+    elfs/net/echotcp.c \
+    elfs/net/selecttest.c \
+    elfs/net/selectserver.c \
+    elfs/net/tcpclient.c \
+    elfs/net/httpd.c \
+    elfs/tests/hello_libc.c \
+    elfs/tests/libctest.c \
+    elfs/tests/ttytest.c
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS))
@@ -229,24 +242,25 @@ $(LIBC_A): $(filter-out $(LIBC_CRT0),$(LIBC_OBJS))
 	ar rcs $@ $^
 
 # Bare ring-3 ELF: source has its own _start, no libc, no crt0.
-$(BUILD)/tests/user_hello.elf: tests/user_hello.c tests/user_hello.lds
+$(BUILD)/elfs/tests/user_hello.elf: elfs/tests/user_hello.c elfs/tests/user_hello.lds
 	mkdir -p "$(dir $@)"
 	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -c $< -o $@.tmp.o
-	$(LD) $(USER_LDFLAGS) -T tests/user_hello.lds $@.tmp.o -o $@
+	$(LD) $(USER_LDFLAGS) -T elfs/tests/user_hello.lds $@.tmp.o -o $@
 	rm $@.tmp.o
 
-# libc-linked ring-3 ELF: provides main(), crt0 + libc give it _start.
-# All share tests/libc.lds.
-$(BUILD)/tests/%.elf: tests/%.c tests/libc.lds $(LIBC_A) $(LIBC_CRT0)
+# libc-linked ring-3 ELF — one pattern handles every category under
+# elfs/ (% matches "tools/ls", "net/httpd", etc.). All share libc.lds.
+$(BUILD)/elfs/%.elf: elfs/%.c elfs/libc.lds $(LIBC_A) $(LIBC_CRT0)
 	mkdir -p "$(dir $@)"
 	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -I $(LIBC_INC) -c $< -o $@.tmp.o
-	$(LD) $(USER_LDFLAGS) -T tests/libc.lds \
+	$(LD) $(USER_LDFLAGS) -T elfs/libc.lds \
 	    $(LIBC_CRT0) $@.tmp.o $(LIBC_A) -o $@
 	rm $@.tmp.o
 
-# Wrap each ELF blob in a relocatable .o so the linker can see it as
-# data with symbols _binary_<sanitized_name>_start / _end.
-$(BUILD)/tests/%.elf.o: $(BUILD)/tests/%.elf
+# Wrap each ELF blob in a relocatable .o. objcopy `cd`s into the build
+# directory so the resulting symbol is _binary_<basename>_elf_start,
+# stripping the elfs/<category>/ prefix.
+$(BUILD)/elfs/%.elf.o: $(BUILD)/elfs/%.elf
 	cd $(dir $<) && objcopy \
 	    -B i386:x86-64 \
 	    -I binary \

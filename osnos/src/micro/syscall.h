@@ -26,6 +26,7 @@
 #define SYS_RMDIR    84
 #define SYS_UNLINK   87
 #define SYS_GETDENTS 217   /* getdents64 in Linux x86_64 */
+#define SYS_IOCTL      16
 #define SYS_SELECT     23
 #define SYS_SOCKET     41
 #define SYS_CONNECT    42
@@ -175,3 +176,13 @@ int64_t sys_setsockopt(int fd, int level, int optname,
 int64_t sys_select    (int nfds,
                         void *readfds, void *writefds, void *exceptfds,
                         const void *timeout);
+
+/*
+ * Linux ioctl(2). Today only the TTY ones land:
+ *   TCGETS (0x5401)  -> arg = struct termios *out, kernel fills it
+ *   TCSETS (0x5402)  -> arg = const struct termios *in, kernel adopts
+ *   TCSETSW (0x5403) -> same as TCSETS for now (no output queue)
+ *   TCSETSF (0x5404) -> TCSETS + drop pending input
+ * Any other request returns -ENOTTY.
+ */
+int64_t sys_ioctl     (int fd, uint64_t request, void *arg);

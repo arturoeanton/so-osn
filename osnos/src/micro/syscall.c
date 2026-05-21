@@ -11,6 +11,8 @@
 #include "../net/socket.h"
 #include "../net/tcp.h"
 #include "../proc/exec.h"
+#include "tty.h"
+#include "uaccess.h"
 #include "fd.h"
 #include "ipc.h"
 #include "pmm.h"
@@ -21,6 +23,7 @@
 
 void syscall_init(void) {
     fd_init();
+    tty_init();
 }
 
 /* Wrap an osnos_status_t into a syscall return: 0 on OK, -errno on error. */
@@ -161,11 +164,15 @@ int64_t sys_read(int fd, void *buf, size_t count) {
 
     if (fd == OSNOS_FD_STDIN) {
         /*
-         * Non-blocking: returns 0 when no input is buffered. Userland
-         * loops. Real Linux would block here; we can't without a
-         * preemptive scheduler (FASE 9).
+         * Single-shot poll: kernel-side stdin is non-blocking. If
+         * nothing is buffered we report EAGAIN and let the libc
+         * wrapper loop with nanosleep, which yields to the scheduler
+         * so keyboard_server can feed the TTY between attempts. That
+         * lets blocking reads "just work" without preempting in CPL=0.
          */
-        return (int64_t)stdin_pop((char *)buf, count);
+        size_t n = stdin_pop((char *)buf, count);
+        if (n == 0 && count > 0) return err(OSNOS_EAGAIN);
+        return (int64_t)n;
     }
     if (fd == OSNOS_FD_STDOUT || fd == OSNOS_FD_STDERR) {
         return err(OSNOS_EBADF);
@@ -721,6 +728,43 @@ static bool fd_readable(int fd) {
     return true;
 }
 
+/*
+ * Today the only ioctl device is the controlling TTY at fd 0/1/2.
+ * Anything else returns -ENOTTY. termios I/O goes via copy_*_user so
+ * a faulting pointer becomes EFAULT, not a kernel panic.
+ */
+int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
+    osnos_fd_t *f = fd_get(fd);
+    if (!f) return err(OSNOS_EBADF);
+    /* Only the special fds 0/1/2 (the TTY) accept these requests. */
+    if (!f->is_special) return -(int64_t)OSNOS_ENOTTY;
+
+    switch (request) {
+    case TTY_TCGETS: {
+        struct osnos_termios t;
+        if (tty_get_termios(&t) != 0) return err(OSNOS_EIO);
+        if (copy_to_user(arg, &t, sizeof(t)) != OSNOS_OK) return err(OSNOS_EFAULT);
+        return 0;
+    }
+    case TTY_TCSETS:
+    case TTY_TCSETSW: {
+        struct osnos_termios t;
+        if (copy_from_user(&t, arg, sizeof(t)) != OSNOS_OK) return err(OSNOS_EFAULT);
+        tty_set_termios(&t);
+        return 0;
+    }
+    case TTY_TCSETSF: {
+        struct osnos_termios t;
+        if (copy_from_user(&t, arg, sizeof(t)) != OSNOS_OK) return err(OSNOS_EFAULT);
+        tty_set_termios(&t);
+        tty_clear();      /* TCSETSF also drops pending input */
+        return 0;
+    }
+    default:
+        return -(int64_t)OSNOS_ENOTTY;
+    }
+}
+
 int64_t sys_select(int nfds,
                     void *readfds, void *writefds, void *exceptfds,
                     const void *timeout) {
@@ -1009,6 +1053,11 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
                 (void *)frame->rdx,
                 (void *)frame->r10,
                 (const void *)frame->r8));
+        case SYS_IOCTL:
+            return pack(sys_ioctl(
+                (int)frame->rdi,
+                (uint64_t)frame->rsi,
+                (void *)frame->rdx));
         case SYS_ACCEPT:
             return pack(sys_accept(
                 (int)frame->rdi,

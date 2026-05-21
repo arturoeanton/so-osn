@@ -1,20 +1,14 @@
 #include "fd.h"
 
 #include "../include/osnos_fcntl.h"
+#include "tty.h"
 
 static osnos_fd_t fds[OSNOS_MAX_FDS];
 
-#define STDIN_BUF_SIZE 256
-static char   stdin_buf[STDIN_BUF_SIZE];
-static size_t stdin_head;
-static size_t stdin_tail;
-static size_t stdin_count;
-
 void fd_init(void) {
-    stdin_head = 0;
-    stdin_tail = 0;
-    stdin_count = 0;
-
+    /* stdin is now backed by the TTY line discipline (FASE TTY 1+2).
+     * tty_init runs separately from kmain — fd_init only resets the
+     * fd table here. */
     for (size_t i = 0; i < OSNOS_MAX_FDS; i++) {
         fds[i].used       = false;
         fds[i].is_special = false;
@@ -78,35 +72,14 @@ osnos_fd_t *fd_get(int fd) {
     return &fds[fd];
 }
 
-/* ---- stdin ring buffer ---- */
+/* ---- stdin shims over the TTY line discipline ----
+ *
+ * These wrappers keep the old fd.h API alive for callers that don't
+ * care about termios. New code (sys_select, sys_ioctl) talks to the
+ * TTY layer directly via tty.h.
+ */
 
-void stdin_push(char c) {
-    if (stdin_count >= STDIN_BUF_SIZE) {
-        /* drop oldest to make room — keystrokes shouldn't pile up forever */
-        stdin_tail = (stdin_tail + 1) % STDIN_BUF_SIZE;
-        stdin_count--;
-    }
-    stdin_buf[stdin_head] = c;
-    stdin_head = (stdin_head + 1) % STDIN_BUF_SIZE;
-    stdin_count++;
-}
-
-size_t stdin_pop(char *out, size_t max) {
-    size_t n = 0;
-    while (n < max && stdin_count > 0) {
-        out[n++] = stdin_buf[stdin_tail];
-        stdin_tail = (stdin_tail + 1) % STDIN_BUF_SIZE;
-        stdin_count--;
-    }
-    return n;
-}
-
-bool stdin_readable(void) {
-    return stdin_count > 0;
-}
-
-void stdin_clear(void) {
-    stdin_head = 0;
-    stdin_tail = 0;
-    stdin_count = 0;
-}
+void stdin_push(char c)               { tty_input(c); }
+size_t stdin_pop(char *out, size_t m) { return tty_read(out, m); }
+bool   stdin_readable(void)           { return tty_readable(); }
+void   stdin_clear(void)              { tty_clear(); }

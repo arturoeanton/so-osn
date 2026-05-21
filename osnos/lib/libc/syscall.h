@@ -21,6 +21,7 @@
 #define SYS_FSTAT      5
 #define SYS_LSEEK      8
 #define SYS_BRK       12
+#define SYS_IOCTL     16
 #define SYS_NANOSLEEP 35
 #define SYS_GETPID    39
 #define SYS_EXIT      60

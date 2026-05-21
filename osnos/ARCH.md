@@ -370,13 +370,13 @@ kernel con `USER_CFLAGS` (sin `-mcmodel=kernel`), se empaqueta en
 user que la quiera.
 
 ```
-tests/hello_libc.c
+elfs/tests/hello_libc.c
     │
     │ clang USER_CFLAGS -I lib/libc/include
     ▼
 hello_libc.o
     │
-    │ ld.lld -T tests/hello_libc.lds
+    │ ld.lld -T elfs/libc.lds
     │      crt0.S.o (provides _start) +
     │      hello_libc.o +
     │      libosnos_c.a (printf, malloc, strlen, ...)

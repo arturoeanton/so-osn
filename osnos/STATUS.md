@@ -1392,6 +1392,89 @@ OK 8.5.X cleanup de instrumentación post-mortem — VERIFICADO en QEMU
 (IPv6 movido a ROADMAP_APENDICE.md como item de "Networking
  avanzado" — no bloquea nada del roadmap principal.)
 
+### FASE kheap — Allocator robusto — CERRADA
+OK Fase A: kheap growth — VERIFICADO en QEMU
+   - First-fit free list crece dinámicamente en chunks de 64 KiB
+     (KHEAP_GROW_PAGES=16) cuando find-fit no encuentra block.
+   - Cap a 4 MiB (KHEAP_MAX_BYTES). Si una request es mayor que el
+     chunk default, alloca lo que pida la request.
+   - Coalesce con tail al crecer si el tail estaba libre.
+   - Backout en falla parcial (vmm_unmap lo que ya se mapeó).
+   - Counters: grow_events, grow_oom, peak_used. /sys/meminfo
+     expone todo.
+   - Tests: 14 asserts KHEAP (96 KiB big alloc forzando grow, burst
+     200×128B, verifica baseline tras free-all, peak high-water-mark).
+
+OK Fase B: slab allocator — VERIFICADO en QEMU
+   - VA dedicada SLAB_VIRT_BASE=0xffffc00100000000, cap 4 MiB.
+   - 8 buckets power-of-2: 16/32/64/128/256/512/1024/2048.
+   - Slab page (4 KiB) con slab_hdr_t {magic, bucket_idx} al inicio,
+     resto troceado en slots del bucket size. Todos los slots a la
+     free list LIFO del bucket.
+   - kmalloc(N): N≤2048 → slab path (O(1)). N>2048 → first-fit
+     fallback (que ya crece via Fase A).
+   - kfree(ptr): range-check sobre ptr; in-slab → slab_free
+     (recovery por page-aligned header + magic). Else → first-fit.
+   - Defense in depth: magic check rechaza pointers ajenos.
+   - Counters per-bucket + globales en /sys/meminfo:
+     `slab buckets: 16:U/T 32:U/T ... 2048:U/T`.
+   - Tests: 14 asserts SLAB (dispatch boundary 2048/2049, VA-range
+     check, burst 100×64B verifica grow, baseline tras free-all).
+   - **603 tests pass / 0 fail** combinando KHEAP + SLAB.
+
+### FASE TTY — Line discipline + termios (1+2) — CERRADA
+OK TTY layer (src/micro/tty.{c,h}) — VERIFICADO en QEMU
+   - struct osnos_termios layout-compatible con Linux x86_64 kernel
+     ABI (NCCS=19). flags ICANON/ECHO/ECHOE/ISIG, c_iflag con
+     ICRNL/IGNCR/INLCR, c_cc[VINTR/VQUIT/VERASE/VKILL/VEOF/...].
+   - tty_input(c) (llamado por keyboard_server en lugar de
+     stdin_push):
+     - ISIG: VINTR → SIGINT (kill_pending) al fg user task vía
+       shell_fg_pid(). Kernel tasks (shell) jamás targeted.
+     - ICANON: line buffer interno (256 B). Backspace edita la
+       línea actual con ECHOE; '\n' flushea todo al read buffer.
+       VKILL borra la línea.
+     - Raw mode (ICANON off): cada char directo al read buffer.
+     - ECHO: framebuffer_draw_string directo, sólo si hay un user
+       task fg (evita doble echo con el shell).
+   - stdin_push/pop/readable/clear ahora son thin shims al tty.
+     fd.c queda más chico.
+   - sys_read(fd=0): single-shot. Si vacío retorna -EAGAIN. Libc
+     read() loopea con nanosleep (mismo patrón que select/accept/
+     recv): yieldea al scheduler, otros tasks corren, eventualmente
+     bytes llegan. read() bloquea correctamente sin preempción CPL=0.
+   - sys_ioctl (SYS_IOCTL=16): TCGETS / TCSETS / TCSETSW / TCSETSF.
+     Copy via copy_from/to_user (faulting → EFAULT, no panic).
+     Otras requests → ENOTTY (errno 25, agregado al status enum).
+   - Shell deja de procesar IPC_KEY_EVENT cuando fg_pid != 0. Evita
+     double-echo + line editor robando keys del ELF + Ctrl+C
+     cancelando input del shell ADEMÁS de matar el child.
+   - libc: <termios.h> con struct termios (NCCS=19), flags y
+     c_cc constants Linux-compat. tcgetattr/tcsetattr/ioctl
+     wrappers. <sys/ioctl.h> con TCGETS/TCSETS.
+   - elfs/tests/ttytest.c demo:
+     1) Lee termios actual.
+     2) Stage canonical: read() bloquea hasta Enter, echo via TTY.
+     3) Stage raw (ICANON|ECHO off): read() char-by-char.
+     4) Ctrl+C durante raw → ISIG entrega SIGINT, task muere.
+     5) Restaura termios original.
+
+### Reorganización elfs/ (desde tests/)
+   tests/ se renombró a elfs/ con subcategorías:
+     elfs/shell/     osh
+     elfs/tools/    ls, cat, cp, mv, rm, mkdir, rmdir, touch, echo,
+                     true, false, sleep, kill, top, calc, init, hello
+     elfs/net/       tcpclient, udptest, echotcp, selecttest,
+                     selectserver, httpd
+     elfs/tests/     libctest, ttytest, hello_libc, user_hello
+                     (+ user_hello.lds)
+     elfs/osn-server/ placeholder FASE 10 (servers a ring 3)
+     elfs/libc.lds   linker script compartido
+   GNUmakefile: pattern rule `$(BUILD)/elfs/%.elf: elfs/%.c ...`
+   maneja cualquier subdirectorio. objcopy cd's al dir de salida
+   así los símbolos siguen siendo `_binary_<basename>_elf_start`
+   (basenames únicos entre categorías).
+
 ### FASE 9 — Scheduler real — CERRADA
 OK 9.1 timer IRQ infra — VERIFICADO en QEMU
    - src/drivers/pic.{c,h}: 8259 remap (master 0x20-0x27, slave 0x28-0x2F),

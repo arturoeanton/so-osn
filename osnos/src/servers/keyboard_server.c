@@ -1,8 +1,8 @@
 #include "keyboard_server.h"
 
 #include "../drivers/keyboard.h"
-#include "../micro/fd.h"
 #include "../micro/ipc.h"
+#include "../micro/tty.h"
 
 void keyboard_server_init(void) {
     keyboard_init();
@@ -16,12 +16,13 @@ void keyboard_server_tick(void) {
     }
 
     /*
-     * Push printable chars + newline + backspace into the stdin ring
-     * buffer for sys_read(0). Special keys (arrows, ctrl combos) skip
-     * stdin since their semantics aren't ASCII.
+     * Feed printable chars + newline + backspace into the TTY line
+     * discipline (canonical edit / signals / echo per termios).
+     * Special keys (arrows, ctrl combos) skip stdin since their
+     * semantics aren't ASCII — only the shell wants them.
      */
     if (ev.ascii != 0 && ev.keycode == 0) {
-        stdin_push(ev.ascii);
+        tty_input((char)ev.ascii);
     }
 
     ipc_msg_t msg;
