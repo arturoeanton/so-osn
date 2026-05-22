@@ -38,7 +38,17 @@ int task_create(
             task_clear(&tasks[i]);
             fd_init_for_task(&tasks[i]);
             tasks[i].pid   = next_pid++;
-            tasks[i].name  = name;
+            /* Copy the name in — the caller's pointer may point to
+             * user-mode memory (proc_execve VFS path) that becomes
+             * unreachable from sys_taskinfo's caller pml4. */
+            size_t k = 0;
+            if (name) {
+                while (name[k] && k + 1 < OSNOS_TASK_NAME_MAX) {
+                    tasks[i].name[k] = name[k];
+                    k++;
+                }
+            }
+            tasks[i].name[k] = 0;
             tasks[i].entry = entry;
             tasks[i].state = TASK_READY;
 

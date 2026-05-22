@@ -314,23 +314,61 @@ void framebuffer_write_bytes(
     uint32_t color
 ) {
     /* draw_string is NUL-terminated and parses ESC[...] sequences in
-     * order, so we shovel `buf` into a stack chunk + null-terminate +
-     * emit. Embedded NULs are skipped (CSI uses ESC = 0x1B, never 0x00,
-     * so dropping NULs is safe). Loop in 256-byte chunks for huge
-     * writes. */
+     * order. We copy into a NUL-terminated chunk and dispatch. The
+     * chunk MUST NOT split an ESC sequence — if the trailing bytes
+     * of `buf` end mid-CSI, the parser would skip those bytes and
+     * the next chunk would print the tail (";5H") as literal text,
+     * leaving "~H~" / "[1;1H" droppings on screen (the bug ovi hit
+     * after we added per-render output buffering).
+     *
+     * Strategy: large static chunk (16 KiB — enough for an ovi
+     * render at once) + on the rare overflow, walk back from the
+     * tentative split looking for an unterminated ESC; if found,
+     * extend until the CSI's final byte. */
     if (!buf || n == 0) return;
-    char chunk[257];
-    size_t cap = sizeof(chunk) - 1;
+    static char chunk[16384 + 32];
+    const size_t cap = 16384;
     size_t i = 0;
     while (i < n) {
-        size_t len = 0;
-        while (i < n && len < cap) {
-            char c = buf[i++];
-            if (c == 0) continue;            /* drop embedded NULs */
-            chunk[len++] = c;
+        size_t take = n - i;
+        if (take > cap) take = cap;
+        size_t end = i + take;
+        /* Safe-split: scan the proposed chunk for an unterminated
+         * CSI (ESC[ ... no final-byte yet). If we find one, extend
+         * `end` past the final byte (letter 0x40..0x7E). */
+        if (end < n) {
+            for (size_t k = end; k > i; k--) {
+                unsigned char c = (unsigned char)buf[k - 1];
+                /* CSI final bytes are 0x40..0x7E (letters mostly).
+                 * Seeing one means the most recent ESC[ already
+                 * closed — split is safe. */
+                if ((c >= 0x40 && c <= 0x7E) &&
+                    !(c >= '0' && c <= '9') && c != ';' && c != '[') break;
+                if (c == 0x1B) {
+                    /* Unterminated ESC — extend until final byte. */
+                    size_t j = end;
+                    while (j < n) {
+                        unsigned char d = (unsigned char)buf[j];
+                        j++;
+                        if ((d >= 0x40 && d <= 0x7E) &&
+                            !(d >= '0' && d <= '9') &&
+                            d != ';' && d != '[') break;
+                    }
+                    end = j;
+                    take = end - i;
+                    break;
+                }
+            }
         }
-        chunk[len] = 0;
-        if (len > 0) framebuffer_draw_string(chunk, color);
+        size_t pos = 0;
+        for (size_t k = i; k < i + take && pos < cap + 16; k++) {
+            char c = buf[k];
+            if (c == 0) continue;           /* skip embedded NULs */
+            chunk[pos++] = c;
+        }
+        chunk[pos] = 0;
+        if (pos > 0) framebuffer_draw_string(chunk, color);
+        i += take;
     }
 }
 

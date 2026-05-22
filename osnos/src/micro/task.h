@@ -19,9 +19,17 @@ typedef enum {
     TASK_DEAD
 } task_state_t;
 
+#define OSNOS_TASK_NAME_MAX 32
+
 typedef struct task {
     uint64_t pid;
-    const char *name;
+    /* Inline name buffer so the kernel can read it from ANY task's
+     * context. Older code stored a `const char *` which sometimes
+     * pointed into user-mode memory (proc_execve from a VFS path
+     * threaded `path+i` straight in). Reading that pointer from a
+     * different task's syscall (sys_taskinfo) page-faulted because
+     * the source pml4 no longer mapped the string. */
+    char     name[OSNOS_TASK_NAME_MAX];
     task_entry_t entry;
     task_state_t state;
     uint64_t dispatches;   /* # of times entry() has been invoked */

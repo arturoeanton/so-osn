@@ -62,7 +62,7 @@ static void gen_tasks(char *out, size_t out_size) {
         os_strlcat(out, num, out_size);
         os_strlcat(out, "   ", out_size);
 
-        os_strlcat(out, t->name ? t->name : "?", out_size);
+        os_strlcat(out, t->name[0] ? t->name : "?", out_size);
         os_strlcat(out, "  ", out_size);
 
         os_strlcat(out, task_state_str(t->state), out_size);

@@ -1395,14 +1395,12 @@ int64_t sys_taskinfo(size_t idx, struct osnos_taskinfo *out) {
         case TASK_DEAD:    info.state = OSNOS_TASK_DEAD;    break;
         default:           info.state = OSNOS_TASK_UNUSED;  break;
     }
-    if (t->name) {
-        size_t n = 0;
-        while (t->name[n] && n < OSNOS_TASKINFO_NAME_MAX - 1) {
-            info.name[n] = t->name[n];
-            n++;
-        }
-        info.name[n] = 0;
+    size_t n = 0;
+    while (t->name[n] && n < OSNOS_TASKINFO_NAME_MAX - 1) {
+        info.name[n] = t->name[n];
+        n++;
     }
+    info.name[n] = 0;
 
     if (copy_to_user(out, &info, sizeof(info)) != OSNOS_OK) {
         return err(OSNOS_EFAULT);
