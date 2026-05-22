@@ -27,6 +27,7 @@
 #define SYS_NANOSLEEP 35
 #define SYS_FCNTL    72
 #define SYS_GETPID   39
+#define SYS_FORK     57
 #define SYS_EXECVE   59
 #define SYS_EXIT     60
 #define SYS_KILL     62
@@ -167,6 +168,22 @@ int64_t sys_kill  (uint64_t pid, int sig);
 int64_t sys_execve(const char *u_path,
                     char *const *u_argv,
                     char *const *u_envp);
+
+/*
+ * sys_fork (#57) — Linux fork(2). Clones the current task: identical
+ * memory image (full page copy, no COW yet), identical fd table
+ * (with pipe refcount bumps), identical cwd / env / redirects /
+ * mmap state. Returns child pid to parent, 0 to child, -errno on
+ * failure. Child resumes at the instruction right after the syscall,
+ * with rax=0; parent continues with rax=child_pid.
+ *
+ * Capturing the user iret frame + GPRs follows the same recipe as
+ * sys_nanosleep: snapshot from the per-task kstack into child->
+ * saved_iret_* + saved_*, set saved_valid=1, leave child READY.
+ * The scheduler dispatches the child via user_task_trampoline which
+ * replays the frame.
+ */
+int64_t sys_fork(void);
 
 /*
  * Linux getpid(2). Returns the calling task's pid (always non-zero for

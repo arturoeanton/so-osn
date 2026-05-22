@@ -86,3 +86,13 @@ void pipe_close_reader(pipe_t *p) {
     if (p->ref_r > 0) p->ref_r--;
     pipe_free_if_orphan(p);
 }
+
+void pipe_dup_writer(pipe_t *p) {
+    if (!p || !p->used) return;
+    p->ref_w++;
+}
+
+void pipe_dup_reader(pipe_t *p) {
+    if (!p || !p->used) return;
+    p->ref_r++;
+}

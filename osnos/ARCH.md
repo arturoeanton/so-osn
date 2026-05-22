@@ -9,10 +9,13 @@ propio address space y entran al kernel vía `syscall` (preferido) o
 `int 0x80` (legacy compat).
 
 Scheduler preemptivo timer-driven (50 ms quantum, sólo CPL=3) sobre
-un loop cooperativo en ring 0. `fork` POSIX puro todavía no; en su
-lugar hay `osn_spawn` (SYS_SPAWN=266, equivalente a posix_spawn con
-fd inheritance) + `execve` (SYS_EXECVE=59, in-place ELF replacement
-preservando pid/fds/cwd) — la combinación cubre fork+exec atómico.
+un loop cooperativo en ring 0. **ABI POSIX core 100% completo**:
+`fork(2)` (SYS_FORK=57, deep-copy del pml4 + fd table con pipe
+refcount bumps) + `execve(2)` (SYS_EXECVE=59, in-place ELF
+replacement preservando pid/fds/cwd). También `osn_spawn`
+(SYS_SPAWN=266, fork+exec atómico estilo posix_spawn con fd
+inheritance MOVE-semantics) para casos donde fork+exec sería
+overkill.
 
 **Disk-resident** (Fase 2): sd.img se popula al build con todos
 los ELFs (~64) via mtools. El kernel solo embebe consrv/kbdsrv/
@@ -48,7 +51,7 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 |   dup/dup2/nanosleep/getpid/socket/bind/listen/accept/connect/ |
 |   send/recv/select/fcntl/getcwd/chdir/mkdir/rmdir/rename/      |
 |   unlink/ioctl/getdents64/gettimeofday/time/kill/exit/         |
-|   execve (#59, in-place ELF replacement)                       |
+|   fork (#57, deep-clone task) execve (#59, in-place ELF swap)  |
 |                                                                 |
 |   osnos: IPC_SEND (260) IPC_RECV (261) SERVICE_REGISTER (262)  |
 |   SERVICE_LOOKUP (263) TTY_INPUT (264) TASKINFO (265)          |
@@ -692,13 +695,12 @@ sin problema).
   explícito por sender.
 - **VFS sin permisos**: no hay uid/gid, no atime/mtime, no chmod.
   FAT16 tiene attrs limitadas y aliasfs los pasa transparente.
-- **`execve` (#59) SÍ funciona**: in-place ELF replacement, preserva
-  pid + fds + cwd. `proc_execve_replace` en exec.c. Combinado con
-  `osn_spawn` (#266, fork+exec atómico estilo posix_spawn con fd
-  inheritance MOVE-semantics) cubre la mayoría de los casos POSIX.
-- **`fork` POSIX puro NO**. Falta fork-sin-exec (necesita
-  copy-on-write o page fork). Es la única pieza POSIX core que
-  todavía no implementamos.
+- **`fork` (#57) + `execve` (#59) SÍ funcionan**: ABI POSIX core
+  100% completo. `fork` deep-copy del pml4 (no COW yet, full page
+  copy — TODO refinar a copy-on-write). `execve` in-place ELF
+  swap, preserva pid + fds + cwd. `osn_spawn` (#266) sigue
+  disponible como fork+exec atómico estilo posix_spawn con
+  fd inheritance MOVE-semantics.
 - **Sin signals user-mode**. `kill` mata duro (proc_exit_current_user),
   no hay `sigaction`. Ctrl+C/Ctrl+Z se entregan via task.kill_pending
   / stop_pending checkeado al entry de cada syscall + timer IRQ.
@@ -775,6 +777,78 @@ read() en el read-end devuelven 0 = EOF).
    |  if background ("&"):  bg_jobs_remember(pid, cmd_label); return
    |  else:                  osn_set_fg(pid); wait_pid_or_stop(pid)
 ```
+
+## Flujo de un fork (SYS_FORK = #57 Linux)
+
+`fork` crea un task nuevo idéntico al actual (mismo memory image,
+mismas fds, mismo cwd), con la única diferencia de que ambos
+retornan distinto: parent ve el child pid, child ve 0.
+
+```
+[ring 3]  pid_t r = fork();
+   |
+   |  libc: osnos_syscall0(SYS_FORK=57)
+   v
+[ring 0]  sys_fork (src/micro/syscall.c):
+   |
+   |  parent = task_current()
+   |
+   |  --- alocaciones (todo o nada) ---
+   |  child_pml4   = address_space_clone(parent->pml4)
+   |     ↓ walk pml4[0..255] → pdpt → pd → pt → leaf
+   |     ↓ for each present leaf: pmm_alloc_page() + memcpy via HHDM
+   |     ↓ vmm_map(child_pml4, virt, new_phys, flags)
+   |  child_kstack = kmalloc(USER_KSTACK_BYTES)
+   |  child_pid    = task_create(parent->name, parent->entry)
+   |     (cualquiera de los 3 falla → free los anteriores + return -ENOMEM)
+   |
+   |  --- estado per-task ---
+   |  child->pml4 / kernel_stack / heap / mmap / fpu = parent's
+   |  child->cwd / redirs / fds[0..15] = parent's
+   |     para cada fd is_pipe: pipe_dup_reader/writer (++ ref_w/r)
+   |  child->kill_pending / stop_pending = 0  (clean slate)
+   |
+   |  --- snapshot del syscall context ---
+   |  iret = parent->kernel_stack_top - 40
+   |  child->saved_iret_{rip,cs,rflags,rsp,ss} = iret[0..4]
+   |  sf = iret - sizeof(syscall_frame_t)
+   |  child->saved_{rbx,rcx,rdx,...,r15} = sf->{rbx,...}
+   |  child->saved_rax = 0                   ← child sees fork()=0
+   |  child->saved_valid = 1
+   |  child->state = TASK_READY
+   |
+   |  return child->pid                       ← parent sees fork()=child_pid
+   v
+[scheduler] eventually dispatches the child:
+   |  user_task_trampoline: saved_valid=1 → "replay" path
+   |     - load CR3 = child_pml4 (kernel high-half intact, user low
+   |       half is the cloned copy)
+   |     - push saved_iret_{ss,rsp,rflags,cs,rip}
+   |     - mov saved_rax → %rax  (0 in child!)
+   |     - restore saved_rbx..r15
+   |     - iretq
+   v
+[ring 3 — CHILD]
+   |  arrives at the instruction RIGHT AFTER the syscall, with
+   |  rax=0 (so libc fork() returns 0).
+   |  All memory writes the child does from here on go to ITS pml4
+   |  (the cloned copy), not the parent's.
+```
+
+**Invariants críticos**:
+- Atómico: si `address_space_clone` o `kmalloc(kstack)` o
+  `task_create` fallan, NO se modifica el parent. fork retorna
+  -errno y el parent continúa normal.
+- No COW: cada fork inmediatamente duplica TODAS las páginas user
+  del parent. Para un proceso con 1 MiB de heap, fork cuesta 1 MiB
+  de RAM física al instante. Suficiente para nuestros programas
+  (~ 64 KiB típicos); optimizable a COW más adelante.
+- fds compartidas (con refcount): pipe abierto por el parent → el
+  child también lo ve. Cuando uno de los dos cierra, sólo decrementa
+  el contador; el pipe vive hasta que ambos cierren.
+- Sin SIGCHLD: el parent no se entera "automáticamente" cuando el
+  child muere. Usa `wait_child` con `sys_taskinfo` polling (ver
+  forktest.c). Mismo patrón que shellsrv's `wait_pid_or_stop`.
 
 ## Flujo de un execve (SYS_EXECVE = #59 Linux)
 

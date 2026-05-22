@@ -145,6 +145,89 @@ uint64_t *address_space_create(void) {
     return pml4;
 }
 
+/*
+ * address_space_clone — deep-copy the user low-half of `parent` into
+ * a freshly allocated PML4. Kernel high-half is shared via the same
+ * mechanism as address_space_create (top 256 entries point at the
+ * kernel's shared upper tables).
+ *
+ * Used by sys_fork: child gets identical mappings + identical bytes,
+ * but distinct physical pages so writes don't trample the parent.
+ * This is the "full copy" implementation — no copy-on-write yet, so
+ * forking a process with a 1 MiB heap costs 1 MiB of physical RAM up
+ * front. Acceptable for our 64 KiB-ish user programs.
+ *
+ * Walks pml4[0..255], every present PDPT/PD/PT, allocates a new
+ * physical page for each leaf, memcpys via HHDM. If any allocation
+ * fails midway, frees what was allocated so far and returns NULL.
+ *
+ * Returns the HHDM-mapped pointer to the new PML4 (just like
+ * address_space_create). On NULL, caller must handle ENOMEM.
+ */
+uint64_t *address_space_clone(const uint64_t *parent) {
+    if (!parent) return 0;
+
+    uint64_t *child = address_space_create();
+    if (!child) return 0;
+
+    for (int i = 0; i < 256; i++) {
+        if (!(parent[i] & PTE_P)) continue;
+        const uint64_t *p_pdpt = (const uint64_t *)
+            ((parent[i] & PTE_ADDR_MASK) + pmm_hhdm_offset());
+
+        for (int j = 0; j < 512; j++) {
+            if (!(p_pdpt[j] & PTE_P)) continue;
+            const uint64_t *p_pd = (const uint64_t *)
+                ((p_pdpt[j] & PTE_ADDR_MASK) + pmm_hhdm_offset());
+
+            for (int k = 0; k < 512; k++) {
+                if (!(p_pd[k] & PTE_P)) continue;
+                const uint64_t *p_pt = (const uint64_t *)
+                    ((p_pd[k] & PTE_ADDR_MASK) + pmm_hhdm_offset());
+
+                for (int l = 0; l < 512; l++) {
+                    if (!(p_pt[l] & PTE_P)) continue;
+                    uint64_t flags    = p_pt[l] & ~PTE_ADDR_MASK;
+                    uint64_t src_phys = p_pt[l] & PTE_ADDR_MASK;
+
+                    uint64_t dst_phys = pmm_alloc_page();
+                    if (!dst_phys) {
+                        address_space_destroy(child);
+                        return 0;
+                    }
+                    /* Page-sized memcpy via HHDM (both src + dst
+                     * are mapped in the kernel's high-half). */
+                    uint8_t *src = (uint8_t *)(src_phys + pmm_hhdm_offset());
+                    uint8_t *dst = (uint8_t *)(dst_phys + pmm_hhdm_offset());
+                    for (int b = 0; b < 4096; b++) dst[b] = src[b];
+
+                    /* Reconstruct the virtual address from indices
+                     * and map the new physical page with the same
+                     * flags. vmm_map allocates intermediate tables
+                     * as needed. */
+                    uint64_t virt =
+                        ((uint64_t)i << 39) |
+                        ((uint64_t)j << 30) |
+                        ((uint64_t)k << 21) |
+                        ((uint64_t)l << 12);
+                    /* Sign-extend bit 47 to canonical form (low half
+                     * stays low, since i < 256 means bit 47 == 0). */
+                    /* vmm_map returns 1 on success, 0 on failure
+                     * (non-standard but matches the rest of the
+                     * file). Bail on failure. */
+                    if (vmm_map(child, virt, dst_phys, flags) == 0) {
+                        pmm_free_page(dst_phys);
+                        address_space_destroy(child);
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+
+    return child;
+}
+
 void address_space_destroy(uint64_t *pml4) {
     if (!pml4) return;
     if (pml4 == kernel_pml4) return;  /* never destroy the kernel AS */

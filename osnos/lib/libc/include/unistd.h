@@ -83,6 +83,15 @@ int          kill  (pid_t pid, int sig);
 pid_t        getpid(void);
 
 /*
+ * fork(2) — clone the current process. Returns 0 in the new (child)
+ * process, the child's pid in the parent, and -1 with errno set on
+ * failure (e.g. ENOMEM, EMFILE). The child inherits memory image
+ * (full copy, no COW yet), open fds (with pipe refcount bumps),
+ * cwd, env, mmap regions, and stdin/stdout redirects.
+ */
+pid_t        fork(void);
+
+/*
  * POSIX cwd. getcwd writes the absolute path into `buf` (NUL
  * terminated) and returns `buf`, or NULL with errno on failure
  * (ERANGE if `size` too small). chdir adopts `path` as the new

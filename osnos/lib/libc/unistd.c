@@ -288,6 +288,12 @@ pid_t getpid(void) {
     return (pid_t)osnos_syscall0(SYS_GETPID);
 }
 
+pid_t fork(void) {
+    long r = osnos_syscall0(SYS_FORK);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (pid_t)r;
+}
+
 /* ---- exec family ----
  *
  * Each variant ultimately routes to SYS_EXECVE. The kernel currently

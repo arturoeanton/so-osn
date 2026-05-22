@@ -1286,6 +1286,135 @@ int64_t sys_resume(uint64_t pid) {
 }
 
 /* ------------------------------------------------------------------ */
+/* sys_fork (#57) — Linux fork(2). Deep-clones the current task.      */
+/* ------------------------------------------------------------------ */
+
+#define USER_KSTACK_BYTES 16384
+
+int64_t sys_fork(void) {
+    task_t *parent = task_current();
+    if (!parent || !parent->pml4 || !parent->kernel_stack_top) {
+        return err(OSNOS_ESRCH);
+    }
+
+    /* 1. Deep-copy the user address space. Largest single allocation;
+     *    do it first so we can bail cheaply on OOM. */
+    uint64_t *child_pml4 = address_space_clone(parent->pml4);
+    if (!child_pml4) return err(OSNOS_ENOMEM);
+
+    /* 2. Alloc child kstack. */
+    void *child_kstack = kmalloc(USER_KSTACK_BYTES);
+    if (!child_kstack) {
+        address_space_destroy(child_pml4);
+        return err(OSNOS_ENOMEM);
+    }
+
+    /* 3. Reserve a fresh task slot. task_create starts the entry as
+     *    user_task_trampoline (same as task_create_user_elf). */
+    int child_pid_int = task_create(parent->name, parent->entry);
+    if (child_pid_int < 0) {
+        kfree(child_kstack);
+        address_space_destroy(child_pml4);
+        return err(OSNOS_EMFILE);
+    }
+
+    task_t *child = task_by_pid((uint64_t)child_pid_int);
+    if (!child) {
+        /* Shouldn't happen — task_create returned a valid pid. */
+        kfree(child_kstack);
+        address_space_destroy(child_pml4);
+        return err(OSNOS_ESRCH);
+    }
+
+    /* 4. Wire up the AS + kstack. */
+    child->pml4              = child_pml4;
+    child->kernel_stack_top  = (uint64_t)child_kstack + USER_KSTACK_BYTES;
+    child->kernel_stack_base = child_kstack;
+
+    /* 5. Clone fd table. For pipe fds, bump the kernel pipe object's
+     *    refcount so it doesn't close when one of the two tasks
+     *    eventually exits. Sockets are not refcounted in our impl —
+     *    fork-with-open-sockets shares the slot index but a close in
+     *    either task tears it down for both. Acceptable for now;
+     *    real fork-+-exec patterns close inherited sockets in the
+     *    child before doing anything socket-y. */
+    for (int fd = 0; fd < OSNOS_MAX_FDS; fd++) {
+        child->fds[fd] = parent->fds[fd];
+        osnos_fd_t *cf = &child->fds[fd];
+        if (!cf->used) continue;
+        if (cf->is_pipe && cf->pipe_ref) {
+            if (cf->pipe_side == 0) pipe_dup_reader(cf->pipe_ref);
+            else                    pipe_dup_writer(cf->pipe_ref);
+        }
+    }
+
+    /* 6. Copy cwd, redirects, brk, mmap region table, FPU state.
+     *    name was already set by task_create (= parent->name). */
+    for (int i = 0; i < OSNOS_PATH_MAX; i++) child->cwd[i] = parent->cwd[i];
+    for (int i = 0; i < OSNOS_PATH_MAX; i++) child->stdin_redir [i] = parent->stdin_redir [i];
+    for (int i = 0; i < OSNOS_PATH_MAX; i++) child->stdout_redir[i] = parent->stdout_redir[i];
+    child->stdout_append    = parent->stdout_append;
+    child->stdin_redir_off  = parent->stdin_redir_off;
+    child->stdout_redir_off = parent->stdout_redir_off;
+
+    child->heap_start = parent->heap_start;
+    child->heap_brk   = parent->heap_brk;
+    child->user_entry = parent->user_entry;
+    child->user_stack_top = parent->user_stack_top;
+
+    child->mmap_next  = parent->mmap_next;
+    for (int i = 0; i < TASK_MMAP_MAX; i++) {
+        child->mmap_regions[i] = parent->mmap_regions[i];
+    }
+    for (int i = 0; i < (int)sizeof(child->fpu_state); i++) {
+        child->fpu_state[i] = parent->fpu_state[i];
+    }
+
+    /* Both kill_pending / stop_pending stay 0 in the child. Even if
+     * the parent had them set (mid-Ctrl+C), fork should give the
+     * child a clean slate so a forked grandchild can survive. */
+    child->kill_pending = 0;
+    child->stop_pending = 0;
+
+    /* 7. Snapshot the syscall context from the parent's kstack into
+     *    child->saved_*. Identical recipe to sys_nanosleep, but the
+     *    payload goes to a *different* task. iret frame is at
+     *    parent_kstack_top - 40, syscall_frame_t just below. */
+    uint64_t *iret = (uint64_t *)(parent->kernel_stack_top - 40);
+    child->saved_iret_rip    = iret[0];
+    child->saved_iret_cs     = iret[1];
+    child->saved_iret_rflags = iret[2];
+    child->saved_iret_rsp    = iret[3];
+    child->saved_iret_ss     = iret[4];
+
+    syscall_frame_t *sf =
+        (syscall_frame_t *)(parent->kernel_stack_top - 40 - sizeof(*sf));
+    child->saved_rax = 0;                /* fork() returns 0 in child */
+    child->saved_rbx = sf->rbx;
+    child->saved_rcx = sf->rcx;
+    child->saved_rdx = sf->rdx;
+    child->saved_rsi = sf->rsi;
+    child->saved_rdi = sf->rdi;
+    child->saved_rbp = sf->rbp;
+    child->saved_r8  = sf->r8;
+    child->saved_r9  = sf->r9;
+    child->saved_r10 = sf->r10;
+    child->saved_r11 = sf->r11;
+    child->saved_r12 = sf->r12;
+    child->saved_r13 = sf->r13;
+    child->saved_r14 = sf->r14;
+    child->saved_r15 = sf->r15;
+
+    child->saved_valid = 1;
+    child->state       = TASK_READY;
+
+    /* 8. Parent returns the child's pid. The child wakes up via
+     *    user_task_trampoline's saved_valid path with rax=0. Both
+     *    execute the instruction right after the `syscall`. */
+    return (int64_t)child->pid;
+}
+
+/* ------------------------------------------------------------------ */
 /* sys_execve (#59) — Linux execve(2). Replaces the current task's    */
 /* user-mode image in place. Same pid, fds, cwd; new pml4 + entry.    */
 /* ------------------------------------------------------------------ */
@@ -1870,6 +1999,8 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
                 (osnos_timespec_t *)frame->rsi));
         case SYS_KILL:
             return pack(sys_kill(frame->rdi, (int)frame->rsi));
+        case SYS_FORK:
+            return pack(sys_fork());
         case SYS_EXECVE:
             return pack(sys_execve(
                 (const char *)frame->rdi,

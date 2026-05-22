@@ -80,6 +80,14 @@ uint64_t *address_space_create(void);
 void      address_space_destroy(uint64_t *pml4);
 
 /*
+ * address_space_clone — deep-copy the user low-half of `parent` into
+ * a fresh PML4. Used by sys_fork. Returns NULL on OOM (no partial
+ * state leaked on failure). Kernel high-half is shared, identical to
+ * address_space_create.
+ */
+uint64_t *address_space_clone(const uint64_t *parent);
+
+/*
  * User-virtual range. Addresses below this belong to the current
  * address space's lower half (where user code/data goes).
  */

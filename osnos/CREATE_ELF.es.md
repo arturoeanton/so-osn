@@ -205,6 +205,8 @@ Números de syscall que existen hoy (ver `src/micro/syscall.h`):
 |  49 | `bind`        | `(int fd, const struct sockaddr*, socklen_t)`     |
 |  50 | `listen`      | `(int fd, int backlog)`                           |
 |  55 | `getsockopt`  | `(int fd, int level, int opt, ...)`               |
+|  57 | `fork`        | `(void)` → child pid (parent) / 0 (child) / -errno |
+|  59 | `execve`      | `(const char *path, argv[], envp[])` — never returns on success |
 |  60 | `exit`        | `(int code)`                                      |
 |  62 | `kill`        | `(pid_t pid, int sig)`                            |
 |  72 | `fcntl`       | `(int fd, int cmd, ...)` (F_GETFL/SETFL/DUPFD)    |

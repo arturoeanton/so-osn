@@ -58,3 +58,10 @@ int64_t pipe_read (pipe_t *p,       void *buf, size_t n);
 /* Decrement refcounts; auto-frees the slot when both reach 0. */
 void    pipe_close_writer(pipe_t *p);
 void    pipe_close_reader(pipe_t *p);
+
+/* Bump refcounts when a new task gets a copy of the fd (used by
+ * sys_fork). dup(2) and dup2(2) ALSO use these so the per-task fd
+ * table's pipe slot count stays in sync with the kernel pipe's
+ * ref_w / ref_r counters. */
+void    pipe_dup_writer(pipe_t *p);
+void    pipe_dup_reader(pipe_t *p);

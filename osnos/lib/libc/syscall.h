@@ -35,6 +35,7 @@
 #define SYS_TIME     201
 #define SYS_CLOCK_GETTIME 228
 #define SYS_GETPID    39
+#define SYS_FORK      57
 #define SYS_EXIT      60
 #define SYS_KILL      62
 #define SYS_GETCWD    79

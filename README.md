@@ -204,7 +204,9 @@ roadmap), mover los servidores debería ser mecánico.
 │             lib/libc — mini-libc osnos                      │
 │       printf, malloc, fopen, ... → syscall                  │
 ├─────────────────────────────────────────────────────────────┤
-│  Syscall ABI Linux x86_64 + osnos-specific (>= 250):        │
+│  Syscall ABI Linux x86_64 (read/write/open/pipe/dup/...):   │
+│   SYS_FORK (57)  + SYS_EXECVE (59) → ABI POSIX core ✅       │
+│   osnos-specific (≥ 250):                                    │
 │   SYS_IPC_SEND/RECV (260/261), SERVICE_* (262/263),         │
 │   SYS_TTY_INPUT (264), SYS_TASKINFO (265),                  │
 │   SYS_SPAWN (266), SYS_SET_FG (267), SYS_RESUME (268)       │
@@ -218,9 +220,11 @@ roadmap), mover los servidores debería ser mecánico.
 │  IPC: 1 cola, 64 slots, payload 1024B. ipc_send rewrite     │
 │       SID → pid; ring-3 receivers filtran por t->pid        │
 ├─────────────────────────────────────────────────────────────┤
-│  micro/ core: task (per-task fds[16] + fpu_state), pipe,    │
-│  scheduler (preempt @ CPL=3 + coop), ipc, gdt/idt/tss,      │
-│  pmm/vmm/kmalloc, syscall, uaccess, service                 │
+│  micro/ core: task (per-task fds[16] + fpu_state + saved    │
+│    iret/GPRs for nanosleep/fork resume), pipe (+ ref dup),  │
+│    scheduler (preempt @ CPL=3 + coop), ipc, gdt/idt/tss,    │
+│    pmm/vmm (address_space_clone para fork), kmalloc,        │
+│    syscall, uaccess, service                                │
 ├─────────────────────────────────────────────────────────────┤
 │  drivers/: PS/2, framebuffer + font 8x8 + VT100 CSI parser, │
 │            PIC, LAPIC, PIT, ATA PIO, RTL8139                │
@@ -290,6 +294,7 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | Job control: `&`, `jobs`, `fg`, `bg`, Ctrl+Z, `kill` | ✅ |
 | `sys_spawn(2)` con fd inheritance + `osn_spawn` libc | ✅ |
 | **`execve(2)` real** (SYS_EXECVE=59) — in-place ELF replacement, same pid+fds+cwd | ✅ |
+| **`fork(2)` real** (SYS_FORK=57) — deep-copy pml4, fd table con pipe refcount bumps, child resumes at saved iret with rax=0 | ✅ |
 | **init-respawn watchdog** — consrv/kbdsrv/shellsrv auto-restart on death | ✅ |
 | Driver ATA PIO + FAT16 read/write + dir-chain extension + NT case-bits + persistencia | ✅ |
 | **/bin disk-resident** — sd.img poblado al build via mtools, kernel binary 1.1 MB (era 7.6 MB) | ✅ |
@@ -304,7 +309,7 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | `getcwd` / `chdir` syscalls + per-task cwd (POSIX) | ✅ |
 | mmap/munmap anónimo + brk/sbrk | ✅ |
 | Pre-populate sd.img al build (Fase 2 final) | ✅ |
-| `fork` POSIX puro (hoy `osn_spawn` + `execve`) | ❌ |
+| `fork` + `execve` POSIX (ABI core 100% completo) | ✅ |
 | Multi-core (SMP) | ❌ |
 
 ---
@@ -518,6 +523,15 @@ Cerrado recientemente:
   el viejo, sched_resume_jump. Preserva pid + fds + cwd. libc
   `execve` + `execv` + `execvp` listos. `exec` builtin en shellsrv
   con osn_set_fg(getpid) para que Ctrl+C funcione tras el exec.
+- **fork(2) real** (SYS_FORK=57): deep-copy del user pml4 via nuevo
+  `address_space_clone` (full page copy, no COW todavía). Clona la
+  fd table con pipe refcount bumps (nuevo `pipe_dup_reader/writer`).
+  Snapshot del iret frame + GPRs del parent al kstack del child →
+  child resume via `user_task_trampoline` con `rax=0`. Parent
+  retorna child pid. libc `fork()` listo. `/bin/forktest` verifica
+  semánticas (pid distintos, fd inheritance, stack COW correcto,
+  exit code propagation). **ABI POSIX core 100% completo**: read/
+  write/open/close/pipe/dup/fork/execve/exit/kill/wait-via-taskinfo.
 - **init-respawn watchdog**: kernel task que checkea cada ~100ms
   si consrv/kbdsrv/shellsrv siguen vivos; si murieron (e.g. exec
   /bin/top + Ctrl+C), los respawnea + re-registra SERVER_*.
@@ -543,15 +557,15 @@ Cerrado recientemente:
 
 Las próximas fases grandes:
 
-1. **`fork` POSIX puro** (hoy hay `osn_spawn` + `execve`; falta el
-   fork-sin-exec con copy-on-write).
-2. **FASE 11 — Drivers a ring 3**: PS/2, framebuffer, ATA, RTL8139
+1. **FASE 11 — Drivers a ring 3**: PS/2, framebuffer, ATA, RTL8139
    como ELFs en `elfs/osn-driver/`. Requiere IRQ delegation, MMIO
    mapping per-task, port-IO syscall, DMA bouncing.
-3. **TUI potente** (FASE 12): mini Norton Commander, viewer, syntax
+2. **FASE 12 — TUI potente**: mini Norton Commander, viewer, syntax
    highlighting en ovi, multi-pane.
-4. **Gráfico** (FASE 13): window server + terminal en ventana + mouse.
-5. **SMP** (mucho después).
+3. **FASE 13 — Gráfico**: window server + terminal en ventana + mouse.
+4. **SMP** (mucho después).
+5. **Copy-on-write fork** — hoy fork hace full page copy. Con COW
+   se ahorra RAM hasta el primer write.
 
 Detalle en `osnos/PLAN.md` y `osnos/STATUS.md`.
 
