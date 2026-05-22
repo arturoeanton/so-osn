@@ -22,11 +22,12 @@ Hay **dos formas** de escribir un ELF en osnos:
 1. **Libc-linked (lo normal)** — escribís `int main(int argc, char **argv)`
    y linkeás contra `libosnos_c.a`. Tenés `printf`, `malloc`, `fopen`,
    `qsort`, `setjmp`, todo lo del Tier 1 de la libc. Es lo que usan los
-   ~20 tools de `tests/`.
+   ~40 ELFs de `elfs/tools/` y `elfs/net/`.
 2. **Bare ELF (edge case)** — escribís tu propio `_start`, ningún
    linkeo, syscall wrappers a mano. Se usa para casos especiales:
    binarios de prueba del loader, tools que prueban una syscall sin
-   indirección de libc. Sólo hay un ejemplo vivo: `tests/user_hello.c`.
+   indirección de libc. El único ejemplo vivo es
+   `elfs/tests/user_hello.c`.
 
 Esta guía lleva la libc-linked por defecto. La bare está al final.
 
@@ -44,16 +45,19 @@ Cuando el kernel carga tu ELF libc-linked, vivís en ring 3 con esto:
 - **Tu propio PML4** (low-half tuyo, high-half kernel compartido pero
   inaccesible desde CPL=3).
 - **Tu binario mapeado** según los `PT_LOAD` que emite el linker
-  script (`tests/libc.lds`). El layout estándar es `.text`+`.rodata`
+  script (`elfs/libc.lds`). El layout estándar es `.text`+`.rodata`
   R+X en `0x400000`, `.data`+`.bss` R+W en `0x401000`.
 - **Stack** de una página en `0x7FFFE000-0x7FFFF000`, RSP arrancando
   en `0x7FFFF000`.
 - **Heap** vía `brk()` syscall — `malloc()` lo usa por debajo. Empieza
   en `USER_HEAP_BASE = 0x10000000` y crece hacia arriba a medida que
   pedís páginas.
-- **argc / argv** populated por el kernel (`build_argv_block` en
-  `src/proc/exec.c` arma el bloque System V x86_64 al top del stack).
-  `envp` está pasado pero el array está vacío hoy.
+- **mmap anónimo** (`PROT_*`, `MAP_ANONYMOUS`) para regiones grandes
+  o aisladas. `mmap_next` per-task lleva el cursor.
+- **argc / argv / envp** populated por el kernel (`build_argv_block`
+  en `src/proc/exec.c` arma el bloque System V x86_64 al top del
+  stack). `envp` ahora se hereda real del proceso padre — shellsrv
+  pasa `environ` vía `pack_envp` → `sys_spawn(envp_flat)`.
 - **`crt0.S`** que el linker pone como primer .text: hace
   `main(argc, argv, envp)` y entrega el return a `_exit`.
 - **Toda la libc Tier 1**: stdio (FILE\* con fopen, fread, fwrite,
@@ -173,6 +177,8 @@ Para hacerlo desde tu .c sin libc: `#include "syscall.h"` desde
 
 Números de syscall que existen hoy (ver `src/micro/syscall.h`):
 
+**Linux ABI compatible** (mismos números que Linux x86_64):
+
 | Nº  | Nombre        | Args                                              |
 |----:|---------------|---------------------------------------------------|
 |   0 | `read`        | `(int fd, void *buf, size_t n)`                   |
@@ -181,21 +187,55 @@ Números de syscall que existen hoy (ver `src/micro/syscall.h`):
 |   3 | `close`       | `(int fd)`                                        |
 |   5 | `fstat`       | `(int fd, struct stat *out)`                      |
 |   8 | `lseek`       | `(int fd, off_t off, int whence)`                 |
+|   9 | `mmap`        | `(void *addr, size_t len, int prot, int flags, int fd, off_t)` |
+|  11 | `munmap`      | `(void *addr, size_t len)`                        |
 |  12 | `brk`         | `(uintptr_t new_brk)` — base de `malloc`          |
+|  22 | `pipe`        | `(int pipefd[2])`                                 |
+|  32 | `dup`         | `(int oldfd)`                                     |
+|  33 | `dup2`        | `(int oldfd, int newfd)`                          |
 |  35 | `nanosleep`   | `(const struct timespec *req, struct timespec *)` |
 |  39 | `getpid`      | `(void)` → pid                                    |
+|  41 | `socket`      | `(int domain, int type, int proto)`               |
+|  42 | `connect`     | `(int fd, const struct sockaddr*, socklen_t)`     |
+|  43 | `accept`      | `(int fd, struct sockaddr*, socklen_t*)`          |
+|  44 | `sendto`      | `(int fd, const void*, size_t, int, ...)`         |
+|  45 | `recvfrom`    | `(int fd, void*, size_t, int, ...)`               |
+|  47 | `recvmsg`     | `(int fd, struct msghdr*, int)`                   |
+|  48 | `shutdown`    | `(int fd, int how)`                               |
+|  49 | `bind`        | `(int fd, const struct sockaddr*, socklen_t)`     |
+|  50 | `listen`      | `(int fd, int backlog)`                           |
+|  55 | `getsockopt`  | `(int fd, int level, int opt, ...)`               |
 |  60 | `exit`        | `(int code)`                                      |
 |  62 | `kill`        | `(pid_t pid, int sig)`                            |
+|  72 | `fcntl`       | `(int fd, int cmd, ...)` (F_GETFL/SETFL/DUPFD)    |
+|  79 | `getcwd`      | `(char *buf, size_t n)`                           |
+|  80 | `chdir`       | `(const char *path)`                              |
 |  82 | `rename`      | `(const char *old, const char *new)`              |
 |  83 | `mkdir`       | `(const char *path, mode_t mode)`                 |
 |  84 | `rmdir`       | `(const char *path)`                              |
 |  87 | `unlink`      | `(const char *path)`                              |
-| 201 | `isatty`      | `(int fd)`  *(osnos-specific)*                    |
-| 217 | `getdents`    | `(int fd, void *buf, size_t n)` *(getdents64)*    |
+|  96 | `gettimeofday`| `(struct timeval*, struct timezone*)`             |
+|  16 | `ioctl`       | `(int fd, unsigned long req, ...)` (termios+TIOC) |
+| 201 | `time`        | `(time_t*)` *(actually `time` in Linux too)*      |
+| 217 | `getdents64`  | `(int fd, void *buf, size_t n)`                   |
 
-Cualquier syscall fuera de esa lista devuelve `-ENOSYS` (-38). El
-slot está reservado para cuando aterrice el feature (sockets,
-sigaction, etc.).
+**osnos-specific** (≥ 250, no chocan con Linux):
+
+| Nº  | Nombre               | Args                                       |
+|----:|----------------------|--------------------------------------------|
+| 260 | `ipc_send`           | `(const ipc_msg_t *)`                      |
+| 261 | `ipc_recv`           | `(ipc_msg_t *out, int blocking)`           |
+| 262 | `service_register`   | `(int sid)`                                |
+| 263 | `service_lookup`     | `(int sid)` → pid o 0                      |
+| 264 | `tty_input`          | `(int c)` *(solo el SERVER_KEYBOARD task)* |
+| 265 | `taskinfo`           | `(size_t idx, osnos_taskinfo_t *out)`      |
+| 266 | `spawn`              | `(path, args, envp_flat, stdin_fd, stdout_fd)` |
+| 267 | `set_fg`             | `(pid_t pid)` *(0 = clear)*                |
+| 268 | `resume`             | `(pid_t pid)` *(SIGCONT-equivalent)*       |
+
+Cualquier syscall fuera de esa lista devuelve `-ENOSYS` (-38).
+Los wrappers libc están en `lib/libc/include/osnos_ipc.h` (ipc + spawn),
+`unistd.h` (estándar) y `sys/socket.h` (red).
 
 ---
 
@@ -265,9 +305,10 @@ Si te molesta el warning de `errno` no declarado:
 
 ## Embedderlo en el kernel
 
-osnos todavía no monta filesystems externos (FASE 8 próximamente), así
-que cada ELF se compila junto al kernel y queda **embebido como bytes**
-dentro de la imagen. Tres pasos:
+Cada ELF se compila junto al kernel y queda **embebido como bytes**
+dentro de la imagen. En el primer boot, `bootstrap_fs` los dumpea a
+`/sd/bin/` (FAT16) y aliasa `/bin` → `/sd/bin`. Si borrás un binario
+del disco, el embedded sigue sirviendo como ROM fallback. Tres pasos:
 
 ### Paso 1 — Listar el `.c` en el Makefile
 
@@ -324,24 +365,25 @@ _binary_name_elf_end, desc)`.
 
 ### Build y run
 
-Desde el directorio padre (`/home/osn/osnso/`):
+Desde el directorio padre del repo:
 
 ```bash
-make run-bios
+./build_and_run.sh
 ```
 
-Adentro del shell:
+Adentro de shellsrv:
 
 ```
-osnos:/home> echo "hola mundo cruel" > /home/sample.txt
-osnos:/home> exec /bin/wc /home/sample.txt
+shellsrv:/$ echo "hola mundo cruel" > /home/sample.txt
+shellsrv:/$ wc /home/sample.txt
 1 3 17 /home/sample.txt
-osnos:/home>
+shellsrv:/$
 ```
 
-End-to-end: tu C → ELF64 → embed → load → mapeo de páginas →
-iretq a ring 3 → libc → syscall → console → IPC_PROC_EXITED →
-shell prompt.
+End-to-end: tu C → ELF64 → embed (objcopy) → primer boot lo dumpea a
+/sd/bin/<name> → exec.c lo lee via VFS (FAT) → elf_load + mapeo de
+páginas → iretq a ring 3 → libc → syscall → IPC_CONSOLE_WRITE →
+consrv ring-3 → /dev/fb0 → framebuffer.
 
 ---
 
@@ -453,8 +495,8 @@ Mismo flujo pero #PF. Casi siempre:
 - Acceder a heap antes de `malloc` (el rango `0x10000000+` está
   mapeado on-demand cuando `brk` crece; antes de eso es unmapped).
 
-Si necesitás más stack, hoy no hay solución limpia. Mantenelo chico
-hasta que llegue `mmap` (post-FASE 10).
+Si necesitás más stack, no se expande automático. Mantenelo chico o
+usá `mmap` para tu propia área grande de scratch.
 
 ### Tu ELF compila pero no anda
 
@@ -525,21 +567,25 @@ matarla:
 
 ---
 
-## Lo que vas a poder hacer post-FASE 8
+## Cosas que YA podés usar (FASE 8 / 8.5 / 9 / 10 cerradas)
 
-Cuando aterrice FAT y bloque driver:
-
-- Cargar ELFs desde **disco real**, no embedded.
-- `fopen` sobre archivos persistentes que sobreviven reboot.
-- Pipeline típico Unix: `cat archivo | wc -l` (cuando llegue `pipe`).
-
-Post-FASE 8.5 (networking):
-
-- `socket()` deja de retornar `-ENOSYS`.
-- `connect()`, `bind()`, `listen()`, `accept()`, `send/recv`.
-- Server HTTP minimal probable como demo.
-- Tu código que hoy usa `inet_pton` / `htons` / `struct sockaddr_in`
-  va a seguir andando sin cambios.
+- **Disco real**: `fopen` / `fread` / `fwrite` / `open` / `read` /
+  `write` sobre `/home/*` o `/sd/*` persisten entre reboots (FAT16).
+- **Pipelines Unix**: `cat archivo | grep foo | sort | head` —
+  shellsrv soporta pipes multi-stage y redirects `< > >>`. Desde C,
+  `pipe(2)` + `dup2(2)` + `osn_spawn` arman cualquier pipeline.
+- **Sockets POSIX completos**: TCP cliente/servidor, UDP, `select`,
+  DNS via `getaddrinfo`. Ver `elfs/net/httpd.c` y `selectserver.c`.
+- **Background jobs**: `&`, `jobs`, `fg`, `bg`, Ctrl+Z (en shellsrv).
+- **Preempción real**: scheduler timer-driven cada 50ms en CPL=3 —
+  tu programa puede loopear sin colgar el sistema.
+- **FXSAVE/FXRSTOR per-task**: doubles/floats funcionan; saca
+  `-mno-sse` del Makefile de tu binario si los querés.
+- **mmap anónimo + brk/sbrk**: heap grande o regiones aisladas.
+- **IPC con otros ring-3**: SYS_IPC_SEND/RECV permite escribir
+  servers como `consrv` / `kbdsrv` / `shellsrv` desde ring 3.
+- **`osn_spawn`**: spawneás procesos hijos con fd inheritance
+  (stdin/stdout via los fds del caller). Equivalente a posix_spawn.
 
 ---
 

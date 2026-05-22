@@ -2504,8 +2504,23 @@ Servers migrados / eliminados:
 
 **EL OS ENTERO** (consola + teclado + shell) corre en ring 3. kmain solo arranca drivers + spawn de ELFs + scheduler.
 
+Polish + cleanup ya cerrado en sesión separada:
+- ✅ shellsrv `cd` con `..` / `.` / paths relativos (path_normalize)
+- ✅ `ls /` muestra mount points sintéticos (vfs_readdir injection)
+- ✅ /bin/clear + /bin/tree ELFs agregados
+- ✅ ovi: output buffering 16KB + framebuffer chunk safe-split (CSI sequences no se parten)
+- ✅ FAT16 dir-chain extension (extend_dir_chain) — supera el cap de ~9 entries
+- ✅ task_t.name inline 32B (sys_taskinfo ya no faulta con user-pointer leaks)
+- ✅ ipc_send rewrite SID→pid (ring-3 receivers filtran por pid)
+- ✅ kbdsrv no envía IPC_KEY_EVENT (shellsrv lee via raw TTY)
+- ✅ shellsrv $VAR / ${VAR} expansion + export/unset/setenv + .oshrc autoload
+- ✅ Disk-resident /bin (Fase 1) — bootstrap dumpea ELFs a /sd/bin + aliasfs
+- ✅ Coreutils completos (~20 ELFs nuevos): env wc pwd uname basename dirname tail seq yes tee date printf grep sort uniq cut tr banner which clear tree
+- ✅ README.md + CREATE_ELF.es.md + STATUS.md actualizados
+
 Pendiente:
-- 10.5 cleanup final + ARCH.md actualizado
+- ARCH.md update con diagramas post-FASE-10 (los del README sirven de referencia mientras tanto)
+- Fase 2 disk-resident final: popular sd.img al build via mtools + borrar embedded blobs del kernel
 
 ### FASE 11 — Drivers a ring 3 (futuro, NO mezclar con 10)
 - IRQ delegation por IPC desde kernel-side handlers
