@@ -66,9 +66,13 @@ static void test_taskinfo(void) {
         long r = sys_taskinfo_raw(i, &info);
         if (r < 0) continue;             /* unused slot or out of range */
 
-        if (strcmp(info.name, "shell")    == 0) saw_shell++;
+        /* Shell server: "shell" pre-FASE-10.4, "shellsrv" once it
+         * migrates to a ring-3 ELF (the FASE 10.4 chunk-5 swap).
+         * Either name counts. */
+        if (strcmp(info.name, "shell")    == 0 ||
+            strcmp(info.name, "shellsrv") == 0) saw_shell++;
         if (strcmp(info.name, "keyboard") == 0) saw_keyboard++;
-        /* Console server is "console" pre-FASE-10.1, "consrv" once
+        /* Console server: "console" pre-FASE-10.1, "consrv" once
          * it migrates to a ring-3 ELF. Either name counts. */
         if (strcmp(info.name, "console")  == 0 ||
             strcmp(info.name, "consrv")   == 0) saw_console++;
