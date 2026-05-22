@@ -1,10 +1,20 @@
 ## Estado actual
 
+**Convención de formato** (este documento es histórico, ordenado de
+nuevo a viejo en la tabla; las secciones por subsistema son
+acumulativas):
+- ✓  cerrado / hecho / verificado
+- ☐  pendiente / TODO
+- **Fase X — CERRADA** = fase entera terminada
+- **Fase X — PENDIENTE** = fase futura, plan documentado
+
 ### Resumen ejecutivo
 
 OSnOS hoy es un kernel x86_64 hobby con ring-3 ELFs, scheduler
 preempt, FAT16 persistente, stack TCP/IP completo, line discipline
-POSIX, y un shell con history + rc files.
+POSIX, shell con history + rc files, y **ABI POSIX core 100%
+completo** (fork + execve + wait + sigaction + EINTR, verificado por
+23/23 tests reales).
 
 **Fases cerradas (orden cronológico inverso):**
 
@@ -69,28 +79,30 @@ modificar): `selectserver.c` de Beej, curl/Firefox contra
 `/bin/httpd`, `tcpclient google.com 80` con DNS real, ttytest
 canonical/raw, /home persistente cross-reboot.
 
-**TODOs no-bloqueantes** (postergados):
-- sys_execve real (libc surface lista, requiere coupling fg_pid)
-- PTY pairs (`/dev/ptmx`, `/dev/pts/N`) — para multiplex de
+**Pendientes no-bloqueantes** (todo polish / feature work, sin bugs
+abiertos):
+- ☐ PTY pairs (`/dev/ptmx`, `/dev/pts/N`) — para multiplex de
   terminales (job control real ya está)
-- Process groups + sessions POSIX-strict (hoy job control usa
+- ☐ Process groups + sessions POSIX-strict (hoy job control usa
   pid 1-to-1 vía fg_pid; pgid/sid no existen)
-- FASE 10 (servers a ring 3 en elfs/osn-server/) — **10.4 cerrada** ✅ (shell ES ring-3). Resta solo 10.5 cleanup + ARCH.md update.
-- ~~fork() real~~ → **cerrado**: SYS_FORK=57 + address_space_clone + libc fork() + /bin/forktest 6/6 PASS
-- Pipelines con más de 4 stages (hoy MAX_PIPELINE_STAGES=4)
-- Shell builtins (cat/ls/...) que respeten redirects sin
+- ☐ Pipelines con más de 4 stages (hoy MAX_PIPELINE_STAGES=4)
+- ☐ Shell builtins (cat/ls/...) que respeten redirects sin
   short-circuit a ELF (echo ya lo hace via echo_unescape)
-- Open file description shared offsets para dup POSIX-strict
-- tmpfile unlink-on-close (necesita anonymous FD layer)
-- RTC real (hoy time/clock_gettime = segundos desde boot)
-- mmap file-backed + MAP_FIXED + partial unmap (hoy solo anónimo
+- ☐ Open file description shared offsets para dup POSIX-strict
+- ☐ tmpfile unlink-on-close (necesita anonymous FD layer)
+- ☐ RTC real (hoy time/clock_gettime = segundos desde boot)
+- ☐ mmap file-backed + MAP_FIXED + partial unmap (hoy solo anónimo
   con bump-allocator y addr-exact munmap)
-- mremap (no hay)
-- IPv6, TLS, DHCP, TinyCC self-hosting (todo en ROADMAP_APENDICE.md)
+- ☐ mremap (no hay)
+- ☐ Signals POSIX avanzados: SIGCHLD automático al child exit,
+  `sa_mask` / `sigprocmask` reales (hoy stub), SA_SIGINFO + siginfo_t,
+  signals para faults (SEGV/FPE — hoy `proc_exit_current_user` duro)
+- ☐ Copy-on-write para fork (hoy full page copy)
+- ☐ IPv6, TLS, DHCP, TinyCC self-hosting (todo en ROADMAP_APENDICE.md)
 
 ---
 
-### Inventario ring 0 vs ring 3 (snapshot 2026-05-21)
+### Inventario ring 0 vs ring 3 (snapshot 2026-05-22)
 
 **Ring 0 — código C linkeado dentro de `build/kernel`:**
 
@@ -109,19 +121,20 @@ canonical/raw, /home persistente cross-reboot.
 
 | Categoría | ELFs | Cantidad | Detalle |
 |-----------|------|----------|---------|
-| 🆕 Servers (ring-3, spawneados al boot) | `consrv`, `kbdsrv`, `shellsrv` | **3** | TODO el frontend del OS corre en ring 3: consola (10.1), keyboard policy (10.2), shell (10.4). kmain solo spawn + scheduler |
+| Servers (ring-3, spawneados al boot) | `consrv`, `kbdsrv`, `shellsrv`, `banner` | **4** | TODO el frontend del OS corre en ring 3: consola (10.1), keyboard policy (10.2), shell (10.4), boot banner. kmain solo spawn + scheduler. Estos 4 son los únicos embebidos en el kernel (ROM recovery set + bare `user_hello`). |
 | Shell script | `osh` | 1 | intérprete de scripts |
-| Tools (coreutils-like) | hello, true, false, init, cat, touch, mkdir, rmdir, rm, mv, cp, ls, echo, calc, sleep, kill, top, ovi, tcc, head | 20 | en `/bin/` |
+| Coreutils | ls cat cp mv rm mkdir rmdir touch echo true false init head tail wc grep sort uniq cut tr seq yes tee env pwd which printf date uname basename dirname clear tree calc top kill sleep ovi tcc banner hello | ~40 | en `/bin/` (FAT) |
 | Net | tcpclient, udptest, echotcp, selecttest, selectserver, httpd | 6 | clientes/servidores TCP/UDP |
-| Tests | hello_libc, libctest, ttytest, envtest, fptest, mmaptest, pipetest, fbtest, inputtest, kerntest, spawntest, user_hello (bare) | 12 | sanidad + ABI |
-| **Total ELFs** | | **42** | |
+| Tests | hello_libc, libctest, ttytest, envtest, fptest, mmaptest, pipetest, fbtest, inputtest, kerntest, spawntest, exectest, forktest, waittest, sigtest, user_hello (bare) | 16 | sanidad + ABI |
+| **Total ELFs en disco** | | **~67** | en `/sd/bin/` poblado al build via `mtools` |
 
-**Distinción clave**: de los 42 ELFs, `consrv` + `kbdsrv` + `shellsrv` son los 3 servers ring-3 long-running spawneados al boot por kmain. shellsrv ES EL shell del sistema. Los otros 39 son programas one-shot.
+**Distinción clave**: solo `consrv` + `kbdsrv` + `shellsrv` + `banner`
++ `user_hello` viven embebidos en el kernel binario (ROM recovery
+set para boot diskless). Los ~62 restantes viven únicamente en disco
+(`sd.img`). **Kernel binary: 7.6 MB → 1.1 MB (-85%)** desde Fase 2
+disk-resident final.
 
-**Lo que falta para FASE 10:**
-- 10.5: cleanup + ARCH.md — borrar refs muertas en sysfs/bootstrap, actualizar diagrama de capas
-
-**Lo que NO migra en FASE 10 (queda ring 0, futuro FASE 11):**
+**Lo que NO migra a ring 3 (queda ring 0, futuro FASE 11):**
 - Todos los drivers (framebuffer pixels, PS/2 hardware, ATA PIO, RTL8139, PIT, LAPIC)
 - Todo el VFS core + backends
 - IPC + scheduler + task + paging + ELF loader
@@ -131,14 +144,14 @@ canonical/raw, /home persistente cross-reboot.
 ---
 
 ### Boot + drivers
-OK boot con Limine + QEMU
-OK framebuffer + font bitmap
-OK Limine memmap + HHDM requests parseados al boot
-OK teclado PS/2 con Shift, punto, mayúsculas
-OK teclado: flechas up/down (scancode extendido E0 48/50)
-OK teclado: Ctrl tracking + Ctrl+C → ASCII 0x03
-OK backspace visual
-OK boot sequence: pmm_init -> vmm_init -> kheap_init -> gdt_init -> tss_init
+✓ boot con Limine + QEMU
+✓ framebuffer + font bitmap
+✓ Limine memmap + HHDM requests parseados al boot
+✓ teclado PS/2 con Shift, punto, mayúsculas
+✓ teclado: flechas up/down (scancode extendido E0 48/50)
+✓ teclado: Ctrl tracking + Ctrl+C → ASCII 0x03
+✓ backspace visual
+✓ boot sequence: pmm_init -> vmm_init -> kheap_init -> gdt_init -> tss_init
    -> idt_init -> uaccess_init (extable) -> syscall_msr_init (EFER.SCE +
    STAR/LSTAR/FMASK) -> pic_init (remap 8259) -> lapic_init (LINT0=ExtINT
    para q35) -> timer_init (PIT @ 100 Hz) -> ipc_init -> task_init ->
@@ -147,103 +160,103 @@ OK boot sequence: pmm_init -> vmm_init -> kheap_init -> gdt_init -> tss_init
    server _init -> sti -> scheduler_loop (longjmp host)
 
 ### Microkernel
-OK drivers separados (framebuffer, keyboard)
-OK servers separados (console, keyboard, shell, fs)
-OK IPC con queue de 64 slots, payload 1024B
-OK IPC blocking + wakeup por task_unblock
-OK IPC contract documentado en ipc.h (rangos de opcode, convención de respuesta)
-OK ipc_send retorna osnos_status_t (OK / EAGAIN / ESRCH); shell propaga errores al usuario
-OK IPC_PROC_EXITED (rango 0x40) para parent-notification de child death
-OK service registry (SERVER_FS/KEYBOARD/SHELL/CONSOLE)
-OK scheduler cooperativo round-robin + task.dispatches counter
-OK GDT propia (kcode/kdata/ucode/udata + TSS slots)
-OK IDT 256 entries con exception handlers (#PF, #GP, #DF, #UD, etc.)
-OK TSS instalado (RSP0 al kernel stack), ltr OK, IOPB cerrado
-OK PMM bitmap + VMM 4-niveles + kheap free-list + address_space_create/destroy
-OK copy_from_user / copy_to_user con fault recovery via extable (FASE 6.3c)
-OK syscalls Linux x86_64 con números exactos (read=0, write=1, open=2, close=3,
+✓ drivers separados (framebuffer, keyboard)
+✓ servers separados (console, keyboard, shell, fs)
+✓ IPC con queue de 64 slots, payload 1024B
+✓ IPC blocking + wakeup por task_unblock
+✓ IPC contract documentado en ipc.h (rangos de opcode, convención de respuesta)
+✓ ipc_send retorna osnos_status_t (OK / EAGAIN / ESRCH); shell propaga errores al usuario
+✓ IPC_PROC_EXITED (rango 0x40) para parent-notification de child death
+✓ service registry (SERVER_FS/KEYBOARD/SHELL/CONSOLE)
+✓ scheduler cooperativo round-robin + task.dispatches counter
+✓ GDT propia (kcode/kdata/ucode/udata + TSS slots)
+✓ IDT 256 entries con exception handlers (#PF, #GP, #DF, #UD, etc.)
+✓ TSS instalado (RSP0 al kernel stack), ltr OK, IOPB cerrado
+✓ PMM bitmap + VMM 4-niveles + kheap free-list + address_space_create/destroy
+✓ copy_from_user / copy_to_user con fault recovery via extable (FASE 6.3c)
+✓ syscalls Linux x86_64 con números exactos (read=0, write=1, open=2, close=3,
    fstat=5, lseek=8, brk=12, exit=60, rename=82, mkdir=83, rmdir=84,
    unlink=87, getdents=217, +isatty=201 osnos-specific)
-OK syscall ABI dual: int 0x80 (legacy) y syscall (LSTAR fast path),
+✓ syscall ABI dual: int 0x80 (legacy) y syscall (LSTAR fast path),
    mismo dispatcher + misma syscall_frame_t
-OK osnos_status_t con valores Linux errno (EPERM=1, ENOENT=2, EIO=5, EEXIST=17,
+✓ osnos_status_t con valores Linux errno (EPERM=1, ENOENT=2, EIO=5, EEXIST=17,
    EINVAL=22, ENOSPC=28, EROFS=30, ENOTEMPTY=39, etc.)
-OK osnos_keys.h con valores Linux input-event-codes (KEY_UP=103, KEY_DOWN=108)
-OK osnos_dirent_t layout-compatible con linux_dirent64
-OK osnos_stat_t layout-compatible con Linux x86_64 struct stat
+✓ osnos_keys.h con valores Linux input-event-codes (KEY_UP=103, KEY_DOWN=108)
+✓ osnos_dirent_t layout-compatible con linux_dirent64
+✓ osnos_stat_t layout-compatible con Linux x86_64 struct stat
 
 ### Shell
-OK shell interactivo con tabla de comandos + auto-help
-OK help / ls / cat / neof / clear / cls (alias) / banner / uname / version / whoami
-OK pwd
-OK cd
-OK relative paths con make_absolute_path() (retorna bool si truncó)
-OK ls / ls [PATH]
-OK mkdir
-OK rmdir (rechaza dir no vacío)
-OK tree / tree [PATH] (DFS iterativo con stack explícito)
-OK cat FILE
-OK touch FILE
-OK rm FILE
-OK rm PATTERN (wildcard *)
-OK cp SRC DST
-OK mv SRC DST (atómico ante overflow de nombres)
-OK echo "texto"
-OK echo "texto" > FILE
-OK echo "texto" >> FILE
-OK paths tipo /home/readme.txt
-OK history (16 entradas, dedupea consecutivos)
-OK navegación con flechas up/down sobre history (con scratch line)
-OK Ctrl+C → cancela input line + prompt fresco
+✓ shell interactivo con tabla de comandos + auto-help
+✓ help / ls / cat / neof / clear / cls (alias) / banner / uname / version / whoami
+✓ pwd
+✓ cd
+✓ relative paths con make_absolute_path() (retorna bool si truncó)
+✓ ls / ls [PATH]
+✓ mkdir
+✓ rmdir (rechaza dir no vacío)
+✓ tree / tree [PATH] (DFS iterativo con stack explícito)
+✓ cat FILE
+✓ touch FILE
+✓ rm FILE
+✓ rm PATTERN (wildcard *)
+✓ cp SRC DST
+✓ mv SRC DST (atómico ante overflow de nombres)
+✓ echo "texto"
+✓ echo "texto" > FILE
+✓ echo "texto" >> FILE
+✓ paths tipo /home/readme.txt
+✓ history (16 entradas, dedupea consecutivos)
+✓ navegación con flechas up/down sobre history (con scratch line)
+✓ Ctrl+C → cancela input line + prompt fresco
 
 ### RAMFS
-OK RAMFS en memoria (32 slots × 128B path × 512B data)
-OK dirs explícitas (is_dir flag)
-OK move recursivo de directorios (renombra hijos atómicamente)
-OK no compacta el array al borrar: punteros a slots permanecen válidos
-OK ramfs_iter_child para iteración encapsulada (slot interno no escapa)
+✓ RAMFS en memoria (32 slots × 128B path × 512B data)
+✓ dirs explícitas (is_dir flag)
+✓ move recursivo de directorios (renombra hijos atómicamente)
+✓ no compacta el array al borrar: punteros a slots permanecen válidos
+✓ ramfs_iter_child para iteración encapsulada (slot interno no escapa)
 
 ### VFS
-OK src/fs/vfs.h con contrato: vfs_node_type_t (Linux S_IF* values), vfs_stat_t, vfs_dirent_t, vfs_ops_t, vfs_mount_t
-OK src/fs/vfs.c con mount table + longest-prefix dispatch
-OK vfs_init / vfs_mount / vfs_stat / vfs_readdir / vfs_read / vfs_write / vfs_append / vfs_mkdir / vfs_rmdir / vfs_unlink
-OK vfs_copy / vfs_move (con fast-path rename si el backend lo expone)
-OK vfs_touch (stat-then-write-empty)
-OK vfs_list_dir / vfs_tree (DFS iterativo, max depth 16) sobre vfs_readdir
-OK vfs_path_has_wildcard / vfs_glob_list / vfs_glob_read / vfs_glob_unlink (glob '*' en última componente)
-OK src/fs/ramfs_vfs.{c,h}: adapter que expone const vfs_ops_t ramfs_vfs_ops
-OK bootstrap_fs: vfs_init + vfs_mount("/", &ramfs_vfs_ops, 0) + vfs_mkdir + vfs_write
-OK fs_server migrado: 0 llamadas a ramfs_* directo; todo va por vfs_*
-OK wildcard * en ls / cat / rm (vfs_glob_*)
+✓ src/fs/vfs.h con contrato: vfs_node_type_t (Linux S_IF* values), vfs_stat_t, vfs_dirent_t, vfs_ops_t, vfs_mount_t
+✓ src/fs/vfs.c con mount table + longest-prefix dispatch
+✓ vfs_init / vfs_mount / vfs_stat / vfs_readdir / vfs_read / vfs_write / vfs_append / vfs_mkdir / vfs_rmdir / vfs_unlink
+✓ vfs_copy / vfs_move (con fast-path rename si el backend lo expone)
+✓ vfs_touch (stat-then-write-empty)
+✓ vfs_list_dir / vfs_tree (DFS iterativo, max depth 16) sobre vfs_readdir
+✓ vfs_path_has_wildcard / vfs_glob_list / vfs_glob_read / vfs_glob_unlink (glob '*' en última componente)
+✓ src/fs/ramfs_vfs.{c,h}: adapter que expone const vfs_ops_t ramfs_vfs_ops
+✓ bootstrap_fs: vfs_init + vfs_mount("/", &ramfs_vfs_ops, 0) + vfs_mkdir + vfs_write
+✓ fs_server migrado: 0 llamadas a ramfs_* directo; todo va por vfs_*
+✓ wildcard * en ls / cat / rm (vfs_glob_*)
 
 ### Build / saneamiento
-OK lib/string.c con strlcpy / strlcat / strncmp / strstarts / strchr / strrchr
-OK constantes en src/include/osnos_limits.h (OSNOS_PATH_MAX, OSNOS_NAME_MAX, OSNOS_INPUT_MAX)
-OK _Static_assert verifica que OSNOS_PATH_MAX*2 + slack <= IPC_DATA_SIZE
-OK -Werror para src/ (cc-runtime sigue permisivo)
-OK cero warnings en build limpio
+✓ lib/string.c con strlcpy / strlcat / strncmp / strstarts / strchr / strrchr
+✓ constantes en src/include/osnos_limits.h (OSNOS_PATH_MAX, OSNOS_NAME_MAX, OSNOS_INPUT_MAX)
+✓ _Static_assert verifica que OSNOS_PATH_MAX*2 + slack <= IPC_DATA_SIZE
+✓ -Werror para src/ (cc-runtime sigue permisivo)
+✓ cero warnings en build limpio
 
 ---
 
 ## SIGUIENTE
 
-### Saneamiento pre-VFS — CERRADO
-OK invariantes documentados (ramfs.h, ARCH.md, CLAUDE.md refresh)
-OK mount points extraídos a src/fs/bootstrap.{c,h}
-OK osnos_path_t definido en src/include/osnos_path.h (skeleton)
+### Saneamiento pre-VFS — CERRADA
+✓ invariantes documentados (ramfs.h, ARCH.md, CLAUDE.md refresh)
+✓ mount points extraídos a src/fs/bootstrap.{c,h}
+✓ osnos_path_t definido en src/include/osnos_path.h (skeleton)
 
 ### FASE 2 — VFS real — CERRADA
-OK 11a. VFS dispatch + mount table (vfs.c)
-OK 11b. Adapter ramfs como backend (ramfs_vfs.{c,h})
-OK 11c. fs_server consume vfs_*, no llama ramfs_* directo
-OK 11d.1 sysfs read-only en /sys: version, tasks, mounts (synthetic)
-OK 11d.2 devfs en /dev: /dev/null, /dev/zero (char devices, mode 0666)
-OK 12. vfs_stat_t con type/size/inode/mode (atime/mtime/uid pendientes hasta FASE 9: clock)
-OK 13. permisos en stat (0755 dirs ramfs, 0644 files ramfs, 0444 sysfs, 0666 chr devfs) — expuestos sin enforcement
-OK 14. mount table interna (VFS_MAX_MOUNTS=8, longest-prefix dispatch)
+✓ 11a. VFS dispatch + mount table (vfs.c)
+✓ 11b. Adapter ramfs como backend (ramfs_vfs.{c,h})
+✓ 11c. fs_server consume vfs_*, no llama ramfs_* directo
+✓ 11d.1 sysfs read-only en /sys: version, tasks, mounts (synthetic)
+✓ 11d.2 devfs en /dev: /dev/null, /dev/zero (char devices, mode 0666)
+✓ 12. vfs_stat_t con type/size/inode/mode (atime/mtime/uid pendientes hasta FASE 9: clock)
+✓ 13. permisos en stat (0755 dirs ramfs, 0644 files ramfs, 0444 sysfs, 0666 chr devfs) — expuestos sin enforcement
+✓ 14. mount table interna (VFS_MAX_MOUNTS=8, longest-prefix dispatch)
 
 ### Comando test integrado
-OK ~217 asserts cubriendo:
+✓ ~217 asserts cubriendo:
    - ramfs CRUD + dirs + globs
    - sysfs / devfs / binfs (RO, EROFS en writes)
    - stat modes (0755/0644/0444/0555/0666)
@@ -260,53 +273,55 @@ OK ~217 asserts cubriendo:
    chunked-flush para que no se desborde la cola IPC al imprimir
 
 ### FASE 3 — Introspección — CERRADA
-OK 15. ps (lee /sys/tasks vía vfs_read; sin atajos al kernel)
-OK 16. /bin/top — viewer live (cerrado tras FASE 9.4 + ANSI). Ver detalle
+✓ 15. ps (lee /sys/tasks vía vfs_read; sin atajos al kernel)
+✓ 16. /bin/top — viewer live (cerrado tras FASE 9.4 + ANSI). Ver detalle
    en la entrada de FASE 9.4 abajo.
-OK 17. mem info (/sys/meminfo: tasks, ipc, ramfs, mounts used/total) + comando mem
-OK 18. /sys/tasks (pid, name, state, dispatches contador)
-OK 19. /sys/version (synthetic en sysfs)
-OK extra: comando mount (lee /sys/mounts)
-OK extra: scheduler_get_ticks() + task.dispatches contador instrumentado
-OK extra: /sys/uptime (segundos.ms reales desde FASE 9.1; antes era
+✓ 17. mem info (/sys/meminfo: tasks, ipc, ramfs, mounts used/total) + comando mem
+✓ 18. /sys/tasks (pid, name, state, dispatches contador)
+✓ 19. /sys/version (synthetic en sysfs)
+✓ extra: comando mount (lee /sys/mounts)
+✓ extra: scheduler_get_ticks() + task.dispatches contador instrumentado
+✓ extra: /sys/uptime (segundos.ms reales desde FASE 9.1; antes era
    proxy de scheduler ticks)
-OK extra: /sys/cpuinfo (CPUID vendor + brand vía leaves 0 y 0x80000002-4)
-OK extra: /sys/services (id -> name -> pid)
-OK extra: /sys/build (__DATE__ + __TIME__ + __clang_version__)
+✓ extra: /sys/cpuinfo (CPUID vendor + brand vía leaves 0 y 0x80000002-4)
+✓ extra: /sys/services (id -> name -> pid)
+✓ extra: /sys/build (__DATE__ + __TIME__ + __clang_version__)
 
 ### FASE 4 — Syscalls — CERRADA
-OK 4.1 fd table (stdin/stdout/stderr + fd>=3, offset, flags, is_dir)
-OK 4.2 sys_write (stdout/stderr -> console IPC; fd>=3 -> vfs_append)
-OK 4.3 sys_open / sys_close (O_CREAT, O_TRUNC, O_EXCL, O_APPEND, O_RDONLY/WRONLY/RDWR)
-OK 4.4 sys_read (con offset propio del fd, EOF al final)
-OK 4.5 sys_fstat (osnos_stat_t layout-compatible con Linux x86_64 struct stat)
-OK 4.5 sys_lseek (SEEK_SET / SEEK_CUR / SEEK_END)
-OK 4.5 sys_isatty (1 para 0/1/2)
-OK osnos_fcntl.h / osnos_stat.h con valores Linux exactos
-OK syscall_dispatch frame-based (entry point para ring3 futuro)
-OK sys_read sobre stdin (ring buffer 256B, keyboard_server pushea printables)
-OK sys_exit conectado al task lifecycle (marca current task DEAD)
-OK sys_mkdir / sys_rmdir / sys_unlink / sys_rename (wrappers VFS)
-OK sys_getdents (drena vfs_readdir, layout linux_dirent64)
-OK sys_open de directorios en O_RDONLY (read directo -> EISDIR; usar getdents)
-TODO write con offset real (hoy todo write es append, OK para fopen("w"/"a"))
-TODO errno exportado a userland (los syscalls ya devuelven -errno Linux; ring3 lo va a recibir tal cual)
+✓ 4.1 fd table (stdin/stdout/stderr + fd>=3, offset, flags, is_dir)
+✓ 4.2 sys_write (stdout/stderr -> console IPC; fd>=3 -> vfs_append)
+✓ 4.3 sys_open / sys_close (O_CREAT, O_TRUNC, O_EXCL, O_APPEND, O_RDONLY/WRONLY/RDWR)
+✓ 4.4 sys_read (con offset propio del fd, EOF al final)
+✓ 4.5 sys_fstat (osnos_stat_t layout-compatible con Linux x86_64 struct stat)
+✓ 4.5 sys_lseek (SEEK_SET / SEEK_CUR / SEEK_END)
+✓ 4.5 sys_isatty (1 para 0/1/2)
+✓ osnos_fcntl.h / osnos_stat.h con valores Linux exactos
+✓ syscall_dispatch frame-based (entry point para ring3 futuro)
+✓ sys_read sobre stdin (ring buffer 256B, keyboard_server pushea printables)
+✓ sys_exit conectado al task lifecycle (marca current task DEAD)
+✓ sys_mkdir / sys_rmdir / sys_unlink / sys_rename (wrappers VFS)
+✓ sys_getdents (drena vfs_readdir, layout linux_dirent64)
+✓ sys_open de directorios en O_RDONLY (read directo -> EISDIR; usar getdents)
+✓ write con offset real (cerrado en TCC prep Path 1 — sys_write hace
+  read-modify-write con scratch kmalloc'd cuando offset != EOF)
+✓ errno exportado a userland (libc convierte -errno → errno + return
+  -1 en cada wrapper; FASE 7)
 
-### FASE 4.5 — Memory management — CERRADA (excepto growth + fault handler)
+### FASE 4.5 — Memory management — CERRADA
 Pre-requisito de FASE 6 (ring3) y FASE 7 (libc).
 
-OK physical memory manager
+✓ physical memory manager
   - parsea limine_memmap_request + hhdm_request
   - bitmap (1 bit/página de 4KB) en la primera región USABLE grande
   - pmm_alloc_page / pmm_free_page con hint O(1) amortizado
   - /sys/meminfo expone mem total/used/free kB
-OK virtual memory manager + paging propio
+✓ virtual memory manager + paging propio
   - clona el PML4 de Limine en kernel_pml4 + switch CR3 (control de paging)
   - vmm_map / vmm_unmap / vmm_lookup walk de 4 niveles (PML4 -> PDPT -> PD -> PT)
   - intermediate tables P|W|U allocadas on-demand desde PMM
   - invlpg después de cada modificación
   - /sys/meminfo expone pml4 entries used/total
-OK heap kernel real
+✓ heap kernel real
   - 16 páginas iniciales (64 KB) mapeadas en KHEAP_VIRT_BASE = 0xffffc00000000000
   - free-list singly-linked first-fit con split + coalesce con next/prev
   - kmalloc 8-byte aligned; kfree(NULL) y kmalloc(0) edge cases
@@ -336,28 +351,29 @@ OK heap kernel real
     correcto en boundary 2048/2049, VA-range check, burst de 100
     × 64 B verifica grow + slots_used, baseline restaurado tras
     free-all, slab_grow_oom=0). Total: **603 tests pass / 0 fail**.
-OK address spaces por proceso
+✓ address spaces por proceso
   - address_space_create: clona high-half de kernel_pml4, low-half vacío
   - address_space_destroy: walk low half + free user pages + intermediate tables + PML4
   - kernel siempre visible (high half compartido por todas las AS)
   - task_t.pml4 (NULL = usa kernel_pml4); switch CR3 viene en FASE 6 con ring3
-OK copy_from_user / copy_to_user (skeleton)
+✓ copy_from_user / copy_to_user (skeleton)
   - validan rango: user pointer debe quedar por debajo de OSNOS_USER_VIRT_MAX = 0x0000800000000000
   - hoy son memcpy directo; falla bonita ante unmapped page necesita fault handler (FASE 6)
-TODO reemplazar arrays estáticos en ramfs/ipc/fd con allocations dinámicas
-TODO page fault handler con extable (para que copy_*_user no triple-faulte)
+☐ reemplazar arrays estáticos en ramfs/ipc/fd con allocations dinámicas
+✓ page fault handler con extable (cerrado en FASE 6.3c — copy_*_user
+  ya no triple-faulta; extable.{c,h} redirige a recovery_rip)
 
 (SMAP/SMEP, KPTI, NX everywhere, COW, ASLR -> ROADMAP_APENDICE.md)
 
 ### FASE 5 — Userland (mínima, todavía ring0) — CERRADA
-OK 24. pseudo-userland: tasks que corren un trampoline + builtin_main
-OK 25. builtins built-in en /bin (binfs synthetic RO; hello, echo, true, false, init)
-OK 26. exec interno: proc_exec("/bin/PROG", "args") + cmd_exec en shell
-OK 27. mini init: builtin /bin/init exposed (kmain sigue siendo el init real)
-OK IPC_PROC_EXITED desde la trampoline -> shell defiere prompt hasta que el child termina
-OK builtin /bin/cat (open + read loop + write + close — ejercita la syscall ABI completa)
+✓ 24. pseudo-userland: tasks que corren un trampoline + builtin_main
+✓ 25. builtins built-in en /bin (binfs synthetic RO; hello, echo, true, false, init)
+✓ 26. exec interno: proc_exec("/bin/PROG", "args") + cmd_exec en shell
+✓ 27. mini init: builtin /bin/init exposed (kmain sigue siendo el init real)
+✓ IPC_PROC_EXITED desde la trampoline -> shell defiere prompt hasta que el child termina
+✓ builtin /bin/cat (open + read loop + write + close — ejercita la syscall ABI completa)
 
-OK ABI de filesystem completa para builtins:
+✓ ABI de filesystem completa para builtins:
    - sys_mkdir / sys_rmdir / sys_unlink / sys_rename (Linux numbers: 83/84/87/82)
    - sys_getdents (Linux 217) con osnos_dirent_t layout-compatible con linux_dirent64
    - sys_open de directorios en modo RDONLY (read directo -> EISDIR; usar getdents)
@@ -372,19 +388,19 @@ PENDIENTE (opcional) migrar handlers del shell (cmd_ls/cmd_mkdir/etc) a
   cuando llegue FASE 10 (servers a userspace) — antes no se nota.
 
 ### FASE 6 — ELF + ring3 — CERRADA
-OK 29a. GDT propia: null, kcode (0x08), kdata (0x10), ucode (0x18|3), udata (0x20|3)
+✓ 29a. GDT propia: null, kcode (0x08), kdata (0x10), ucode (0x18|3), udata (0x20|3)
        reload con far return; ds/es/ss/fs/gs apuntando a kdata
-OK 29b. IDT con 256 entries (4 KiB), gates de interrupción long-mode (type 0x8E)
+✓ 29b. IDT con 256 entries (4 KiB), gates de interrupción long-mode (type 0x8E)
        handlers en clang __attribute__((interrupt))
        generic catch-all + específicos para #PF (con CR2), #GP, #DF, #UD, etc.
        panic header al framebuffer en rojo, hlt (ya no triple-fault)
        /sys/meminfo expone exceptions count
-OK 29c. TSS instalado (16-byte descriptor en GDT slots 5-6, selector 0x28)
+✓ 29c. TSS instalado (16-byte descriptor en GDT slots 5-6, selector 0x28)
        RSP0 apunta a kernel_stack[16384] alineado a 16
        IOPB offset = sizeof(tss) (sin permisos de I/O desde ring 3)
        ltr ejecutado; tr_now == 0x28 verificado
        tss_set_rsp0 listo para per-task switching en FASE 6.3
-OK 6.3a primer salto a ring 3 (comando `ring3` one-shot) — VERIFICADO en QEMU
+✓ 6.3a primer salto a ring 3 (comando `ring3` one-shot) — VERIFICADO en QEMU
    - address_space_create + 2 user pages (code RX, stack RW)
    - kstack 16KB vía kmalloc -> tss_set_rsp0
    - iretq frame (SS=0x23, CS=0x1b, RFLAGS=0x202) -> CPL=3
@@ -393,7 +409,7 @@ OK 6.3a primer salto a ring 3 (comando `ring3` one-shot) — VERIFICADO en QEMU
    - IDT[3] y IDT[4] con DPL=3 (int3/into callable desde ring 3, convención Linux)
    - Validado: GDT user selectors / TSS.RSP0 / IDT desde user / AS user-kernel split
 
-OK 6.4a syscall ABI desde ring 3 vía `int 0x80` (Linux legacy ABI) — VERIFICADO en QEMU
+✓ 6.4a syscall ABI desde ring 3 vía `int 0x80` (Linux legacy ABI) — VERIFICADO en QEMU
    - IDT[0x80] DPL=3 → handler `int80_entry` (file-scope asm en src/micro/int80.c)
    - stub pushea syscall_frame_t (rax, rdi, rsi, rdx, r10, r8, r9) en orden del struct
    - alinea stack a 16 (rbp save), llama int80_dispatch_wrapper(frame)
@@ -404,7 +420,7 @@ OK 6.4a syscall ABI desde ring 3 vía `int 0x80` (Linux legacy ABI) — VERIFICA
    - Comando `ring3hello` arma el AS, entra a ring 3, imprime desde CPL=3 vía VFS,
      vuelve al shell limpio (gracias a 6.3b.1)
 
-OK 6.3b.1 scheduler resume primitive (setjmp/longjmp ad-hoc) — VERIFICADO en QEMU
+✓ 6.3b.1 scheduler resume primitive (setjmp/longjmp ad-hoc) — VERIFICADO en QEMU
    - scheduler_loop() es el for(;;) eterno con resume point guardado adentro
      (savea RIP via lea label, RSP, RBP, RBX, R12-R15). Función no retorna nunca
      para que el frame se mantenga vivo en el stack
@@ -417,7 +433,7 @@ OK 6.3b.1 scheduler resume primitive (setjmp/longjmp ad-hoc) — VERIFICADO en Q
    - Pieza fundacional: cuando 6.3b lleguen user tasks reales, mismo mecanismo
      se reusa para task lifecycle (task DEAD via fault o sys_exit)
 
-OK 6.3b user tasks integrados al scheduler de primera
+✓ 6.3b user tasks integrados al scheduler de primera
    - task_t.kernel_stack_top (16 KiB via kmalloc), pml4 != NULL marca "user task"
    - builtin_t extended: kernel builtin (main fn) o user builtin (code blob)
    - task_create_user en proc/exec.c: AS + code page (PTE_U) + stack page (PTE_W|PTE_U)
@@ -431,7 +447,7 @@ OK 6.3b user tasks integrados al scheduler de primera
    - Memory leak conocido: el kstack del user task no se libera (estamos corriendo sobre él);
      reaper de DEAD tasks lo limpia (TODO de cleanup, no funcional)
 
-OK 6.3c page fault handler con extable — VERIFICADO en QEMU
+✓ 6.3c page fault handler con extable — VERIFICADO en QEMU
    - src/micro/extable.{c,h}: tabla {rip_start, rip_end, recovery_rip}
      con extable_register / extable_lookup (linear scan, max 16 entries)
    - src/micro/uaccess.c reescrito: __uaccess_copy_bytes en file-scope asm,
@@ -452,7 +468,7 @@ OK 6.3c page fault handler con extable — VERIFICADO en QEMU
      página unmapped en low half (0x10000) → EFAULT vía extable
    - /bin/ring3fault user builtin: prints announce + deref 0xdead;
      el shell sobrevive y sigue con prompt
-OK 6.3d reaper de DEAD tasks
+✓ 6.3d reaper de DEAD tasks
    - src/micro/reaper.{c,h}: cola de 16 kstacks pendientes + task_reap_dead
    - task_t.kernel_stack_base guardado al crear el user task; pasado al
      reaper en proc_exit_current_user (sys_exit y fault path)
@@ -460,7 +476,7 @@ OK 6.3d reaper de DEAD tasks
      pendiente + reset de slots DEAD → UNUSED (ps/ /sys/tasks limpios)
    - /sys/meminfo expone "reaped tasks" y "reaper leaks" counters
    - test: N exec /bin/ring3hello sin crecimiento monotónico de kheap
-OK 6.4b SYSCALL/SYSRET MSRs (STAR, LSTAR, FMASK) — verificado en QEMU
+✓ 6.4b SYSCALL/SYSRET MSRs (STAR, LSTAR, FMASK) — verificado en QEMU
    - GDT reorganizado: udata 0x18 antes que ucode 0x20 (SYSRET ordering)
    - src/micro/syscall_msr.{c,h}: habilita EFER.SCE + escribe STAR/LSTAR/FMASK
      - STAR  = (GDT_KDATA << 48) | (GDT_KCODE << 32)
@@ -474,7 +490,7 @@ OK 6.4b SYSCALL/SYSRET MSRs (STAR, LSTAR, FMASK) — verificado en QEMU
      (mismo dispatcher, ambos paths probados)
    - 3 asserts nuevos en cmd_test: EFER.SCE, STAR[47:32], STAR[63:48]
 
-OK 28 ELF64 loader simple — verificado en QEMU
+✓ 28 ELF64 loader simple — verificado en QEMU
    - src/include/osnos_elf.h: Elf64_Ehdr / Elf64_Phdr + constantes
      (ET_EXEC, EM_X86_64, PT_LOAD, PF_X/W/R) layout Linux-compatible
    - src/proc/elf.c: elf_load(blob, size, *pml4, *entry, *stack_top)
@@ -491,14 +507,14 @@ OK 28 ELF64 loader simple — verificado en QEMU
    - 5 asserts nuevos en cmd_test: magic, truncated, hello_elf load + entry + stack
 
 ### FASE 7 — libc — CERRADA (mini-libc local)
-OK SYS_BRK = 12 (Linux number) en syscall.h + sys_brk en syscall.c
+✓ SYS_BRK = 12 (Linux number) en syscall.h + sys_brk en syscall.c
    - task_t.heap_start / heap_brk; USER_HEAP_BASE = 0x10000000
    - grow: pmm_alloc + vmm_map (PTE_W|PTE_U) zero-filled; rollback on OOM
    - shrink: vmm_unmap + pmm_free pages above new_brk
    - brk(0) query; out-of-range refusal returns current break
    - 8 asserts nuevos en cmd_test (query, grow 1 page, grow 2 pages,
      shrink, refused below heap_start, refused into kernel)
-OK lib/libc/ — mini-libc local linked into user ELFs
+✓ lib/libc/ — mini-libc local linked into user ELFs
    - include/: stdio.h, stdlib.h, string.h, unistd.h, fcntl.h,
      errno.h, sys/{types,stat}.h
    - crt0.S: _start → main(0, NULL, NULL) → _exit(rc)
@@ -515,14 +531,14 @@ OK lib/libc/ — mini-libc local linked into user ELFs
    - errno.c: global int errno
    - Build: libosnos_c.a (ar) + crt0.S.o separate; linker script
      places .text first then crt0 then main + libc
-OK toolchain Makefile
+✓ toolchain Makefile
    - USER_ELF_SRCS (bare) y USER_ELF_LIBC_SRCS (con libc) separados
    - pattern rule específico para user_hello.elf (sin libc); pattern
      genérico para *.elf con libc + crt0
-OK /bin/hello_libc — primer ELF que usa libc: printf con varargs +
+✓ /bin/hello_libc — primer ELF que usa libc: printf con varargs +
    malloc/strcpy/puts/free + formatos %x %o %d %u %p %s
 
-OK FASE 7.6: /bin/calc + /bin/osh — primeros programas de verdad
+✓ FASE 7.6: /bin/calc + /bin/osh — primeros programas de verdad
    - /bin/calc: evaluador de expresiones aritméticas enteras (signed 64-bit).
      Lexer + recursive-descent parser inline; soporta + - * / % ()
      y unary minus con precedencia correcta. Concatena argv[1..] y
@@ -549,7 +565,7 @@ OK FASE 7.6: /bin/calc + /bin/osh — primeros programas de verdad
      ') tanto del contenido como del filename. `echo "a b" > foo`
      ahora escribe `a b\n` en `foo`, no `"a b"\n`.
 
-OK FASE 7.5: argv passing + migración de tools a libc ELF
+✓ FASE 7.5: argv passing + migración de tools a libc ELF
    - build_argv_block en proc/exec.c: tokeniza args y arma el bloque
      System V x86_64 (argc, argv[], NULL, NULL_envp, strings) en el
      top del stack page user, escribiendo via HHDM
@@ -574,7 +590,7 @@ OK FASE 7.5: argv passing + migración de tools a libc ELF
      cortados en la última letra). Ahora opendir/readdir devuelven los
      d_name completos.
 
-OK FASE 7.7 — libc Tier 1 (pre-networking) — VERIFICADO en QEMU
+✓ FASE 7.7 — libc Tier 1 (pre-networking) — VERIFICADO en QEMU
    42 PASS / 0 FAIL via `exec /bin/libctest`. Pensado para tener la
    superficie de POSIX lista para cuando aterrice networking en FASE
    8.5 (post-FAT) — los slots están reservados pero los syscalls
@@ -687,7 +703,7 @@ OK FASE 7.7 — libc Tier 1 (pre-networking) — VERIFICADO en QEMU
 
 ### FASE 8 — Disco real — CERRADA
 
-OK 8.1 ATA PIO block driver — VERIFICADO en QEMU
+✓ 8.1 ATA PIO block driver — VERIFICADO en QEMU
    - src/drivers/block_ata.{c,h}: driver PIO @ Primary IDE (0x1F0/0x3F6),
      LBA28. `block_ata_init()` corre IDENTIFY (cmd 0xEC), parsea sector
      count (words 60..61) + model (words 27..46 byte-swapped). Sin DMA,
@@ -702,7 +718,7 @@ OK 8.1 ATA PIO block driver — VERIFICADO en QEMU
    - sysfs nuevo: /sys/disks (model + sectors + bytes); /sys/mounts ya
      listaba /sd automáticamente vía longest-prefix.
 
-OK 8.1 wiring QEMU + sd.img — VERIFICADO en QEMU
+✓ 8.1 wiring QEMU + sd.img — VERIFICADO en QEMU
    - GNUmakefile: target `sd.img` que crea imagen de 16 MiB via mtools
      (mformat + mcopy con seeds README.TXT y HELLO.TXT). Sin sudo /
      sin loopback mount.
@@ -714,7 +730,7 @@ OK 8.1 wiring QEMU + sd.img — VERIFICADO en QEMU
      wired. Diagnosticado vía `info qtree` en monitor QEMU al ver
      que `/sys/disks` no detectaba nada con q35.
 
-OK 8.2 FAT16 parser (read-only) — VERIFICADO en QEMU
+✓ 8.2 FAT16 parser (read-only) — VERIFICADO en QEMU
    - src/fs/fat.{c,h}: parser puro sobre block_ata.
    - fat_init: lee sector 0, valida boot signature 0x55AA + BPB,
      calcula fat_lba / root_dir_lba / data_lba. Rechaza FAT12 y FAT32
@@ -729,7 +745,7 @@ OK 8.2 FAT16 parser (read-only) — VERIFICADO en QEMU
    - fat_readdir: cursor lineal opaco; skip de 0xE5 / LFN / volume label.
    - Solo 8.3 short names. LFN se ignora silenciosamente.
 
-OK 8.3 VFS adapter — VERIFICADO en QEMU
+✓ 8.3 VFS adapter — VERIFICADO en QEMU
    - src/fs/fat_vfs.{c,h}: const vfs_ops_t fat_vfs_ops. Strip de "/sd"
      antes de delegar al parser. Esconde "." y ".." en readdir (convención
      POSIX/VFS).
@@ -738,7 +754,7 @@ OK 8.3 VFS adapter — VERIFICADO en QEMU
    - `cat /sd/README.TXT` imprime "hola desde el disco".
    - `ls /sd` lista README.TXT + HELLO.TXT.
 
-OK 8.4 FAT write support — VERIFICADO en QEMU (round-trip + reboot persistence)
+✓ 8.4 FAT write support — VERIFICADO en QEMU (round-trip + reboot persistence)
    - fat_set_entry: setea FAT[c] = value en TODAS las copias del FAT
      (mirror). Sin esto cada write rompe consistencia y fsck explota.
    - fat_alloc_cluster: scan lineal desde cluster 2, primer free claimea
@@ -771,7 +787,7 @@ OK 8.4 FAT write support — VERIFICADO en QEMU (round-trip + reboot persistence
    - fat_vfs_ops migrado: write/append/mkdir/rmdir/unlink ya no son
      EROFS. .rename = NULL.
 
-OK 8.5 fsck minimal — VERIFICADO en QEMU (read-only audit)
+✓ 8.5 fsck minimal — VERIFICADO en QEMU (read-only audit)
    - src/fs/fat.c: fat_fsck_report(out, out_size). Audit pasivo, nunca
      escribe a disco.
    - Cluster leak detection: bitmap estático de 8 KiB en BSS
@@ -800,12 +816,12 @@ OK 8.5 fsck minimal — VERIFICADO en QEMU (read-only audit)
      incluido) e imprime: files / dirs / clusters free|used|bad /
      mirror / cross-links / leaks / size mismatches / bad refs.
 
-TODO opcional fsck repair-mode — pendiente
+☐ opcional fsck repair-mode — pendiente
    - Hoy es read-only audit. Una pasada que (a) libere clusters leaked,
      (b) trunque chains con cross-links, (c) escriba FAT[0] sobre los
      espejos divergentes sería el siguiente paso natural.
 
-OK 8.6 rename in-place — VERIFICADO en QEMU
+✓ 8.6 rename in-place — VERIFICADO en QEMU
    - fat_rename_path(src, dst): expuesto vía fat_vfs_ops.rename, así
      que `mv` dentro de /sd ya no cae al fallback copy+unlink del VFS
      (que truncaba archivos > VFS_COPY_BUF_SIZE = 1024 B sin avisar).
@@ -822,7 +838,7 @@ OK 8.6 rename in-place — VERIFICADO en QEMU
    - Comparación same-parent vía src_parent.first_cluster ==
      dst_parent.first_cluster (root sentinel = 0 ambos lados).
 
-OK 8.7 LFN read-side — VERIFICADO en QEMU
+✓ 8.7 LFN read-side — VERIFICADO en QEMU
    - LFN constants (LFN_SEQ_LAST=0x40, LFN_SEQ_MASK=0x1F,
      LFN_CHARS_PER_SLOT=13, LFN_MAX_SEQ=5) y helpers nuevos:
      lfn_checksum_11 (rotate-right-add sobre el 8.3), lfn_extract_chars
@@ -847,7 +863,7 @@ OK 8.7 LFN read-side — VERIFICADO en QEMU
      ese nombre (case-insensitive) andó, y `cat /sd/MYLONG~1.TXT`
      también (8.3 alias sigue funcionando).
 
-OK 8.7.1 bugfix shell: strip de outer quotes en make_absolute_path
+✓ 8.7.1 bugfix shell: strip de outer quotes en make_absolute_path
    - Hoy `cat "/sd/file with spaces"` fallaba porque cmd_cat (y todos
      los handlers que toman un path) pasan args literal a
      make_absolute_path. Las comillas se trataban como prefijo no-/,
@@ -859,7 +875,7 @@ OK 8.7.1 bugfix shell: strip de outer quotes en make_absolute_path
      comando que usa make_absolute_path. cmd_echo ya tenía su propio
      strip_outer_quotes para el filename de redirección, sin conflicto.
 
-OK 8.8 LFN write-side — VERIFICADO en QEMU (258 PASS / 0 FAIL en cmd_test)
+✓ 8.8 LFN write-side — VERIFICADO en QEMU (258 PASS / 0 FAIL en cmd_test)
    - name_to_83 ahora rechaza explícitamente espacios y un segundo '.'
      en el componente, así que esos nombres caen automáticamente al
      path LFN en vez de generar dirent inválidos. Mayúsculas se
@@ -904,14 +920,14 @@ OK 8.8 LFN write-side — VERIFICADO en QEMU (258 PASS / 0 FAIL en cmd_test)
      así que `cat /sd/MYLONG~1.TXT` funciona tanto como
      `cat "/sd/My Long Filename.txt"`.
 
-OK 8.8 shell quote stripping
+✓ 8.8 shell quote stripping
    - make_absolute_path strippea pair de outer quotes (single o double)
      + trailing whitespace antes del check absoluto/relativo. Permite
      `cat "/sd/My Long Filename.txt"` desde el shell. Beneficia todos
      los handlers que pasan args a make_absolute_path (cat/rm/touch/
      mkdir/rmdir/tree/ls/cd).
 
-OK 8.9 self-test extendido — VERIFICADO en QEMU
+✓ 8.9 self-test extendido — VERIFICADO en QEMU
    - cmd_test extendido con ~38 asserts FAT en su propio sandbox
      /sd/__fattest. Pre-clean + post-clean para re-ejecución limpia.
    - Cubre: read seed 8.3, read seed LFN (case-insensitive + alias),
@@ -930,7 +946,7 @@ OK 8.9 self-test extendido — VERIFICADO en QEMU
    IPv6 / DHCP / TLS movidos a ROADMAP_APENDICE.md.)
 
 
-OK 8.5.1 PCI scan + RTL8139 driver — VERIFICADO en QEMU
+✓ 8.5.1 PCI scan + RTL8139 driver — VERIFICADO en QEMU
    - src/micro/pmm.c: pmm_alloc_pages_contig(n_pages). Linear scan
      del bitmap buscando run de N free bits. O(total_pages*n_pages) en
      worst case; aceptable porque sólo se usa para buffers DMA al boot.
@@ -974,7 +990,7 @@ OK 8.5.1 PCI scan + RTL8139 driver — VERIFICADO en QEMU
      QEMU), io_base 0xc000, irq_line 11. Sin tráfico al boot,
      irqs=0 esperado (se van a mover en 8.5.2 cuando enviemos ARP).
 
-OK 8.5.2 Ethernet + ARP — VERIFICADO en QEMU
+✓ 8.5.2 Ethernet + ARP — VERIFICADO en QEMU
    - src/drivers/rtl8139: extendido con rtl8139_set_rx_callback. El
      drain_rx llama el callback registrado pasando el frame ya sin
      el trailer CRC. Callback corre en IRQ context con IRQs enabled.
@@ -1016,7 +1032,7 @@ OK 8.5.2 Ethernet + ARP — VERIFICADO en QEMU
    - Verificado: `arp` desde shell → /sys/net muestra
      tx_packets/rx_packets/irqs incrementados, /sys/arp lista
      10.0.2.2 con su MAC.
-OK 8.5.3 IPv4 + ICMP echo — VERIFICADO en QEMU
+✓ 8.5.3 IPv4 + ICMP echo — VERIFICADO en QEMU
    - src/net/ip.{c,h}: header de 20 bytes (sin opciones, IHL=5), TTL
      fijo en 64. Routing trivial: si dst está en el mismo /24 que
      local_ip → ARP del dst; si no → ARP del gateway. ip_send
@@ -1044,7 +1060,7 @@ OK 8.5.3 IPv4 + ICMP echo — VERIFICADO en QEMU
      resolve, 0ms con cache) y ping a 10.0.2.3 (DNS slirp) andando.
      ping a 10.0.2.15 (self) hace timeout — esperado: el chip no
      devuelve sus propios frames y slirp tampoco bouncea localhost.
-OK 8.5.4a UDP layer + kernel socket API — VERIFICADO en QEMU
+✓ 8.5.4a UDP layer + kernel socket API — VERIFICADO en QEMU
    - src/net/udp.{c,h}: header 8 bytes (sports, dport, length, cs BE).
      udp_compute_checksum arma pseudo-header (src/dst IP + 0 + proto17
      + udp length) seguido del segmento UDP, reusa ip_checksum. Sender
@@ -1079,7 +1095,7 @@ OK 8.5.4a UDP layer + kernel socket API — VERIFICADO en QEMU
      OSnOS muestra "rx 10.0.2.2:NNNNN [hola.]" — 3 datagrams seguidos
      con source ports random vía slirp NAT.
 
-OK 8.5.4b Linux socket syscalls + libc + udptest ELF — VERIFICADO en QEMU
+✓ 8.5.4b Linux socket syscalls + libc + udptest ELF — VERIFICADO en QEMU
    - osnos_status_t extendido con códigos Linux errno de networking:
      ENOTSOCK=88, EPROTONOSUPPORT=93, EAFNOSUPPORT=97, EADDRINUSE=98,
      EADDRNOTAVAIL=99, ENETDOWN=100, ECONNRESET=104, ETIMEDOUT=110,
@@ -1120,7 +1136,7 @@ OK 8.5.4b Linux socket syscalls + libc + udptest ELF — VERIFICADO en QEMU
      correcto. Linux ABI invariant preservado: los números de syscall
      y la struct sockaddr_in son idénticos a Linux x86_64.
 
-OK 8.5.5a TCP handshake (passive) — VERIFICADO en QEMU
+✓ 8.5.5a TCP handshake (passive) — VERIFICADO en QEMU
    - src/net/tcp.{c,h}: header 20 bytes + flags FIN/SYN/RST/PSH/ACK/URG,
      tcp_state_t enum con los 11 estados de RFC 793.
    - tcp_compute_checksum: pseudo-header (src/dst IP + 0 + proto=6 +
@@ -1153,7 +1169,7 @@ OK 8.5.5a TCP handshake (passive) — VERIFICADO en QEMU
      "connection from 10.0.2.2:NNNNN — handshake OK, sending RST"
      y nc ve el RST inmediato.
 
-OK 8.5.5b TCP data transfer + graceful close — VERIFICADO en QEMU
+✓ 8.5.5b TCP data transfer + graceful close — VERIFICADO en QEMU
    - sock_t extendido con byte ring `tcp_rx[4096]` + zombie/peer_fin
      flags. SOCK_TCP_RX_BUF = 4096, TCP_MSS = 1400.
    - sock_tcp_handle_segment recibe ahora `(payload, payload_len)` y
@@ -1191,7 +1207,7 @@ OK 8.5.5b TCP data transfer + graceful close — VERIFICADO en QEMU
    Gotcha documentado: nc BSD (macOS) no tiene `-N`; usar `-w2` para
    que cierre por timeout o `( ... ; sleep 1 ) | nc ...` para EOF
    programado.
-OK 8.5.5c TCP listen+accept + child sockets + /bin/echotcp — VERIFICADO en QEMU
+✓ 8.5.5c TCP listen+accept + child sockets + /bin/echotcp — VERIFICADO en QEMU
    - sock_t extiende con parent_sd (-1 normal, índice al LISTEN si es
      child), accept_q[4] (ring de child sds en ESTABLISHED pendientes
      de accept), backlog cap.
@@ -1223,7 +1239,7 @@ OK 8.5.5c TCP listen+accept + child sockets + /bin/echotcp — VERIFICADO en QEM
      127.0.0.1 8080` desde Mac → OSnOS imprime cada conexión con peer
      IP:port y el mensaje recibido; cada nc del Mac ve el echo y cierra
      limpio. accept se reusa con cada conexión, sin leaks de slots.
-OK 8.5.6 select() + setsockopt + cooperative yield — VERIFICADO en QEMU
+✓ 8.5.6 select() + setsockopt + cooperative yield — VERIFICADO en QEMU
    - Status nuevo: OSNOS_EINTR=4. Para syscalls interrumpibles.
    - Syscall numbers: SYS_SELECT=23, SYS_SETSOCKOPT=54 (Linux x86_64).
    - sys_select (kernel) es **non-blocking single-pass**: hace un
@@ -1265,7 +1281,7 @@ OK 8.5.6 select() + setsockopt + cooperative yield — VERIFICADO en QEMU
    - Verificado: nc desde Mac llega, OSnOS imprime el peer y echoea;
      tipear una tecla en QEMU termina selecttest limpio; re-correr
      `exec /bin/selecttest` rebindea sin EADDRINUSE.
-OK 8.5.7 getaddrinfo no-DNS + /bin/selectserver — VERIFICADO en QEMU
+✓ 8.5.7 getaddrinfo no-DNS + /bin/selectserver — VERIFICADO en QEMU
    - lib/libc/include/netdb.h: struct addrinfo (Linux layout), flags
      AI_PASSIVE / AI_NUMERICHOST / AI_CANONNAME, EAI_* error codes,
      getaddrinfo / freeaddrinfo / gai_strerror prototypes.
@@ -1296,7 +1312,7 @@ OK 8.5.7 getaddrinfo no-DNS + /bin/selectserver — VERIFICADO en QEMU
      Linux ABI compat (números syscall, struct sockaddr_in,
      errno values, fd_set layout) se mantuvo desde FASE 4 sin grietas.
 
-OK 8.5.8 TCP connect() / SYN_SENT / outbound — VERIFICADO en QEMU
+✓ 8.5.8 TCP connect() / SYN_SENT / outbound — VERIFICADO en QEMU
    - State machine extiende con TCP_SYN_SENT:
      - Recibe SYN-ACK válido (ack == snd_nxt) → ACK back, ESTABLISHED.
      - Recibe SYN sin ACK (simultaneous open) → SYN_RCVD, SYN-ACK back.
@@ -1322,7 +1338,7 @@ OK 8.5.8 TCP connect() / SYN_SENT / outbound — VERIFICADO en QEMU
    - **MILESTONE**: el surface socket completo (passive + active open
      + data + close + multiplex) está cubierto. Cualquier programa
      BSD-sockets que use IP literal compila y corre.
-OK 8.5.9 DNS resolver + getaddrinfo con nombres — VERIFICADO en QEMU
+✓ 8.5.9 DNS resolver + getaddrinfo con nombres — VERIFICADO en QEMU
    - lib/libc/resolver.{c,h} (privado, no se exporta en includes/):
      - dns_encode_name: "google.com" → "\7google\3com\0".
      - dns_skip_name: walk de labels + soporte de compression
@@ -1352,7 +1368,7 @@ OK 8.5.9 DNS resolver + getaddrinfo con nombres — VERIFICADO en QEMU
      programa BSD-sockets que use getaddrinfo/connect/recv compila
      y resuelve nombres reales vía DNS.
 
-OK 8.5.10 /bin/httpd HTTP/1.0 server — VERIFICADO en QEMU
+✓ 8.5.10 /bin/httpd HTTP/1.0 server — VERIFICADO en QEMU
    Multi-cliente: probado con curl en loop (5+), F5 spam en
    Firefox/Safari, cliente browser real renderizando el HTML con CSS.
    - tests/httpd.c: bind+listen TCP port 80 (default), accept loop
@@ -1386,7 +1402,7 @@ OK 8.5.10 /bin/httpd HTTP/1.0 server — VERIFICADO en QEMU
      gracias al fix volatile/memory-barrier — sin el fix, accept
      se quedaba pegado a partir de la segunda conexión.
 
-OK 8.5.11 TCP retransmisión + RTO + tests — VERIFICADO en QEMU
+✓ 8.5.11 TCP retransmisión + RTO + tests — VERIFICADO en QEMU
    - sock_t extiende con buffer de retx por socket: uint8_t
      retx_buf[TCP_MSS], uint16_t retx_len, uint32_t retx_seq,
      uint64_t retx_sent_ms, uint8_t retx_count. ~12 KiB de BSS extra
@@ -1428,7 +1444,7 @@ OK 8.5.11 TCP retransmisión + RTO + tests — VERIFICADO en QEMU
      puro state-machine inspection (no se requiere red real).
    - **Bug pendiente del httpd**: ya RESUELTO. Ver 8.5.10b.
 
-OK 8.5.10b httpd multi-curl bug post-mortem — RESUELTO
+✓ 8.5.10b httpd multi-curl bug post-mortem — RESUELTO
    Después de mucha investigación con instrumentación granular,
    resultó que NO era ni state machine, ni FD lifecycle, ni close
    prematuro. Era el **driver del RTL8139**.
@@ -1459,7 +1475,7 @@ OK 8.5.10b httpd multi-curl bug post-mortem — RESUELTO
      parece correcto, mirá el driver. Especialmente si los counters
      IP tx ≠ NIC tx (señal de eth_send fallando).
 
-OK 8.5.13 task-suspend para blocking syscalls — VERIFICADO en QEMU
+✓ 8.5.13 task-suspend para blocking syscalls — VERIFICADO en QEMU
    El problema: el busy-poll del kernel monopolizaba el CPU en CPL=0,
    los servers cooperativos (keyboard, shell) nunca podían correr, y
    por lo tanto Ctrl+C nunca llegaba al fg_pid durante accept/recv/
@@ -1492,7 +1508,7 @@ OK 8.5.13 task-suspend para blocking syscalls — VERIFICADO en QEMU
    - Verificado: `exec /bin/httpd` + 8 curls en sucesión (todas
      funcionando), luego Ctrl+C en QEMU → httpd matado limpiamente,
      vuelta al shell. Ya no se cuelga el sistema.
-OK 8.5.14 fd cleanup en kill/exit path — VERIFICADO en QEMU
+✓ 8.5.14 fd cleanup en kill/exit path — VERIFICADO en QEMU
    Cuando un task termina (sea por sys_exit, fault recovery, o Ctrl+C
    vía kill_pending), proc_exit_current_user ahora itera fds 3..MAX-1
    y los cierra antes del address-space teardown:
@@ -1504,7 +1520,7 @@ OK 8.5.14 fd cleanup en kill/exit path — VERIFICADO en QEMU
    Verificado: exec httpd → Ctrl+C → exec httpd otra vez → bind OK,
    sirve nuevas curls. La tabla fd queda completamente limpia.
 
-OK 8.5.X cleanup de instrumentación post-mortem — VERIFICADO en QEMU
+✓ 8.5.X cleanup de instrumentación post-mortem — VERIFICADO en QEMU
    Removidos los counters diagnostic introducidos durante la caza del
    bug 8.5.10b (RTL8139 tx-slot saturation):
    - g_free_udp_close / g_free_*_zombie / g_free_close_listen /
@@ -1526,7 +1542,7 @@ OK 8.5.X cleanup de instrumentación post-mortem — VERIFICADO en QEMU
  avanzado" — no bloquea nada del roadmap principal.)
 
 ### FASE kheap — Allocator robusto — CERRADA
-OK Fase A: kheap growth — VERIFICADO en QEMU
+✓ Fase A: kheap growth — VERIFICADO en QEMU
    - First-fit free list crece dinámicamente en chunks de 64 KiB
      (KHEAP_GROW_PAGES=16) cuando find-fit no encuentra block.
    - Cap a 4 MiB (KHEAP_MAX_BYTES). Si una request es mayor que el
@@ -1538,7 +1554,7 @@ OK Fase A: kheap growth — VERIFICADO en QEMU
    - Tests: 14 asserts KHEAP (96 KiB big alloc forzando grow, burst
      200×128B, verifica baseline tras free-all, peak high-water-mark).
 
-OK Fase B: slab allocator — VERIFICADO en QEMU
+✓ Fase B: slab allocator — VERIFICADO en QEMU
    - VA dedicada SLAB_VIRT_BASE=0xffffc00100000000, cap 4 MiB.
    - 8 buckets power-of-2: 16/32/64/128/256/512/1024/2048.
    - Slab page (4 KiB) con slab_hdr_t {magic, bucket_idx} al inicio,
@@ -1556,7 +1572,7 @@ OK Fase B: slab allocator — VERIFICADO en QEMU
    - **603 tests pass / 0 fail** combinando KHEAP + SLAB.
 
 ### FASE TTY — Line discipline + termios (1+2) — CERRADA
-OK TTY layer (src/micro/tty.{c,h}) — VERIFICADO en QEMU
+✓ TTY layer (src/micro/tty.{c,h}) — VERIFICADO en QEMU
    - struct osnos_termios layout-compatible con Linux x86_64 kernel
      ABI (NCCS=19). flags ICANON/ECHO/ECHOE/ISIG, c_iflag con
      ICRNL/IGNCR/INLCR, c_cc[VINTR/VQUIT/VERASE/VKILL/VEOF/...].
@@ -1593,7 +1609,7 @@ OK TTY layer (src/micro/tty.{c,h}) — VERIFICADO en QEMU
      5) Restaura termios original.
 
 ### FASE env passing + PATH — CERRADA
-OK Auto /bin/ prefix + ELF fallback en el shell
+✓ Auto /bin/ prefix + ELF fallback en el shell
    - cmd_exec: si path no empieza con '/', prepende "/bin/".
      `exec httpd` = `exec /bin/httpd`. Path absoluto sigue
      funcionando.
@@ -1602,7 +1618,7 @@ OK Auto /bin/ prefix + ELF fallback en el shell
      (`httpd<Enter>` corre `/bin/httpd`). Typos siguen mostrando
      "unknown command".
 
-OK envp end-to-end (kernel + libc + shell)
+✓ envp end-to-end (kernel + libc + shell)
    - **Kernel**: build_argv_block extendido para empaquetar argc /
      argv[] / envp[] / strings en la user stack (Linux SysV init
      layout). MAX_ENVP=32, total block cap 2 KiB. proc_execve
@@ -1632,7 +1648,7 @@ OK envp end-to-end (kernel + libc + shell)
      test. `envtest PATH` imprime "PATH=/bin". `envtest` solo lista
      todo lo inherited.
 
-OK libc exec family + execvp PATH walk
+✓ libc exec family + execvp PATH walk
    - **lib/libc/unistd.h**: declara `execv`, `execve`, `execvp` con
      la signatura POSIX.
    - **lib/libc/unistd.c**:
@@ -1651,7 +1667,7 @@ OK libc exec family + execvp PATH walk
      spawn de niños.
 
 ### FASE shell rc + history persistente — CERRADA
-OK .history (historial persistente) + .oshrc (startup script)
+✓ .history (historial persistente) + .oshrc (startup script)
    - **history_save** ahora hace vfs_append("/home/.history", line+"\n")
      después del push al ring en memoria. Guard `history_persistent`
      evita que el flag se grabe a sí mismo durante el load inicial.
@@ -1677,7 +1693,7 @@ OK .history (historial persistente) + .oshrc (startup script)
      "export VARS" automáticos.
 
 ### FASE Job control (Ctrl+Z / fg / bg / jobs) — CERRADA
-OK TASK_STOPPED + stop_pending
+✓ TASK_STOPPED + stop_pending
    - Nuevo estado `TASK_STOPPED` en `task_state_t`. Scheduler
      ya lo skipea (chequeo existente `state != TASK_READY`).
    - `task_t.stop_pending` (int): set por el TTY cuando entra
@@ -1686,7 +1702,7 @@ OK TASK_STOPPED + stop_pending
      y `sched_resume_jump()` — la task queda con `saved_iret_*`
      intacto, listo para reanudar al pasar a READY.
 
-OK VSUSP en TTY (Ctrl+Z = 0x1A por default)
+✓ VSUSP en TTY (Ctrl+Z = 0x1A por default)
    - `TTY_VSUSP = 10` agregado a c_cc indices.
    - `tty_init`: `c_cc[VSUSP] = 26` (^Z). Configurable via
      `tcsetattr` como cualquier control char.
@@ -1694,12 +1710,12 @@ OK VSUSP en TTY (Ctrl+Z = 0x1A por default)
      `tty_stop_signal()` que: set fg task's stop_pending,
      emite IPC_PROC_STOPPED al shell, bump signal counter.
 
-OK IPC_PROC_STOPPED + IPC_PROC_CONTINUED
+✓ IPC_PROC_STOPPED + IPC_PROC_CONTINUED
    - Nuevos opcodes 0x41 / 0x42 en `ipc.h`.
    - shell_server handler: si arg1 == fg_pid, drop fg_pid +
      pipeline_clear. Imprime "[pid] stopped" en gris claro.
 
-OK Shell builtins: jobs / fg / bg
+✓ Shell builtins: jobs / fg / bg
    - `jobs`: walk task table, lista user tasks con pml4 != NULL
      y state != UNUSED/DEAD, formato bash-like:
      `[pid] state  name`. Empacado en un IPC.
@@ -1713,7 +1729,7 @@ OK Shell builtins: jobs / fg / bg
      valida que sea user task STOPPED, fallback al "más reciente"
      (highest-pid heuristic).
 
-OK Probado en QEMU
+✓ Probado en QEMU
    - `sleep 30` + Ctrl+Z → `[N] stopped`.
    - `jobs` → lista entry.
    - `fg` → reanuda, sigue durmiendo.
@@ -1721,7 +1737,7 @@ OK Probado en QEMU
    - `bg` → reanuda en background, prompt vuelve.
 
 ### FASE mmap anónimo — CERRADA
-OK SYS_MMAP (#9) + SYS_MUNMAP (#11) — anonymous only
+✓ SYS_MMAP (#9) + SYS_MUNMAP (#11) — anonymous only
    - `sys_mmap(addr, len, prot, flags, fd, off)`:
      - Acepta `MAP_ANONYMOUS | MAP_PRIVATE` (o SHARED, mismo trato).
      - File-backed (`fd != -1` o sin MAP_ANONYMOUS): -ENOSYS.
@@ -1741,30 +1757,30 @@ OK SYS_MMAP (#9) + SYS_MUNMAP (#11) — anonymous only
      recyclable después de munmap pero VA no se reusa (bump
      allocator simple).
 
-OK Cleanup en proc_exit_current_user
+✓ Cleanup en proc_exit_current_user
    - Las páginas físicas las libera `address_space_destroy`
      porque viven en el pml4 del task. Bookkeeping se zerea
      para que un recycle del slot vea task limpio.
 
-OK libc + headers
+✓ libc + headers
    - `lib/libc/include/sys/mman.h` con PROT_* / MAP_* / MAP_FAILED.
    - `lib/libc/mman.c` wrappers thin sobre osnos_syscall6/2.
 
-OK Test /bin/mmaptest (12 checks)
+✓ Test /bin/mmaptest (12 checks)
    - mmap básico 12 KiB + zero-init verificado en 3 offsets.
    - Scribble + read-back todos los bytes.
    - munmap → re-mmap fresh memory está cero otra vez.
    - File-backed mmap rechazado con ENOSYS.
 
 ### FASE Multi-stage pipes + O_NONBLOCK runtime — CERRADA
-OK `proc_execve_pipeline(paths[], args[], n, envp, pids_out)` kernel
+✓ `proc_execve_pipeline(paths[], args[], n, envp, pids_out)` kernel
    - Reemplaza `proc_execve_pipe` (2-stage) por versión N-stage
      hasta MAX_PIPELINE_STAGES=4. Crea N-1 pipes, spawnea N tasks
      en orden, wira pipe_in/pipe_out por slot. Partial-failure
      teardown: kill_pending para los ya spawneados, close ambas
      refs de pipes creados.
 
-OK Shell parser N-stage en run_pipeline
+✓ Shell parser N-stage en run_pipeline
    - Reemplaza el split bipartito por NUL-separation de la línea
      completa en cada `|`. Tokeniza cada stage (cmd + args), valida
      que cada cmd resuelva a un ELF (mensaje claro con el nombre
@@ -1773,7 +1789,7 @@ OK Shell parser N-stage en run_pipeline
      scalar — `pipeline_owns_upstream(pid)` chequea contra el array
      en el IPC_PROC_EXITED handler para swallow silencioso.
 
-OK O_NONBLOCK runtime real (libc-side, sin syscall extra)
+✓ O_NONBLOCK runtime real (libc-side, sin syscall extra)
    - `lib/libc/unistd.c`: array static `_libc_nonblock[32]`. open()
      setea según flag; fcntl(F_SETFL) actualiza; close() limpia.
    - read() chequea el bit ANTES de loopear en EAGAIN. Si está
@@ -1787,7 +1803,7 @@ OK O_NONBLOCK runtime real (libc-side, sin syscall extra)
      osnos_fd_t.flags; el cache es una optimización para evitar
      fcntl(F_GETFL) en cada read.
 
-OK echo -e / -n (POSIX behavior)
+✓ echo -e / -n (POSIX behavior)
    - `elfs/tools/echo.c` ahora parsea flags coreutils-style.
    - `-e`: interpreta `\n`, `\t`, `\r`, `\b`, `\\`, `\"`, `\a`, `\0`.
      Sin esto el shell no podía emitir multilínea via echo, así que
@@ -1801,7 +1817,7 @@ OK echo -e / -n (POSIX behavior)
      `echo_unescape()` helper compartido entre el path "no
      redirect" y "redirect a archivo".
 
-OK Pipes + redirects mezclados — run_pipeline extendido
+✓ Pipes + redirects mezclados — run_pipeline extendido
    - **Primer stage** puede tener `< file` (stdin desde archivo).
    - **Último stage** puede tener `> file` o `>> file` (stdout a
      archivo). Pre-truncate el archivo de output cuando es `>` y
@@ -1822,13 +1838,13 @@ OK Pipes + redirects mezclados — run_pipeline extendido
      con ambos extremos redirected).
 
 ### FASE FXSAVE/FXRSTOR per-task — CERRADA
-OK Task struct field — task_t.fpu_state[512] aligned 16
+✓ Task struct field — task_t.fpu_state[512] aligned 16
    - Buffer FXSAVE/FXRSTOR-compatible embebido en task_t. El
      atributo `__attribute__((aligned(16)))` propaga a task_t
      mismo y el array static, así que cada slot del pool queda
      naturalmente alineado.
 
-OK Helpers en src/micro/fpu.{c,h}
+✓ Helpers en src/micro/fpu.{c,h}
    - `fpu_save(state)` — `fxsaveq (state)`.
    - `fpu_restore(state)` — `fxrstorq (state)`.
    - `fpu_state_init(state)` — FNINIT + LDMXCSR(0x1F80) + FXSAVE
@@ -1836,7 +1852,7 @@ OK Helpers en src/micro/fpu.{c,h}
      primer FXRSTOR de un task recién creado (sino FXRSTOR de
      bytes uninitialised podría tirar #XM).
 
-OK Hook en task_run_next
+✓ Hook en task_run_next
    - ANTES de buscar el próximo READY: snapshot el task saliente
      vía `fpu_save(prev->fpu_state)`. Los HW regs siguen con lo
      que el user dejó al entrar en kernel (timer IRQ o syscall);
@@ -1846,12 +1862,12 @@ OK Hook en task_run_next
      `fpu_restore(task->fpu_state)`. Same-task dispatch salta el
      restore (HW regs ya correctos).
 
-OK Seed en task_create_user_elf
+✓ Seed en task_create_user_elf
    - `fpu_state_init(t->fpu_state)` después de task_clear. Garantiza
      que la primera dispatch de un task fresh carga "FPU limpio"
      en vez de bytes uninitialised.
 
-OK printf %f / %g (libc enhancement)
+✓ printf %f / %g (libc enhancement)
    - `lib/libc/stdio.c`: agregado parse de precision (`.N`) y
      handler para `%f %F %g %G`. Round-half-up a `precision`
      dígitos (default 6). Split int / fractional vía `(long
@@ -1860,7 +1876,7 @@ OK printf %f / %g (libc enhancement)
    - Sin esto, /bin/fptest mostraba literal "a=%.6f" porque el
      vararg de double se consumía pero no se imprimía.
 
-OK ELF /bin/fptest para validación
+✓ ELF /bin/fptest para validación
    - `elfs/tests/fptest.c`: N rondas (default 200) de sin/cos/
      sqrt/fabs sobre valores semilla, con nanosleep(1ms) entre
      iteraciones para forzar preemption.
@@ -1871,7 +1887,7 @@ OK ELF /bin/fptest para validación
      el mismo `a=1.481451 b=1.001098 c=50.477837` bit-exact.
 
 ### FASE Shell pipes `cmd1 | cmd2` — CERRADA
-OK Pipe kernel object — src/micro/pipe.{c,h}
+✓ Pipe kernel object — src/micro/pipe.{c,h}
    - Pool estático de 16 `pipe_t`. Cada uno: ring buffer 4 KiB
      (POSIX PIPE_BUF mínimo), head/tail/level cursores, refcounts
      `ref_w` y `ref_r`.
@@ -1888,7 +1904,7 @@ OK Pipe kernel object — src/micro/pipe.{c,h}
      llegan a 0, el slot se libera al pool.
    - `pipe_init()` llamado desde kmain después de ipc_init.
 
-OK Task pipe endpoints — task_t.pipe_in / pipe_out
+✓ Task pipe endpoints — task_t.pipe_in / pipe_out
    - Punteros opcionales en `task_t`. Quien tiene `pipe_out !=
      NULL` es upstream (escribe al pipe); `pipe_in != NULL` es
      downstream (lee del pipe).
@@ -1899,7 +1915,7 @@ OK Task pipe endpoints — task_t.pipe_in / pipe_out
      endpoint para que el peer vea EOF/EPIPE en lugar de loop
      infinito en EAGAIN.
 
-OK proc_execve_pipe — helper kernel para spawnear pipeline
+✓ proc_execve_pipe — helper kernel para spawnear pipeline
    - `proc_execve_pipe(left_path, left_args, right_path, right_args,
      envp, left_pid_out)`:
      1. pipe_create() → pipe.
@@ -1909,7 +1925,7 @@ OK proc_execve_pipe — helper kernel para spawnear pipeline
    - Si left fail → cierra ambas refs (pipe libre). Si right fail
      → mata left + cierra ambas refs. Ningún recurso queda colgado.
 
-OK Shell parser y dispatch
+✓ Shell parser y dispatch
    - `run_command`: short-circuit por `|` antes que redirects o
      builtins. Split en el primer `|` (greedy), trim ambos lados,
      llama `run_pipeline`.
@@ -1922,7 +1938,7 @@ OK Shell parser y dispatch
      (no imprime "[pid] done"), mientras espera al downstream
      (que es el fg_pid).
 
-OK Limitaciones documentadas
+✓ Limitaciones documentadas
    - **Solo 2-stage** (`a | b`). `a | b | c` reporta error —
      necesitaría multi-stage pipeline scheduler.
    - Pipe sin redirects: `a < in.txt | b > out.txt` no parsea
@@ -1931,12 +1947,12 @@ OK Limitaciones documentadas
      Cuando lleguen per-task fd tables, exponer pipe(2) será un
      wrapper trivial.
 
-OK /bin/head ELF para probar pipes
+✓ /bin/head ELF para probar pipes
    - `head [-n N] [FILE]`: prime N líneas (default 10) de stdin
      o files. Útil para `cat /home/x.txt | head -n 2`.
 
 ### FASE Shell redirection (> >> <) — CERRADA
-OK Per-task stdin/stdout redirect path en task_t
+✓ Per-task stdin/stdout redirect path en task_t
    - `task_t` agrega `stdin_redir[OSNOS_PATH_MAX]`,
      `stdout_redir[OSNOS_PATH_MAX]`, `stdout_append`,
      `stdin_redir_off`, `stdout_redir_off`. Vacíos por default →
@@ -1947,14 +1963,14 @@ OK Per-task stdin/stdout redirect path en task_t
    - `sys_read(fd=0)`: si task->stdin_redir set, lee del archivo
      con offset tracking + retorna 0 (EOF) al exhaurirse.
 
-OK proc_execve_redir helper en src/proc/exec.{c,h}
+✓ proc_execve_redir helper en src/proc/exec.{c,h}
    - Wrapper sobre `proc_execve` que: pre-trunca/crea el stdout
      file (honra `>` vs `>>`), valida que stdin_path exista,
      spawnea via proc_execve, y mete los paths en el task struct
      del child antes de que arranque.
    - Fast path: si ningún redirect, mismo costo que proc_execve.
 
-OK Parser en cmd_exec del shell
+✓ Parser en cmd_exec del shell
    - `extract_redir(buf, op, out)`: tokenizador in-place. Busca
      `>>` antes que `>` para evitar swallowing. Soporta:
      `cmd > file`, `cmd >> file`, `cmd < file`, combinaciones.
@@ -1963,20 +1979,20 @@ OK Parser en cmd_exec del shell
    - Background (`&`) y redirects coexisten:
      `httpd > /home/log.txt &` funciona.
 
-OK Short-circuit en run_command
+✓ Short-circuit en run_command
    - Si la línea contiene `<` o `>`, salta el dispatch de shell
      builtins (que escriben al console directo, no honran
      redirects) y va al exec ELF. Solo activa si el primer token
      matchea un ELF registrado — typos siguen surfaceando
      "unknown command" claro.
 
-OK Fix de /bin/cat para leer stdin
+✓ Fix de /bin/cat para leer stdin
    - POSIX cat sin args lee stdin → stdout. Antes era "usage:
      cat FILE". Sin esto, `cat < file > other` no podía
      funcionar.
 
 ### FASE TCC prep (items 1-6) — CERRADA
-OK Path 1 — sys_write con offset real
+✓ Path 1 — sys_write con offset real
    - **src/micro/syscall.c**: refactor de `sys_write`. Si
      `f->offset == existing_size` (o O_APPEND): fast path
      `vfs_append`. Else: read-modify-write con scratch kmalloc'd:
@@ -1987,7 +2003,7 @@ OK Path 1 — sys_write con offset real
      truncaban. Nuevas APIs `ramfs_write_file_bin` /
      `ramfs_append_file_bin` con tamaño explícito.
 
-OK Path 2 — proc_execve acepta paths arbitrarios
+✓ Path 2 — proc_execve acepta paths arbitrarios
    - **src/proc/exec.c**: si path no es /bin/X (o no hay builtin),
      `vfs_stat` + `vfs_read` el ELF a un scratch kmalloc'd y
      pasa a `task_create_user_elf` como blob in-memory. Cap 2 MiB.
@@ -1995,13 +2011,13 @@ OK Path 2 — proc_execve acepta paths arbitrarios
    - Permite `exec /sd/home/myprog` ahora que TCC genera ELFs en
      disco.
 
-OK Path 3 — User stack 64 KiB
+✓ Path 3 — User stack 64 KiB
    - **src/proc/elf.c**: `USER_STACK_PAGES=16`, allocates 16
      páginas contiguas en `[0x7FFF0000, 0x80000000)`. Antes era
      1 página (4 KiB) — TCC necesita decenas de KiB para parsing
      recursivo.
 
-OK Path 4 — FPU init para ring-3
+✓ Path 4 — FPU init para ring-3
    - **src/micro/fpu.{c,h}** (nuevo): `fpu_init()` setea
      CR0.EM=0/MP=1/NE=1/TS=0 + CR4.OSFXSR=1/OSXMMEXCPT=1 + FNINIT +
      LDMXCSR(0x1F80). Llamado desde `kmain` post syscall_msr_init.
@@ -2014,7 +2030,7 @@ OK Path 4 — FPU init para ring-3
    - **Bonus**: `lib/libc/math.c` puede usar double real ahora —
      antes fallaba en undefined symbols __adddf3 etc.
 
-OK Path 5 — Headers libc faltantes
+✓ Path 5 — Headers libc faltantes
    - `lib/libc/include/limits.h` (nuevo): CHAR_BIT, INT_MAX,
      LONG_MAX, PATH_MAX, NAME_MAX, ARG_MAX, ...
    - `lib/libc/include/float.h` (nuevo): FLT_MAX, DBL_EPSILON,
@@ -2025,7 +2041,7 @@ OK Path 5 — Headers libc faltantes
      para non-default; raise() → kill(getpid(), sig).
    - `lib/libc/include/ctype.h`: + isblank, isgraph, ispunct, isascii.
 
-OK Path 6 — math.h básico
+✓ Path 6 — math.h básico
    - `lib/libc/include/math.h` (nuevo): M_PI, M_E, M_LN2, INFINITY,
      NAN, isnan/isinf/isfinite, fabs/floor/ceil/trunc/round/fmod,
      sqrt/pow/exp/log/log2/log10, sin/cos/tan/atan/atan2, +
@@ -2035,7 +2051,7 @@ OK Path 6 — math.h básico
      reducción mod 2π + Taylor. Accuracy "good enough" — no
      IEEE-precise.
 
-OK ELF /bin/tcc — placeholder (no es port real)
+✓ ELF /bin/tcc — placeholder (no es port real)
    - `elfs/tools/tcc.c`: stub que demuestra la cadena libc + stack
      big + FPU + exec funciona end-to-end. **NO compila C**. Real
      port movido a **ROADMAP_APENDICE.md → Self-hosting → TinyCC**
@@ -2046,7 +2062,7 @@ OK ELF /bin/tcc — placeholder (no es port real)
      desde VFS, math/limits/float/signal headers) son útiles
      INDEPENDIENTEMENTE de TCC.
 
-OK Tests para los 6 items
+✓ Tests para los 6 items
    - **cmd_test (kernel)**: 11 nuevos:
      - WRITE_OFFSET × 8: open/write base, lseek+overwrite mid,
        read-back, sparse-hole past EOF, length post-extend.
@@ -2065,7 +2081,7 @@ OK Tests para los 6 items
      documenta el flujo de verificación end-to-end.
 
 ### FASE Libc gaps 4+5+6 — CERRADA
-OK dup / dup2 — Linux syscalls #32 / #33
+✓ dup / dup2 — Linux syscalls #32 / #33
    - **src/micro/fd.{c,h}**: tres helpers nuevos sobre la fd table
      existente:
      - `fd_dup(src)` — alloca el primer slot libre >= 3 y copia el
@@ -2085,7 +2101,7 @@ OK dup / dup2 — Linux syscalls #32 / #33
    - **sys_dup/sys_dup2** envuelven los helpers y devuelven EBADF
      en caso de fd inválido.
 
-OK fcntl básico — Linux syscall #72
+✓ fcntl básico — Linux syscall #72
    - **Comandos soportados**: F_DUPFD (0), F_GETFD (1), F_SETFD (2),
      F_GETFL (3), F_SETFL (4). Cualquier otro → -EINVAL.
    - F_GETFD/F_SETFD: aceptan/devuelven 0 (sin FD_CLOEXEC todavía).
@@ -2099,7 +2115,7 @@ OK fcntl básico — Linux syscall #72
      y devolver EAGAIN inmediato sin loop. Esto es trivial de
      agregar más adelante; por ahora la API queda lista.
 
-OK mkstemp / tmpfile (libc)
+✓ mkstemp / tmpfile (libc)
    - **lib/libc/stdlib.c**: `mkstemp(char *tmpl)` rewrites the
      trailing "XXXXXX" con un sufijo base-36 (seed = `time() *
      65537 + getpid() * 7919 + counter`). Loop hasta 100 attempts
@@ -2114,7 +2130,7 @@ OK mkstemp / tmpfile (libc)
      se necesite.
    - **errno.h**: O_NONBLOCK (04000) agregado al fcntl.h libc.
 
-OK Test suite +28 checks
+✓ Test suite +28 checks
    - **cmd_test (kernel)**: 9 nuevos para DUP/DUP2/FCNTL (open base,
      dup fresh fd, dup2 target/self, fcntl F_GETFL/F_SETFL roundtrip,
      bad fd / cmd cases).
@@ -2125,7 +2141,7 @@ OK Test suite +28 checks
    - Total ahora: **624 / 624 pass**, idempotente.
 
 ### FASE Libc gaps 1+2+3 — CERRADA
-OK strerror completo (33 entries)
+✓ strerror completo (33 entries)
    - **lib/libc/string.c**: agregados 16 cases nuevos al switch:
      EINTR, E2BIG, EBUSY, ENFILE, ENOTTY, ERANGE, ENAMETOOLONG,
      ENOTSOCK, EPROTONOSUPPORT, EAFNOSUPPORT, EADDRINUSE,
@@ -2135,7 +2151,7 @@ OK strerror completo (33 entries)
      ERANGE (34) que faltaban.
    - Fallback "errno=N" itoa para códigos desconocidos sigue intacto.
 
-OK stat(path) + access — Linux syscalls #4 y #21
+✓ stat(path) + access — Linux syscalls #4 y #21
    - **SYS_STAT (#4)**: `sys_stat(const char *path, void *out)` —
      mismo flujo que sys_fstat pero recibe path. copy_from_user
      del path, vfs_stat, llena osnos_stat_t con type|mode/size/
@@ -2148,7 +2164,7 @@ OK stat(path) + access — Linux syscalls #4 y #21
      en unistd.c. Ambos usan resolve_path para relativos.
      `unistd.h` define F_OK / R_OK / W_OK / X_OK.
 
-OK time(NULL) + clock_gettime — Linux syscalls #201 y #228
+✓ time(NULL) + clock_gettime — Linux syscalls #201 y #228
    - **SYS_TIME (#201)**: `sys_time(int64_t *t)` — retorna
      `timer_ms() / 1000`. Si `t != NULL`, copia el mismo valor ahí
      vía copy_to_user. Sin RTC: segundos desde boot, no desde epoch.
@@ -2163,14 +2179,14 @@ OK time(NULL) + clock_gettime — Linux syscalls #201 y #228
    - **SYS_ISATTY** movido de 201 → **250** (osnos-only) porque
      colisionaba con Linux SYS_TIME=201.
 
-OK Fix de ABI nlink_t — bug oculto que afectaba stat real
+✓ Fix de ABI nlink_t — bug oculto que afectaba stat real
    - **sys/types.h**: `nlink_t` de `uint32_t` → **`uint64_t`** para
      matchear `osnos_stat_t.st_nlink` (Linux x86_64 layout).
    - Antes: libc struct stat tenía nlink en 4 bytes, kernel en 8 →
      `st_mode` quedaba 4 bytes desalineado → S_ISREG retornaba false
      siempre.
 
-OK Fix uaccess para kernel callers — habilita tests internos
+✓ Fix uaccess para kernel callers — habilita tests internos
    - **src/micro/uaccess.c**: `copy_from_user` / `copy_to_user` ahora
      detectan caller kernel (`task_current()->pml4 == 0`) y saltean
      el chequeo de rango. Antes, syscalls que usaban copy_*_user
@@ -2179,7 +2195,7 @@ OK Fix uaccess para kernel callers — habilita tests internos
    - Esto es un workaround para los tests integrados; user tasks
      siguen pasando por la validación completa.
 
-OK Test suite ampliado a 615 + idempotente
+✓ Test suite ampliado a 615 + idempotente
    - **cmd_test (kernel)**: 12 nuevos checks (STAT existing/missing,
      mode regular, ACCESS, TIME positive + out-param, CLOCK
      REALTIME/MONOTONIC + sane + bogus id).
@@ -2193,7 +2209,7 @@ OK Test suite ampliado a 615 + idempotente
      reportaba 2 falsos negativos.
 
 ### FASE Arrow keys + getcwd/chdir — CERRADA
-OK Keycode passthrough: arrow keys via TTY como VT100 CSI
+✓ Keycode passthrough: arrow keys via TTY como VT100 CSI
    - **keyboard_server**: cuando llega un keycode != 0 (special key),
      traduce a `ESC [ A/B/C/D` (3 bytes) y los pushea a `tty_input`
      en orden atómico. KEY_UP→A, KEY_DOWN→B, KEY_RIGHT→C, KEY_LEFT→D.
@@ -2210,7 +2226,7 @@ OK Keycode passthrough: arrow keys via TTY como VT100 CSI
    - Flechas funcionan tanto en NORMAL (mapeadas a hjkl uniformemente)
      como en INSERT (sin abandonar el modo).
 
-OK SYS_GETCWD (#79) + SYS_CHDIR (#80) — per-task cwd
+✓ SYS_GETCWD (#79) + SYS_CHDIR (#80) — per-task cwd
    - **task_t** agrega `char cwd[OSNOS_PATH_MAX]`. Default tras
      `task_clear`: "" (vacío). Cero-overhead para kernel tasks que
      no lo usan.
@@ -2232,7 +2248,7 @@ OK SYS_GETCWD (#79) + SYS_CHDIR (#80) — per-task cwd
    - **ERANGE = 34** agregado al status enum.
 
 ### FASE /bin/ovi — Editor modal vim-style — CERRADA
-OK /bin/ovi — primer editor visual de osnos
+✓ /bin/ovi — primer editor visual de osnos
    - **Framebuffer VT100 extendido**:
      - `ESC[2J` / `ESC[J` — clear screen.
      - `ESC[H` — cursor home.
@@ -2272,7 +2288,7 @@ OK /bin/ovi — primer editor visual de osnos
        chdir syscalls per-task para POSIX-correctness.
 
 ### FASE /home alias — CERRADA
-OK aliasfs (bind-mount VFS backend) + /home → /sd/home
+✓ aliasfs (bind-mount VFS backend) + /home → /sd/home
    - **src/fs/aliasfs.{c,h}**: nuevo backend con un translate()
      interno que sustituye `mount_prefix` por `target_prefix` en
      cualquier path entrante. Todas las ops (stat/readdir/read/
@@ -2308,7 +2324,7 @@ OK aliasfs (bind-mount VFS backend) + /home → /sd/home
    (basenames únicos entre categorías).
 
 ### FASE 9 — Scheduler real — CERRADA
-OK 9.1 timer IRQ infra — VERIFICADO en QEMU
+✓ 9.1 timer IRQ infra — VERIFICADO en QEMU
    - src/drivers/pic.{c,h}: 8259 remap (master 0x20-0x27, slave 0x28-0x2F),
      mask all on init, pic_unmask/mask/send_eoi
    - src/drivers/lapic.{c,h}: necesario en chipsets modernos (q35).
@@ -2332,11 +2348,11 @@ OK 9.1 timer IRQ infra — VERIFICADO en QEMU
      gate + kernel CS, int $0x20 invoca handler, ticks > 0, irqs > 0,
      ms > 0, ticks advance during busy-wait
    - Diagnóstico al pie: PIC IRR/ISR/IMR + ticks post-busy-wait
-OK 9.2 SYS_NANOSLEEP (kernel-mode hlt-loop) — superado por 9.3
+✓ 9.2 SYS_NANOSLEEP (kernel-mode hlt-loop) — superado por 9.3
    - quedaba como hlt-loop solo en la rama kernel-mode (tests).
    - el resto migró a suspend real con context save/restore (9.3).
 
-OK 9.3a — Voluntary suspension via saved state — VERIFICADO en QEMU
+✓ 9.3a — Voluntary suspension via saved state — VERIFICADO en QEMU
    - syscall_frame_t extendido a 15 GPRs (rax, rbx, rcx, rdx, rsi, rdi,
      rbp, r8..r15) — los stubs ahora capturan TODO el estado user
    - int80_entry: pushea + popea los 15 en orden de struct; usa
@@ -2365,7 +2381,7 @@ OK 9.3a — Voluntary suspension via saved state — VERIFICADO en QEMU
      en task_init/task_create/task_reap_dead — más simple y resiste
      que task_t crezca
 
-OK 9.3 bugfix CRITICO: sti en sched_resume_jump
+✓ 9.3 bugfix CRITICO: sti en sched_resume_jump
    - sched_resume_jump se llama desde sys_exit / sys_nanosleep /
      fault_try_recover, todos contextos con IF=0 (FMASK o interrupt
      gate ya limpiaron IF al entrar al kernel)
@@ -2377,12 +2393,12 @@ OK 9.3 bugfix CRITICO: sti en sched_resume_jump
      bucleaba con IRQs masked
    - Fix: `__asm__ volatile ("sti")` justo antes del longjmp asm
 
-OK 9.3 diagnósticos
+✓ 9.3 diagnósticos
    - task_wakeups_fired() counter
    - /sys/timer incluye "wakeups fired" + lista de BLOCKED tasks con
      pid + wakeup_at_ms + saved_valid (útil para debug de sleep)
 
-OK 9.3b — preempción timer-driven (CPL=3 only) — VERIFICADO en QEMU
+✓ 9.3b — preempción timer-driven (CPL=3 only) — VERIFICADO en QEMU
    - timer_irq handler reescrito: clang __attribute__((interrupt))
      reemplazado por asm stub (timer_entry) + C handler (timer_handle)
      en two-stage (mismo patrón que int80_entry / syscall_entry)
@@ -2407,7 +2423,7 @@ OK 9.3b — preempción timer-driven (CPL=3 only) — VERIFICADO en QEMU
          muestra preempts subiendo (~18 en run de 1M iters)
        - shell sigue respondiendo durante runaway user task
        - sleep + hello_libc + test sin regresiones
-OK 9.4 Ctrl+C live + /bin/kill — VERIFICADO en QEMU
+✓ 9.4 Ctrl+C live + /bin/kill — VERIFICADO en QEMU
    - task_t.kill_pending: flag sticky seteado por shell (Ctrl+C) o
      /bin/kill (vía SYS_KILL). Limpiado al destruir el task.
    - Shell tracking foreground:
@@ -2431,7 +2447,7 @@ OK 9.4 Ctrl+C live + /bin/kill — VERIFICADO en QEMU
    - libc kill() en unistd.h
    - /bin/kill PID — tool clásico. argv pid → kill(pid, 9).
 
-OK 9.4 extensión: kill sobre BLOCKED + shell builtin — VERIFICADO en QEMU
+✓ 9.4 extensión: kill sobre BLOCKED + shell builtin — VERIFICADO en QEMU
    - bugfix crítico: kill_pending sobre task BLOCKED (e.g., dormida en
      nanosleep) nunca disparaba — los dos delivery points originales
      (return de syscall, IRQ de timer en CPL=3) requieren que la task
@@ -2453,7 +2469,7 @@ OK 9.4 extensión: kill sobre BLOCKED + shell builtin — VERIFICADO en QEMU
      - runaway osh loop foreground + ^C → kill ≤10ms
      - exec /bin/kill 3 → ESRCH (kernel tasks rechazadas)
 
-OK 9.4 background jobs (`&`) — VERIFICADO en QEMU
+✓ 9.4 background jobs (`&`) — VERIFICADO en QEMU
    - cmd_exec parsea `&` final (después de stripear trailing spaces).
      Si presente: lanza vía proc_exec pero NO setea fg_pid; imprime
      "[pid]" y redibuja el prompt inmediatamente.
@@ -2467,14 +2483,14 @@ OK 9.4 background jobs (`&`) — VERIFICADO en QEMU
    - Pattern Bash-style básico: 1 fg + N bg simultáneas, hasta el
      límite de tasks (16 slots).
 
-OK 9.4 SYS_GETPID + libc getpid — VERIFICADO en QEMU
+✓ 9.4 SYS_GETPID + libc getpid — VERIFICADO en QEMU
    - SYS_GETPID = 39 (Linux number). syscall_dispatch case sin args.
    - sys_getpid retorna task_current()->pid; 0 si no hay task
      (kernel-mode caller, no debería ocurrir desde user).
    - libc: pid_t getpid(void) en unistd.h.
    - Usado por /bin/top para mostrar su propio pid en el header.
 
-OK 9.4 /bin/top — viewer live — VERIFICADO en QEMU
+✓ 9.4 /bin/top — viewer live — VERIFICADO en QEMU
    - tests/top.c: loop infinito que cada segundo emite ANSI clear
      (\033[2J\033[H), header con getpid() + "Ctrl+C to exit", luego
      dump_file de /sys/uptime, /sys/tasks, /sys/mem. sleep(1) entre
@@ -2491,7 +2507,7 @@ OK 9.4 /bin/top — viewer live — VERIFICADO en QEMU
      shell siguen vivos. Es la prueba visual de que preempt CPL=3
      + sleep real + IRQ delivery + bg jobs funcionan en conjunto.
 
-### FASE 10 — Servers a ring 3 (en curso, plan detallado en PLAN_FASE10.md)
+### FASE 10 — Servers a ring 3 — CERRADA
 Pre-reqs cerrados (10.0 entera, sesión 2026-05-21):
 - 10.0.a per-task fd tables (osnos_fd_t fds[16] dentro de task_t)
 - 10.0.b pipe(2) syscall + pipeline migrado a fds reales
@@ -2500,68 +2516,66 @@ Pre-reqs cerrados (10.0 entera, sesión 2026-05-21):
 - 10.0.e SYS_TASKINFO + /bin/kerntest ELF
 
 Servers migrados / eliminados:
-- ✅ 10.1 console_server → elfs/osn-server/consrv.c
-- ✅ 10.2 keyboard_server → elfs/osn-server/kbdsrv.c
-- ✅ 10.3 fs_server ELIMINADO (-290 LOC)
-- ✅ 10.4 shell_server → elfs/osn-server/shellsrv.c (-3375 LOC)
+- ✓ 10.1 console_server → elfs/osn-server/consrv.c
+- ✓ 10.2 keyboard_server → elfs/osn-server/kbdsrv.c
+- ✓ 10.3 fs_server ELIMINADO (-290 LOC)
+- ✓ 10.4 shell_server → elfs/osn-server/shellsrv.c (-3375 LOC)
 
 **EL OS ENTERO** (consola + teclado + shell) corre en ring 3. kmain solo arranca drivers + spawn de ELFs + scheduler.
 
 Polish + cleanup ya cerrado:
-- ✅ shellsrv `cd` con `..` / `.` / paths relativos (path_normalize)
-- ✅ `ls /` muestra mount points sintéticos (vfs_readdir injection)
-- ✅ /bin/clear + /bin/tree ELFs agregados
-- ✅ ovi: output buffering 16KB + framebuffer chunk safe-split (CSI sequences no se parten)
-- ✅ FAT16 dir-chain extension (extend_dir_chain) — supera el cap de ~9 entries
-- ✅ FAT16 NT case-bits (byte 0x0C) respetados — lowercase SFNs como hello/head/httpd
-- ✅ task_t.name inline 32B (sys_taskinfo ya no faulta con user-pointer leaks)
-- ✅ ipc_send rewrite SID→pid (ring-3 receivers filtran por pid)
-- ✅ kbdsrv no envía IPC_KEY_EVENT (shellsrv lee via raw TTY)
-- ✅ shellsrv $VAR / ${VAR} expansion + export/unset/setenv + .oshrc autoload
-- ✅ shellsrv `;` `&&` `||` operators con `$?` tracking
-- ✅ shellsrv glob `*` (matcher + walk dir + push argv)
-- ✅ shellsrv `do_ls` POSIX multi-arg (files + dirs con headers)
-- ✅ shellsrv `exec` builtin con osn_set_fg para Ctrl+C post-execve
-- ✅ opendir valida ENOTDIR (antes silent no-output en files)
-- ✅ task_reap_dead grace 4 pasadas (waiters capturan exit_code de fast tasks)
-- ✅ kernel_fg_pid clear en proc_exit_current_user
-- ✅ init-respawn watchdog (consrv/kbdsrv/shellsrv auto-restart)
-- ✅ Disk-resident /bin (Fase 1) — bootstrap dumpea ELFs a /sd/bin + aliasfs
-- ✅ **Fase 2 disk-resident FINAL** — sd.img poblado al build via mtools (64 ELFs), kernel binary 7.6 MB → 1.1 MB (-85%)
-- ✅ **SYS_EXECVE (#59)** + libc execve/execv/execvp + /bin/exectest
-- ✅ **SYS_FORK (#57)** + address_space_clone + pipe_dup_reader/writer + libc fork() + /bin/forktest.
-- ✅ **SYS_WAIT4 (#61)** + TASK_ZOMBIE state + libc wait/waitpid + W* macros + /bin/waittest.
-- ✅ **SYS_RT_SIGACTION (#13) + SYS_RT_SIGRETURN (#15)** + signal delivery en user_task_resume + libc sigaction + sigtramp.S + /bin/sigtest. EINTR en blocking syscalls. **ABI POSIX core 100% COMPLETO** verificado por tests reales:
+- ✓ shellsrv `cd` con `..` / `.` / paths relativos (path_normalize)
+- ✓ `ls /` muestra mount points sintéticos (vfs_readdir injection)
+- ✓ /bin/clear + /bin/tree ELFs agregados
+- ✓ ovi: output buffering 16KB + framebuffer chunk safe-split (CSI sequences no se parten)
+- ✓ FAT16 dir-chain extension (extend_dir_chain) — supera el cap de ~9 entries
+- ✓ FAT16 NT case-bits (byte 0x0C) respetados — lowercase SFNs como hello/head/httpd
+- ✓ task_t.name inline 32B (sys_taskinfo ya no faulta con user-pointer leaks)
+- ✓ ipc_send rewrite SID→pid (ring-3 receivers filtran por pid)
+- ✓ kbdsrv no envía IPC_KEY_EVENT (shellsrv lee via raw TTY)
+- ✓ shellsrv $VAR / ${VAR} expansion + export/unset/setenv + .oshrc autoload
+- ✓ shellsrv `;` `&&` `||` operators con `$?` tracking
+- ✓ shellsrv glob `*` (matcher + walk dir + push argv)
+- ✓ shellsrv `do_ls` POSIX multi-arg (files + dirs con headers)
+- ✓ shellsrv `exec` builtin con osn_set_fg para Ctrl+C post-execve
+- ✓ opendir valida ENOTDIR (antes silent no-output en files)
+- ✓ task_reap_dead grace 4 pasadas (waiters capturan exit_code de fast tasks)
+- ✓ kernel_fg_pid clear en proc_exit_current_user
+- ✓ init-respawn watchdog (consrv/kbdsrv/shellsrv auto-restart)
+- ✓ Disk-resident /bin (Fase 1) — bootstrap dumpea ELFs a /sd/bin + aliasfs
+- ✓ **Fase 2 disk-resident FINAL** — sd.img poblado al build via mtools (64 ELFs), kernel binary 7.6 MB → 1.1 MB (-85%)
+- ✓ **SYS_EXECVE (#59)** + libc execve/execv/execvp + /bin/exectest
+- ✓ **SYS_FORK (#57)** + address_space_clone + pipe_dup_reader/writer + libc fork() + /bin/forktest.
+- ✓ **SYS_WAIT4 (#61)** + TASK_ZOMBIE state + libc wait/waitpid + W* macros + /bin/waittest.
+- ✓ **SYS_RT_SIGACTION (#13) + SYS_RT_SIGRETURN (#15)** + signal delivery en user_task_resume + libc sigaction + sigtramp.S + /bin/sigtest. EINTR en blocking syscalls. **ABI POSIX core 100% COMPLETO** verificado por tests reales:
     - **sigtest 9/9 PASS** — sigaction install / SIG_IGN / SIGKILL-EINVAL / signal() BSD wrapper / fork+SIGTERM → WIFSIGNALED+WTERMSIG=15
     - **waittest 8/8 PASS** — 3 children con códigos distintos, WNOHANG/ECHILD, waitpid-by-pid
     - **forktest 6/6 PASS** — migrado a waitpid real; pid distinct + fd inheritance + stack independence
     - Total: **23/23 PASS**. Fix tardío: `int80_dispatch_wrapper` y `user_task_trampoline` hardcodeaban exit 130 (SIGINT) en kill_pending; ahora leen `sig_pending` para usar `128+actual_sig`.
-- ✅ Coreutils completos (~20 ELFs nuevos): env wc pwd uname basename dirname tail seq yes tee date printf grep sort uniq cut tr banner which clear tree
-- ✅ README.md + CREATE_ELF.es.md + STATUS.md + ARCH.md actualizados
+- ✓ Coreutils completos (~20 ELFs nuevos): env wc pwd uname basename dirname tail seq yes tee date printf grep sort uniq cut tr banner which clear tree
+- ✓ README.md + CREATE_ELF.es.md + STATUS.md + ARCH.md actualizados
 
-Pendiente (todo es feature work, no bugs):
-- **FASE 11**: drivers a ring 3 (PS/2, framebuffer, ATA, RTL8139)
-- **FASE 12**: TUI potente (Norton Commander, syntax highlighting)
-- **FASE 13**: gráfico (window server + mouse)
-- **SMP**: multi-core
-- **Copy-on-write fork**: optimización; el actual full-copy funciona pero usa más RAM
+Lo que sigue (feature work, no bugs):
 
-### FASE 11 — Drivers a ring 3 (futuro, NO mezclar con 10)
-- IRQ delegation por IPC desde kernel-side handlers
-- MMIO mapping per-task con permisos especiales
-- Port-IO delegation (syscall whitelist o IOPB en TSS)
-- DMA bouncing via kernel-mediated buffer pool
-- Portar PS/2, framebuffer, ATA, RTL8139, PIT a elfs/osn-driver/
+### FASE 11 — Drivers a ring 3 — PENDIENTE
+- ☐ IRQ delegation por IPC desde kernel-side handlers
+- ☐ MMIO mapping per-task con permisos especiales
+- ☐ Port-IO delegation (syscall whitelist o IOPB en TSS)
+- ☐ DMA bouncing via kernel-mediated buffer pool
+- ☐ Portar PS/2, framebuffer, ATA, RTL8139, PIT a `elfs/osn-driver/`
 
-### FASE 12 — TUI potente
-- mini Norton Commander / mini-mc
-- file viewer
-- ok editor **ovi simple vi**
-- copy/move/delete visual
+### FASE 12 — TUI potente — PENDIENTE
+- ☐ mini Norton Commander / mini-mc (dos paneles)
+- ☐ file viewer paginado (`less`-style)
+- ☐ editor `ovi` con syntax highlighting
+- ☐ copy/move/delete visual
 
-### FASE 13 — Gráfico
-- window_server
-- terminal window
-- Chip-8 emulator
-- mouse
-- compositor simple
+### FASE 13 — Gráfico — PENDIENTE
+- ☐ window_server
+- ☐ terminal en ventana
+- ☐ Chip-8 emulator
+- ☐ mouse + compositor simple
+
+### Optimizaciones / futuro lejano — PENDIENTE
+- ☐ SMP (multi-core)
+- ☐ Copy-on-write para fork (hoy full page copy funciona pero usa más RAM)
