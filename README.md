@@ -55,6 +55,7 @@ mini-libc propia para programas de usuario en ring 3.
 - [Convenciones de código](#convenciones-de-código)
 - [Mapa de documentación](#mapa-de-documentación)
 - [Roadmap](#roadmap)
+- [Inspiración y agradecimientos](#inspiración-y-agradecimientos)
 - [Licencia](#licencia)
 
 ---
@@ -534,6 +535,20 @@ Las próximas fases grandes:
 6. **SMP** (mucho después).
 
 Detalle en `osnos/PLAN.md` y `osnos/STATUS.md`.
+
+---
+
+## Inspiración y agradecimientos
+
+Este proyecto nació viendo este video:
+
+📺 **[¿Y si hacemos un sistema operativo? (YouTube)](https://youtu.be/JU3Fn-cL88Q?si=7Bxp5a5zN2kjKuDL)**
+
+Me dio las ganas de hacerlo y un mapa mental de por dónde arrancar.
+Gracias enormes al autor por compartir el camino — sin ese video,
+osnos no existiría. Si te interesa entender desde cero cómo funciona
+un OS y querés algo que te empuje a probarlo vos mismo, mirá el video
+primero.
 
 ---
 
