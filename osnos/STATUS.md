@@ -2516,10 +2516,9 @@ Polish + cleanup ya cerrado en sesión separada:
 - ✅ shellsrv $VAR / ${VAR} expansion + export/unset/setenv + .oshrc autoload
 - ✅ Disk-resident /bin (Fase 1) — bootstrap dumpea ELFs a /sd/bin + aliasfs
 - ✅ Coreutils completos (~20 ELFs nuevos): env wc pwd uname basename dirname tail seq yes tee date printf grep sort uniq cut tr banner which clear tree
-- ✅ README.md + CREATE_ELF.es.md + STATUS.md actualizados
+- ✅ README.md + CREATE_ELF.es.md + STATUS.md + **ARCH.md** actualizados
 
 Pendiente:
-- ARCH.md update con diagramas post-FASE-10 (los del README sirven de referencia mientras tanto)
 - Fase 2 disk-resident final: popular sd.img al build via mtools + borrar embedded blobs del kernel
 
 ### FASE 11 — Drivers a ring 3 (futuro, NO mezclar con 10)
