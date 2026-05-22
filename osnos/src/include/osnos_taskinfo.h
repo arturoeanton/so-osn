@@ -28,4 +28,10 @@ typedef struct {
     uint8_t  is_user;        /* 1 if ring-3 (pml4 != 0), 0 if kernel */
     uint8_t  pad[6];
     uint64_t dispatches;     /* monotonic counter, for top */
+    /* Last exit code observed by the kernel for this slot. Set by
+     * proc_exit_current_user when a ring-3 task dies (via sys_exit
+     * or fault); also 128+SIG for signal terminations. Only
+     * meaningful when state == OSNOS_TASK_DEAD. */
+    int32_t  exit_code;
+    uint8_t  pad2[4];
 } osnos_taskinfo_t;

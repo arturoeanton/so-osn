@@ -149,10 +149,35 @@ task_t *task_by_pid(uint64_t pid) {
     return 0;
 }
 
+/*
+ * Grace counter per slot. When a task hits TASK_DEAD, we wait at
+ * least REAP_GRACE_PASSES calls to task_reap_dead before actually
+ * clearing the slot. That keeps `exit_code` + `pid` visible long
+ * enough for shellsrv's wait_pid (polled every ~20 ms via
+ * sys_taskinfo) to capture the value before the reaper recycles
+ * the slot. Without this, fast-finishing tasks like `/bin/false`
+ * disappear between the spawn and the first poll, leaving
+ * shellsrv with exit_code = 0 — breaking `&&` / `||` chains.
+ *
+ * REAP_GRACE_PASSES = 4 gives ~40-80 ms of zombie lifetime since
+ * task_reap_dead is called from reaper_drain at every
+ * scheduler_tick (each task switch).
+ */
+#define REAP_GRACE_PASSES 4
+static int reap_age[MAX_TASKS];
+
 void task_reap_dead(void) {
     for (int i = 0; i < MAX_TASKS; i++) {
-        if (tasks[i].state != TASK_DEAD) continue;
+        if (tasks[i].state != TASK_DEAD) {
+            reap_age[i] = 0;
+            continue;
+        }
+        if (reap_age[i] < REAP_GRACE_PASSES) {
+            reap_age[i]++;
+            continue;
+        }
         task_clear(&tasks[i]);
+        reap_age[i] = 0;
     }
 }
 

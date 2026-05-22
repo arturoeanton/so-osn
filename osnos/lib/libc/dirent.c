@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 
 #include "syscall.h"
 
@@ -38,6 +39,16 @@ struct __attribute__((packed)) raw_dirent {
 };
 
 DIR *opendir(const char *path) {
+    /* POSIX: opendir must fail with ENOTDIR if `path` exists but
+     * isn't a directory. Without this check ls expanded globs of
+     * regular files silently produced no output: open() succeeded
+     * on the file, readdir/getdents saw 0 entries and returned NULL
+     * — caller couldn't tell "empty dir" apart from "wrong kind of
+     * fd". Stat first; fail loudly on non-directory. */
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;                /* errno set by stat */
+    if (!S_ISDIR(st.st_mode)) { errno = ENOTDIR; return 0; }
+
     int fd = open(path, O_RDONLY, 0);
     if (fd < 0) return 0;
 

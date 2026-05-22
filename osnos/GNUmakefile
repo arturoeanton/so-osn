@@ -156,14 +156,30 @@ USER_ELF_LIBC_SRCS := \
     elfs/tests/inputtest.c \
     elfs/tests/kerntest.c \
     elfs/tests/spawntest.c \
+    elfs/tests/exectest.c \
     elfs/osn-server/consrv.c \
     elfs/osn-server/kbdsrv.c \
     elfs/osn-server/shellsrv.c
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS))
+
+# ---------------------------------------------------------------------------
+# Fase 2 disk-resident: split the embedded set into ROM (small, kept inside
+# the kernel as a recovery fallback) and disk-only (built + copied to sd.img
+# at build time, NOT embedded in the kernel). The kernel binary shrinks
+# from ~5 MB to ~500 KB — only the 4 critical servers stay inside.
+# ---------------------------------------------------------------------------
+USER_ELF_ROM_SRCS := \
+    elfs/osn-server/consrv.c \
+    elfs/osn-server/kbdsrv.c \
+    elfs/osn-server/shellsrv.c \
+    elfs/tools/banner.c
+
+# objcopy only the ROM set: those are the bytes that travel inside the
+# kernel image. Everything else lives exclusively on /sd/bin.
 USER_ELF_OBJS := $(patsubst %.c,$(BUILD)/%.elf.o,$(USER_ELF_SRCS)) \
-                 $(patsubst %.c,$(BUILD)/%.elf.o,$(USER_ELF_LIBC_SRCS))
+                 $(patsubst %.c,$(BUILD)/%.elf.o,$(USER_ELF_ROM_SRCS))
 
 OBJ := $(SRC_OBJ) $(RUNTIME_OBJ) $(USER_ELF_OBJS)
 DEPS := $(OBJ:.o=.d) $(LIBC_OBJS:.o=.d)
@@ -172,7 +188,7 @@ $(SRC_OBJ): EXTRA_CFLAGS := -Werror
 
 .PHONY: all clean iso run run-bios
 .SECONDARY: $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBC_OBJS)
-all: $(BUILD)/$(OUTPUT)
+all: $(BUILD)/$(OUTPUT) $(SD_IMG)
 
 # ---------------------------------------------------------------------------
 # ISO + QEMU. Uses system-installed Limine (brew on macOS, distro pkg on
@@ -209,20 +225,39 @@ SD_README_TXT = hola desde el disco
 SD_HELLO_TXT  = fat works!
 SD_LONG_TXT   = hola con nombre largo
 
-$(SD_IMG):
+# Re-build sd.img whenever ANY built ELF changes or the build script
+# changes (so the disk always reflects the freshly compiled binaries).
+# Filenames inside ::/bin drop the .elf extension so they match the
+# exec lookup path (proc_execve("/bin/cat") → /sd/bin/cat via aliasfs).
+$(SD_IMG): $(USER_ELF_LIST) GNUmakefile
 	@command -v mformat >/dev/null 2>&1 || { echo "error: mtools (mformat/mcopy) not found. Install: brew install mtools / sudo apt install mtools" >&2; exit 1; }
 	@command -v mcopy   >/dev/null 2>&1 || { echo "error: mtools (mformat/mcopy) not found. Install: brew install mtools / sudo apt install mtools" >&2; exit 1; }
+	@command -v mmd     >/dev/null 2>&1 || { echo "error: mtools mmd not found." >&2; exit 1; }
+	@echo "  GEN     $@ (FAT16 + populate /bin + /home)"
 	dd if=/dev/zero of=$@ bs=1048576 count=$(SD_SIZE_MB) status=none
 	mformat -i $@ ::
+	mmd -i $@ ::/bin
+	mmd -i $@ ::/home
 	mkdir -p $(SD_TMP)
 	printf '%s\n' '$(SD_README_TXT)' > $(SD_TMP)/README.TXT
 	printf '%s\n' '$(SD_HELLO_TXT)'  > $(SD_TMP)/HELLO.TXT
 	printf '%s\n' '$(SD_LONG_TXT)'   > $(SD_TMP)/long.txt
 	printf '<!doctype html>\n<html><head><meta charset="utf-8"><title>osnos</title>\n<style>body{font-family:system-ui,sans-serif;max-width:40em;margin:3em auto;padding:1em;color:#222}h1{color:#0a0}code{background:#eee;padding:.2em .4em}</style></head>\n<body>\n<h1>Hola desde osnos</h1>\n<p>Esto es un servidor HTTP/1.0 corriendo como ELF ring-3 en osnos, sirviendo este archivo desde FAT16 en <code>/sd/index.html</code>.</p>\n<p>El path completo:</p>\n<ul>\n<li>Mac envia un GET via slirp NAT a guest:80</li>\n<li>RTL8139 driver entrega el frame</li>\n<li>eth -&gt; ip -&gt; tcp accept -&gt; recv en ring 3</li>\n<li>open + read del FAT16</li>\n<li>send con HTTP/1.0 200 OK y el HTML</li>\n</ul>\n</body></html>\n' > $(SD_TMP)/index.html
-	mcopy -i $@ $(SD_TMP)/README.TXT ::README.TXT
-	mcopy -i $@ $(SD_TMP)/HELLO.TXT  ::HELLO.TXT
-	mcopy -i $@ $(SD_TMP)/long.txt   "::My Long Filename.txt"
-	mcopy -i $@ $(SD_TMP)/index.html ::index.html
+	printf '# osnos shell startup — runs at every shellsrv boot.\n# Edit to add your own commands / env vars.\nbanner\nexport PATH=/bin\nexport HOME=/home\nexport SHELL=/bin/shellsrv\nexport OSNAME=osnos\n' > $(SD_TMP)/.oshrc
+	mcopy -i $@ $(SD_TMP)/README.TXT  ::/README.TXT
+	mcopy -i $@ $(SD_TMP)/HELLO.TXT   ::/HELLO.TXT
+	mcopy -i $@ $(SD_TMP)/long.txt    "::/My Long Filename.txt"
+	mcopy -i $@ $(SD_TMP)/index.html  ::/index.html
+	mcopy -i $@ $(SD_TMP)/README.TXT  ::/home/README.TXT
+	mcopy -i $@ $(SD_TMP)/HELLO.TXT   ::/home/HELLO.TXT
+	mcopy -i $@ $(SD_TMP)/.oshrc      ::/home/.oshrc
+	@# Copy every built ELF into /bin/, stripping the .elf extension so
+	@# shellsrv's PATH lookup finds /bin/cat (not /bin/cat.elf).
+	@for elf in $(USER_ELF_LIST); do \
+	    name=$$(basename $$elf .elf); \
+	    mcopy -i $@ -o $$elf ::/bin/$$name || exit 1; \
+	done
+	@echo "  GEN     $@ done — $$(ls $(USER_ELF_LIST) | wc -l | tr -d ' ') ELFs in /bin"
 	rm -rf $(SD_TMP)
 
 iso: $(ISO)

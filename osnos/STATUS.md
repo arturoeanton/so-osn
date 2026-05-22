@@ -10,8 +10,9 @@ POSIX, y un shell con history + rc files.
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
-| **Polish + Fase 2.1 + bug-fixes finales** | (1) shellsrv `cd` con resolución de paths relativos `..` `.`. (2) `ls /` muestra mount points (/bin /dev /sys /home /sd) sintéticos via vfs_readdir. (3) `/bin/clear` + `/bin/tree` ELFs. (4) ovi output buffering (16KB single-write per render) — evita saturar IPC console queue. (5) **FAT16 dir-chain extension** — extend_dir_chain alloca nuevo cluster y lo encadena cuando ENOSPC; resuelve el cap de ~9 entries por subdir. (6) Disk seed completo re-habilitado. (7) Coreutils: env wc pwd uname basename dirname tail seq yes tee date printf grep sort uniq cut tr banner which clear tree. (8) **Framebuffer chunk safe-split** — framebuffer_write_bytes ya no parte CSI sequences al medio (causa raíz del `~H~` en ovi). (9) **task->name inline** (32B copy en task_create) — sys_taskinfo ya no faulta con user-pointer leaks vía proc_execve VFS path. (10) shellsrv $VAR / ${VAR} expansion + export/unset/setenv + .oshrc auto-load. kerntest 27/27 fix | 450 |
-| **Disk-resident /bin (Fase 1)** | bootstrap_fs dump de ELFs a /sd/bin (FAT16) en primer boot. aliasfs /bin → /sd/bin. exec.c prefiere VFS sobre builtin (embedded como recovery ROM). shellsrv soporta PATH search. **Fase 2 pendiente**: popular sd.img al build via mtools + borrar embedded blobs del kernel (kernel binary: 5MB → ~500KB) | 200 |
+| **Fase 2 disk-resident FINAL + execve + shell polish** | (1) **GNUmakefile popula sd.img al build via mtools** (mformat + mmd + mcopy) — los 64 ELFs en `::/bin/<name>` (sin .elf). (2) **Slim embedded blobs**: kernel solo embebe consrv/kbdsrv/shellsrv/banner + user_hello como ROM recovery. **Kernel binary: 7.6 MB → 1.1 MB (85% reducción)**. (3) **SYS_EXECVE (#59)**: `proc_execve_replace` en exec.c hace in-place ELF swap — load new pml4, address_space_destroy old, sched_resume_jump. Preserva pid + fds + cwd. libc `execve`/`execv`/`execvp`. (4) shellsrv `exec` builtin con `osn_set_fg(getpid())` antes del execve para que Ctrl+C llegue al nuevo image. (5) **init-respawn watchdog** kernel task — cada ~100ms checkea los 3 servers, respawn si murieron (resuelve el cuelgue post `exec /bin/foo`). Sleep via TASK_BLOCKED + wakeup_at_ms. (6) shellsrv `;` `&&` `\|\|` operators con tracking de `$?` (exit_code agregado a osnos_taskinfo_t). (7) shellsrv **glob `*`** (matcher recursivo + walk dir + push a argv). (8) `do_ls` POSIX multi-arg (files + dirs con headers). (9) **FAT16 NT case-bits respetados** (byte 0x0C del dirent) — lowercase SFNs `hello`/`head`/`httpd` ya no vuelven en mayúsculas → glob matchea. (10) **opendir valida ENOTDIR** — antes hacía open() en un file y readdir devolvía 0 silenciosamente. (11) **task_reap_dead grace 4 pasadas** — slot queda DEAD ~40-80ms para que waiter capture exit_code (race que rompía `false && echo`). (12) **kernel_fg_pid clear en proc_exit_current_user**. (13) `/bin/exectest` ELF (verifica failure path + success handoff). | -1500 |
+| **Polish + Fase 2.1 inicial** | (1) shellsrv `cd` con resolución de paths relativos `..` `.`. (2) `ls /` muestra mount points (/bin /dev /sys /home /sd) sintéticos via vfs_readdir. (3) `/bin/clear` + `/bin/tree` ELFs. (4) ovi output buffering (16KB single-write per render) — evita saturar IPC console queue. (5) **FAT16 dir-chain extension** — extend_dir_chain alloca nuevo cluster y lo encadena cuando ENOSPC; resuelve el cap de ~9 entries por subdir. (6) Disk seed completo re-habilitado. (7) Coreutils: env wc pwd uname basename dirname tail seq yes tee date printf grep sort uniq cut tr banner which clear tree. (8) **Framebuffer chunk safe-split** — framebuffer_write_bytes ya no parte CSI sequences al medio (causa raíz del `~H~` en ovi). (9) **task->name inline** (32B copy en task_create) — sys_taskinfo ya no faulta con user-pointer leaks vía proc_execve VFS path. (10) shellsrv $VAR / ${VAR} expansion + export/unset/setenv + .oshrc auto-load. kerntest 27/27 fix | 450 |
+| **Disk-resident /bin (Fase 1)** | bootstrap_fs dump de ELFs a /sd/bin (FAT16) en primer boot. aliasfs /bin → /sd/bin. exec.c prefiere VFS sobre builtin (embedded como recovery ROM). shellsrv soporta PATH search | 200 |
 | **FASE 10.4 chunk 5 shellsrv ES EL SHELL** | shellsrv reemplaza shell_server.c en kmain (proc_execve("/bin/shellsrv")). Registra SERVER_SHELL. SYS_SET_FG=267 + SYS_RESUME=268. tty.c routea signals via kernel_fg_pid (sin más shell_fg_pid). wait_pid_or_stop maneja Ctrl+Z (retorna stopped + agrega a bg_jobs). fg/bg/kill builtins. **Borrado**: src/servers/shell_server.{c,h} (-3375 LOC). **Bugfix crítico**: ipc_send ahora traduce SID→pid en el queue (sys_ipc_recv filtra por t->pid). kbdsrv ya no envía IPC_KEY_EVENT (shellsrv lee via raw TTY) — evita saturar queue de 64 | -3050 |
 | FASE 10.4 chunk 4 shellsrv background | `cmd &` (trailing ampersand) spawn-without-wait; pid + cmd recordados en bg_jobs[]. `jobs` builtin barre sys_taskinfo, lista live tasks con state, compacta dead. | 100 |
 | FASE 10.4 chunk 3 shellsrv pipes + redir | Multi-stage `|` (hasta 4) + `< > >>` redirects via osn_spawn fd inheritance. Builtins solo en single-stage no-redir; con redirects/pipes cae a `/bin/<name>` ELF. Fix sys_read/sys_write fd 0/1: cuando el slot fue overrideado via spawn, ya no atrapa todo en TTY/console — fall through al path file/pipe correcto. `test` builtin → `/bin/kerntest` | 220 |
@@ -2504,22 +2505,33 @@ Servers migrados / eliminados:
 
 **EL OS ENTERO** (consola + teclado + shell) corre en ring 3. kmain solo arranca drivers + spawn de ELFs + scheduler.
 
-Polish + cleanup ya cerrado en sesión separada:
+Polish + cleanup ya cerrado:
 - ✅ shellsrv `cd` con `..` / `.` / paths relativos (path_normalize)
 - ✅ `ls /` muestra mount points sintéticos (vfs_readdir injection)
 - ✅ /bin/clear + /bin/tree ELFs agregados
 - ✅ ovi: output buffering 16KB + framebuffer chunk safe-split (CSI sequences no se parten)
 - ✅ FAT16 dir-chain extension (extend_dir_chain) — supera el cap de ~9 entries
+- ✅ FAT16 NT case-bits (byte 0x0C) respetados — lowercase SFNs como hello/head/httpd
 - ✅ task_t.name inline 32B (sys_taskinfo ya no faulta con user-pointer leaks)
 - ✅ ipc_send rewrite SID→pid (ring-3 receivers filtran por pid)
 - ✅ kbdsrv no envía IPC_KEY_EVENT (shellsrv lee via raw TTY)
 - ✅ shellsrv $VAR / ${VAR} expansion + export/unset/setenv + .oshrc autoload
+- ✅ shellsrv `;` `&&` `||` operators con `$?` tracking
+- ✅ shellsrv glob `*` (matcher + walk dir + push argv)
+- ✅ shellsrv `do_ls` POSIX multi-arg (files + dirs con headers)
+- ✅ shellsrv `exec` builtin con osn_set_fg para Ctrl+C post-execve
+- ✅ opendir valida ENOTDIR (antes silent no-output en files)
+- ✅ task_reap_dead grace 4 pasadas (waiters capturan exit_code de fast tasks)
+- ✅ kernel_fg_pid clear en proc_exit_current_user
+- ✅ init-respawn watchdog (consrv/kbdsrv/shellsrv auto-restart)
 - ✅ Disk-resident /bin (Fase 1) — bootstrap dumpea ELFs a /sd/bin + aliasfs
+- ✅ **Fase 2 disk-resident FINAL** — sd.img poblado al build via mtools (64 ELFs), kernel binary 7.6 MB → 1.1 MB (-85%)
+- ✅ **SYS_EXECVE (#59)** + libc execve/execv/execvp + /bin/exectest
 - ✅ Coreutils completos (~20 ELFs nuevos): env wc pwd uname basename dirname tail seq yes tee date printf grep sort uniq cut tr banner which clear tree
-- ✅ README.md + CREATE_ELF.es.md + STATUS.md + **ARCH.md** actualizados
+- ✅ README.md + CREATE_ELF.es.md + STATUS.md + ARCH.md actualizados
 
 Pendiente:
-- Fase 2 disk-resident final: popular sd.img al build via mtools + borrar embedded blobs del kernel
+- `fork` POSIX puro (hoy `osn_spawn` + `execve` cubre los casos comunes; falta fork-sin-exec con COW)
 
 ### FASE 11 — Drivers a ring 3 (futuro, NO mezclar con 10)
 - IRQ delegation por IPC desde kernel-side handlers

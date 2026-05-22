@@ -83,3 +83,20 @@ int64_t proc_execve_pipeline(const char *const paths[],
  */
 __attribute__((noreturn))
 void proc_exit_current_user(int exit_code);
+
+/*
+ * proc_execve_replace — Linux execve(2) semantics. Replaces the
+ * current task's user-mode image with the program at `path`, keeping
+ * the same pid, kernel stack, fd table, cwd, and FXSAVE area lifecycle.
+ *
+ *   args  : space-separated argv-tail (argv[1..N], same shape as
+ *           proc_execve). build_argv_block tokenizes it.
+ *   envp  : NULL-terminated kernel array of "KEY=VAL" strings.
+ *
+ * On success this function NEVER returns — it calls sched_resume_jump
+ * after swapping in the new pml4. On failure (file not found, bad
+ * ELF, OOM) the OLD task image is fully preserved and the function
+ * returns a negated osnos_status_t.
+ */
+int64_t proc_execve_replace(const char *path, const char *args,
+                              const char *const *envp);

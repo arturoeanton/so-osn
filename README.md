@@ -6,31 +6,35 @@ filesystem virtual, syscalls compatibles con Linux x86_64 y una
 mini-libc propia para programas de usuario en ring 3.
 
 ```
-   osnos x86_64 — shellsrv (ring 3, FASE 10.4)
-   shellsrv:/home$ ls
+   osnos x86_64 — shellsrv (ring 3, post-FASE 10 + Fase 2 disk-resident)
+   shellsrv:/$ ls /home
    README.TXT  HELLO.TXT  .oshrc  .history
-   shellsrv:/home$ cat README.TXT
+   shellsrv:/$ ls /bin/h*               # glob expansion
+   /bin/hello  /bin/head  /bin/httpd  /bin/hello_libc  /bin/hello_elf
+   shellsrv:/$ true && echo a || echo b ; echo $?    # ;, &&, ||, $?
+   a
+   0
+   shellsrv:/$ cat README.TXT
    Welcome to osnos.
-   shellsrv:/home$ hello
+   shellsrv:/$ hello                    # from /sd/bin/hello (disk-resident)
    hello, world
-   shellsrv:/home$ echo persistente > /sd/note
-   shellsrv:/home$ # reboot
-   shellsrv:/home$ cat /sd/note
+   shellsrv:/$ echo persistente > /sd/note && cat /sd/note
    persistente
-   shellsrv:/home$ env
+   shellsrv:/$ env
    PATH=/bin
    HOME=/home
    SHELL=/bin/shellsrv
    OSNAME=osnos
-   shellsrv:/home$ ls /home | grep TXT | sort   # full pipes + redirects
+   shellsrv:/$ ls /home | grep TXT | sort   # full pipes + redirects
    HELLO.TXT
    README.TXT
-   shellsrv:/home$ httpd &        # background
+   shellsrv:/$ httpd &              # background
    [1] pid=7 &
-   shellsrv:/home$ jobs
+   shellsrv:/$ jobs
    [1] pid=7 running httpd
-   shellsrv:/home$ # desde otro host:  curl http://localhost:8080/
-   shellsrv:/home$ ovi .oshrc     # editor modal vim-style
+   shellsrv:/$ exec /bin/top        # execve(2) — same pid, replaces shell
+   # top runs; Ctrl+C → kernel watchdog respawns shellsrv automatically
+   shellsrv:/$ ovi .oshrc           # editor modal vim-style
    # i = insert, Esc = normal, hjkl = move,
    # x = del char, dd = del línea, :w = save, :q = quit
 ```
@@ -231,29 +235,31 @@ Diagrama completo + walkthroughs paso a paso ("una tecla viaja por
 todo el sistema", "un comando `ls /home` viaja por todo el sistema")
 están en [`osnos/ARCH.md`](osnos/ARCH.md).
 
-### Secuencia de boot (`kmain` en `src/kernel/main.c`, post-FASE 10)
+### Secuencia de boot (`kmain` en `src/kernel/main.c`, post-FASE 10 + Fase 2)
 
 1. Validar Limine + framebuffer → `framebuffer_init`.
 2. Memoria: `pmm_init → vmm_init → kheap_init`.
 3. CPU: `gdt_init → tss_init → idt_init → uaccess_init → syscall_msr_init`.
 4. Interrupciones: `pic_init → lapic_init → timer_init` (PIT @ 100 Hz).
-   `block_ata_init` corre IDENTIFY contra el primary IDE master; si
-   responde, FAT16 se monta en `/sd`.
+   `block_ata_init` corre IDENTIFY contra el primary IDE master.
 5. Microkernel: `ipc_init → pipe_init → task_init → reaper_init →
    scheduler_init → syscall_init → ramfs_init → bootstrap_fs`.
-6. `bootstrap_fs` monta `/`, `/sys`, `/dev`, `/sd` (si hay FAT). En
-   primer boot dumpea los ~60 ELFs embedded a `/sd/bin` (FASE2-1 fix
-   permite dir-chain extension), luego monta `/bin → /sd/bin` via
-   aliasfs. Diskless: `/bin` queda servido por binfs sintético.
+6. `bootstrap_fs` monta `/`, `/sys`, `/dev`, `/sd` (FAT16 si hay
+   disco). Con disco: aliasfs `/bin → /sd/bin` y `/home → /sd/home`
+   (la imagen `sd.img` ya viene poblada por el build script con
+   los 64 ELFs en `/sd/bin`). Sin disco: binfs sintético sobre el
+   ROM recovery set (consrv, kbdsrv, shellsrv, banner).
 7. Crear el keyboard feeder kernel-side (`task_create("keyboard",
-   keyboard_server_tick)`) — solo hace `keyboard_poll` →
-   `devfs_input_push`.
+   keyboard_server_tick)`) — único server kernel-side.
 8. Spawn de los 3 servers ring 3 vía `proc_execve("/bin/consrv")`,
    `/bin/kbdsrv`, `/bin/shellsrv`. Cada uno se auto-registra contra
-   su SERVER_*; kmain también lo pre-registra para evitar la race
-   inicial.
-9. `keyboard_server_init()` (hardware), `sti`.
-10. `scheduler_loop()` — guarda un punto de longjmp y nunca vuelve.
+   su SERVER_*; kmain también lo pre-registra para evitar la race.
+9. Spawn del **init-respawn watchdog**: cada ~100ms checkea si los
+   3 servers ring-3 siguen vivos y los respawnea si murieron
+   (ej. `exec /bin/top` reemplaza shellsrv → echo exits → watchdog
+   trae shellsrv de vuelta).
+10. `keyboard_server_init()` (hardware), `sti`.
+11. `scheduler_loop()` — guarda un punto de longjmp y nunca vuelve.
 
 ---
 
@@ -273,9 +279,9 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | `copy_from_user` / `copy_to_user` con fault recovery | ✅ |
 | VFS + ramfs + sysfs + devfs + binfs + aliasfs + fat16 | ✅ |
 | **FASE 10 — Servers en ring 3** (consrv, kbdsrv, shellsrv) | ✅ |
-| **Shell ring-3** con line editor + history + flechas + pipes + redir + jobs + `cd ..` + `$VAR` + .oshrc | ✅ |
+| **Shell ring-3** con line editor + history + flechas + pipes + redir + jobs + `cd ..` + `$VAR` + `$?` + `;` `&&` `\|\|` + `exec` + .oshrc | ✅ |
+| **Glob `*`** en shellsrv (matcher recursivo, walk dir, push a argv) | ✅ |
 | **Coreutils** (60+ ELFs: ls cat cp mv rm mkdir touch echo wc head tail grep sort uniq cut tr seq yes tee env pwd which printf date uname basename dirname clear tree banner …) | ✅ |
-| Wildcards `*` en ls/cat/rm | ✅ |
 | ELF loader (Elf64 ET_EXEC, PT_LOAD, ring 3) | ✅ |
 | mini-libc (stdio, stdlib, string, unistd, malloc, env) | ✅ |
 | Per-task fd tables (16 fds) + pipe(2) + dup/dup2/fcntl | ✅ |
@@ -283,8 +289,10 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | FXSAVE/FXRSTOR per-task (FP/SSE multi-task seguro) | ✅ |
 | Job control: `&`, `jobs`, `fg`, `bg`, Ctrl+Z, `kill` | ✅ |
 | `sys_spawn(2)` con fd inheritance + `osn_spawn` libc | ✅ |
-| Driver ATA PIO + FAT16 read/write + dir-chain extension + persistencia | ✅ |
-| **/bin disk-resident** via /bin→/sd/bin aliasfs + ROM fallback | ✅ |
+| **`execve(2)` real** (SYS_EXECVE=59) — in-place ELF replacement, same pid+fds+cwd | ✅ |
+| **init-respawn watchdog** — consrv/kbdsrv/shellsrv auto-restart on death | ✅ |
+| Driver ATA PIO + FAT16 read/write + dir-chain extension + NT case-bits + persistencia | ✅ |
+| **/bin disk-resident** — sd.img poblado al build via mtools, kernel binary 1.1 MB (era 7.6 MB) | ✅ |
 | Driver RTL8139 + ARP + IPv4 + ICMP + UDP + TCP completo | ✅ |
 | Sockets POSIX (socket/bind/listen/accept/connect/send/recv/select) | ✅ |
 | DNS resolver + getaddrinfo (vía slirp 10.0.2.3) | ✅ |
@@ -295,8 +303,8 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | `/bin/ovi` editor modal vim-style (hjkl + flechas, i/a/o, :w/:q) | ✅ |
 | `getcwd` / `chdir` syscalls + per-task cwd (POSIX) | ✅ |
 | mmap/munmap anónimo + brk/sbrk | ✅ |
-| Pre-populate sd.img al build (Fase 2 final) | ⏳ |
-| `fork` / `exec` real (hoy sólo `osn_spawn`) | ❌ |
+| Pre-populate sd.img al build (Fase 2 final) | ✅ |
+| `fork` POSIX puro (hoy `osn_spawn` + `execve`) | ❌ |
 | Multi-core (SMP) | ❌ |
 
 ---
@@ -497,22 +505,36 @@ Cerrado recientemente:
   - 10.4 shellsrv: shell ring-3 con line editor (raw mode + history +
     flechas + cursor visible), pipes/redirects/jobs, fg/bg/Ctrl+Z,
     $VAR expansion, .oshrc, export/unset, PATH search.
-- **Disk-resident /bin (Fase 1)**: bootstrap dumpea los ~60 ELFs a
-  /sd/bin al primer boot. aliasfs /bin → /sd/bin. exec.c prefiere
+- **Disk-resident /bin (Fase 1 + Fase 2)**: bootstrap dumpea los ROM
+  ELFs (consrv/kbdsrv/shellsrv/banner) a /sd/bin al primer boot, y
+  el **build script** (GNUmakefile via mtools) **popula sd.img con
+  los 64 ELFs al hornear**. aliasfs /bin → /sd/bin. exec.c prefiere
   disco; embedded ROM es fallback. FAT16 dir-chain extension fix
-  (extend_dir_chain) permite >9 entries por subdir.
+  permite >9 entries por subdir. NT case-bits respetados →
+  lowercase SFNs (hello/head/httpd) visibles correctamente.
+  **Kernel binary: 7.6 MB → 1.1 MB (85% reducción)**.
+- **execve(2) real** (SYS_EXECVE=59): in-place ELF replacement.
+  `proc_execve_replace` swap pml4/entry/stack/heap, address_space_destroy
+  el viejo, sched_resume_jump. Preserva pid + fds + cwd. libc
+  `execve` + `execv` + `execvp` listos. `exec` builtin en shellsrv
+  con osn_set_fg(getpid) para que Ctrl+C funcione tras el exec.
+- **init-respawn watchdog**: kernel task que checkea cada ~100ms
+  si consrv/kbdsrv/shellsrv siguen vivos; si murieron (e.g. exec
+  /bin/top + Ctrl+C), los respawnea + re-registra SERVER_*.
+  Sleep via BLOCKED + wakeup_at_ms — sin spin.
+- **Shellsrv polish FINAL**: `;` / `&&` / `||` operators con
+  tracking de `$?` (exit_code agregado a osnos_taskinfo_t); glob
+  `*` con matcher recursivo + walk dir; `cd` con `..` `.` paths
+  relativos; `ls /` muestra mount points sintéticos; `do_ls`
+  POSIX multi-arg (files + dirs); ovi output buffering 16 KB +
+  framebuffer chunk safe-split (CSI no parte); task_t.name inline
+  32 B; ipc_send rewrite SID→pid; `$VAR` / `${VAR}` expansion +
+  `export` / `unset` / `setenv` + .oshrc auto-load + opendir
+  valida ENOTDIR + task_reap_dead grace de 4 pasadas para que
+  shellsrv capture exit_code de tasks fast-finishing.
 - **Coreutils completos**: env, wc, pwd, uname, basename, dirname,
   tail, seq, yes, tee, date, printf, grep, sort, uniq, cut, tr,
-  banner, which, clear, tree — todos como ELFs.
-- **Polish + bug-fixes finales** (post-FASE 10.4): shellsrv `cd` con
-  `..` `.` paths relativos (`path_normalize`); `ls /` muestra mount
-  points sintéticos (vfs_readdir injection); ovi output buffering
-  16 KB + framebuffer chunk safe-split (CSI sequences no se parten
-  al medio); task_t.name inline 32 B (sys_taskinfo ya no faulta con
-  user-pointer leaks de proc_execve VFS path); ipc_send rewrite
-  SID→pid (ring-3 receivers filtran por t->pid); shellsrv `$VAR` /
-  `${VAR}` expansion + `export` / `unset` / `setenv` builtins +
-  .oshrc auto-load al boot.
+  banner, which, clear, tree — todos como ELFs disk-resident.
 - **FASE 8.5 — Networking completo**: driver RTL8139 + Ethernet/ARP +
   IPv4/ICMP + UDP + TCP + DNS + sockets POSIX. `/bin/httpd` sirve
   FAT16 sobre HTTP a Firefox real; `selectserver.c` de Beej verbatim.
@@ -521,18 +543,15 @@ Cerrado recientemente:
 
 Las próximas fases grandes:
 
-1. **Fase 2 final disk-resident**: popular sd.img al build (mtools en
-   GNUmakefile) + borrar embedded blobs del kernel. Kernel shrink:
-   ~5MB → ~500KB.
-2. **fork/exec** POSIX real (hoy hay `osn_spawn` con fd inheritance,
-   estilo posix_spawn).
-3. **FASE 11 — Drivers a ring 3**: PS/2, framebuffer, ATA, RTL8139
+1. **`fork` POSIX puro** (hoy hay `osn_spawn` + `execve`; falta el
+   fork-sin-exec con copy-on-write).
+2. **FASE 11 — Drivers a ring 3**: PS/2, framebuffer, ATA, RTL8139
    como ELFs en `elfs/osn-driver/`. Requiere IRQ delegation, MMIO
    mapping per-task, port-IO syscall, DMA bouncing.
-4. **TUI potente** (FASE 12): mini Norton Commander, viewer, syntax
+3. **TUI potente** (FASE 12): mini Norton Commander, viewer, syntax
    highlighting en ovi, multi-pane.
-5. **Gráfico** (FASE 13): window server + terminal en ventana + mouse.
-6. **SMP** (mucho después).
+4. **Gráfico** (FASE 13): window server + terminal en ventana + mouse.
+5. **SMP** (mucho después).
 
 Detalle en `osnos/PLAN.md` y `osnos/STATUS.md`.
 

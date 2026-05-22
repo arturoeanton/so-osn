@@ -32,6 +32,9 @@
 #include "../fs/ramfs.h"
 #include "../net/eth.h"
 
+/* Forward decl for the respawn watchdog tick. Defined below. */
+static void server_respawn_tick(void);
+
 // ======================================================
 // Limine requests
 // ======================================================
@@ -174,6 +177,14 @@ void kmain(void) {
         service_register(SERVER_SHELL, (uint64_t)shellsrv_pid);
     }
 
+    /* Watchdog: cada ~100ms checkea si shellsrv sigue vivo. Si murió
+     * (e.g. por `exec /bin/foo`, sys_exit, o fault), lo respawnea +
+     * re-registra SERVER_SHELL. Sin esto, un `exec` interactivo deja
+     * el sistema sin shell y aparece como cuelgue. Mismo para
+     * consrv/kbdsrv por simetría — si cualquiera muere, init lo
+     * trae de vuelta. */
+    task_create("init-respawn", server_respawn_tick);
+
     keyboard_server_init();
 
     /*
@@ -191,4 +202,62 @@ void kmain(void) {
      * losing the kernel's runtime.
      */
     scheduler_loop();
+}
+
+/* ----------------------------------------------------------------- */
+/* init-respawn watchdog (kernel-side cooperative task)               */
+/* ----------------------------------------------------------------- */
+/*
+ * Periodically checks the 3 ring-3 servers (consrv / kbdsrv /
+ * shellsrv). If any one of them has died (state == TASK_UNUSED or
+ * pid mismatch in their service slot), respawns it and re-registers
+ * the service pid.
+ *
+ * Triggered: user runs `exec /bin/echo "..."` from interactive
+ * shellsrv, echo finishes, shellsrv slot becomes UNUSED → no shell
+ * to type into → system appears hung. With this watchdog, shellsrv
+ * comes right back.
+ *
+ * Cooperative: returns after one check. Scheduler dispatches us
+ * again next round-robin. With ~5 tasks total and 50ms preempt
+ * quantum, that's a check every ~50-200ms — fast enough to feel
+ * instant after `exec`.
+ */
+static void respawn_if_dead(int sid, const char *path) {
+    uint64_t pid = service_get_pid((uint64_t)sid);
+    int alive = 0;
+    if (pid != 0) {
+        for (size_t i = 0; i < 16; i++) {
+            const task_t *t = task_slot(i);
+            if (!t) continue;
+            if (t->pid != pid) continue;
+            if (t->state == TASK_UNUSED || t->state == TASK_DEAD) break;
+            alive = 1;
+            break;
+        }
+    }
+    if (alive) return;
+
+    /* Re-spawn. proc_execve allocates a new pid. */
+    int64_t new_pid = proc_execve(path, "", 0);
+    if (new_pid > 0) {
+        service_register((uint64_t)sid, (uint64_t)new_pid);
+    }
+}
+
+static void server_respawn_tick(void) {
+    respawn_if_dead(SERVER_CONSOLE,  "/bin/consrv");
+    respawn_if_dead(SERVER_KEYBOARD, "/bin/kbdsrv");
+    respawn_if_dead(SERVER_SHELL,    "/bin/shellsrv");
+
+    /* Sleep ~100 ms between checks. Without this the scheduler
+     * re-dispatches us every round-robin cycle (~50us with idle
+     * tasks), accumulating millions of pointless wake-ups. By
+     * setting state=BLOCKED with a wakeup_at_ms timer,
+     * task_check_wakeups flips us back to READY at the right time. */
+    task_t *self = task_current();
+    if (self) {
+        self->wakeup_at_ms = timer_ms() + 100;
+        self->state        = TASK_BLOCKED;
+    }
 }

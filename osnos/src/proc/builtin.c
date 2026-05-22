@@ -3,16 +3,28 @@
 #include "../lib/string.h"
 
 /*
- * Registry of /bin entries. After FASE 7's tool migration, every
- * non-demo program is a libc-linked ELF (USERELF). The remaining
- * kernel-side or hand-asm flavours are kept as demos:
+ * Registry of /bin entries — POST FASE 2 disk-resident.
  *
- *   - flat user blobs (USER) — minimal ring-3 asm; useful to verify
- *     the syscall path end-to-end without involving libc / ELF
- *   - hello_elf (USERELF, bare crt0 inside the source) — proves the
- *     ELF loader doesn't depend on libc
+ * Since FASE 2 the kernel is no longer the canonical store for ring-3
+ * binaries: sd.img holds the full set of ELFs in /sd/bin, populated by
+ * the GNUmakefile at build time. Only a **recovery ROM** stays embedded
+ * inside the kernel image so the system can boot even when:
+ *   - the disk is missing entirely (diskless QEMU run)
+ *   - /sd/bin got wiped / corrupted
+ *   - mtools wasn't available at build time and sd.img couldn't be
+ *     populated
  *
- * Everything else moved into tests/ as standalone libc programs.
+ * The ROM set is the minimum to make a usable system:
+ *   - consrv, kbdsrv, shellsrv   (the 3 ring-3 servers spawned by kmain)
+ *   - banner                     (.oshrc default greeting)
+ * Plus the three hand-asm flat blobs (used to verify the ring-3 path
+ * without involving the ELF loader at all) and the bare user_hello
+ * ELF (proves the ELF loader doesn't depend on libc). These three
+ * weigh ~150 bytes each so they're free to keep.
+ *
+ * Every other tool (~57 ELFs: ls, cat, env, grep, ...) lives ONLY on
+ * disk. exec.c prefers the VFS path; if a /bin/<name> is asked for
+ * and isn't on disk, builtin_find returns NULL → ENOENT.
  */
 
 /* ---------------------------------------------------------------- */
@@ -21,23 +33,18 @@
 
 /*
  * /bin/ring3hello — fast-path SYSCALL.
- *
- * Identical output to the int-0x80 variant below; difference is that
- * here the user code uses the SYSCALL instruction (LSTAR/STAR/FMASK
- * path) instead of the legacy interrupt gate. Both ABIs share the same
- * dispatcher and register layout.
  */
 __asm__ (
     ".section .text\n"
     ".global user_hello_start\n"
     ".global user_hello_end\n"
     "user_hello_start:\n"
-    "    movq $1, %rax\n"                /* sys_write */
-    "    movq $1, %rdi\n"                /* fd = stdout */
+    "    movq $1, %rax\n"
+    "    movq $1, %rdi\n"
     "    leaq user_hello_msg(%rip), %rsi\n"
-    "    movq $17, %rdx\n"               /* len("hello from ring3\n") */
+    "    movq $17, %rdx\n"
     "    syscall\n"
-    "    movq $60, %rax\n"               /* sys_exit */
+    "    movq $60, %rax\n"
     "    movq $0, %rdi\n"
     "    syscall\n"
     "user_hello_msg:\n"
@@ -59,7 +66,7 @@ __asm__ (
     "    movq $1, %rax\n"
     "    movq $1, %rdi\n"
     "    leaq user_int80_msg(%rip), %rsi\n"
-    "    movq $19, %rdx\n"               /* len("hello via int 0x80\n") */
+    "    movq $19, %rdx\n"
     "    int  $0x80\n"
     "    movq $60, %rax\n"
     "    movq $0, %rdi\n"
@@ -73,8 +80,7 @@ extern const uint8_t user_int80_start[];
 extern const uint8_t user_int80_end[];
 
 /*
- * /bin/ring3fault — deliberate ring-3 fault. Used by the test suite
- * to verify that the kernel kills the offending task and recovers.
+ * /bin/ring3fault — deliberate ring-3 fault for testing recovery.
  */
 __asm__ (
     ".section .text\n"
@@ -100,76 +106,21 @@ extern const uint8_t user_fault_start[];
 extern const uint8_t user_fault_end[];
 
 /* ---------------------------------------------------------------- */
-/* Embedded ELF blobs (built from tests/ sources via the Makefile)   */
+/* Embedded ELF blobs — ROM only (4 critical files + bare demo)      */
 /* ---------------------------------------------------------------- */
 
 #define DECLARE_ELF(name) \
     extern const uint8_t _binary_##name##_elf_start[]; \
     extern const uint8_t _binary_##name##_elf_end[]
 
+/* Bare ELF demo — no libc, hand-rolled _start. Tiny (~1 KiB). */
 DECLARE_ELF(user_hello);
-DECLARE_ELF(hello_libc);
-DECLARE_ELF(hello);
-DECLARE_ELF(echo);
-DECLARE_ELF(true);
-DECLARE_ELF(false);
-DECLARE_ELF(init);
-DECLARE_ELF(cat);
-DECLARE_ELF(touch);
-DECLARE_ELF(mkdir);
-DECLARE_ELF(rmdir);
-DECLARE_ELF(rm);
-DECLARE_ELF(mv);
-DECLARE_ELF(cp);
-DECLARE_ELF(ls);
-DECLARE_ELF(calc);
-DECLARE_ELF(osh);
-DECLARE_ELF(sleep);
-DECLARE_ELF(kill);
-DECLARE_ELF(top);
-DECLARE_ELF(ovi);
-DECLARE_ELF(tcc);
-DECLARE_ELF(head);
-DECLARE_ELF(libctest);
-DECLARE_ELF(udptest);
-DECLARE_ELF(echotcp);
-DECLARE_ELF(selecttest);
-DECLARE_ELF(selectserver);
-DECLARE_ELF(tcpclient);
-DECLARE_ELF(httpd);
-DECLARE_ELF(ttytest);
-DECLARE_ELF(envtest);
-DECLARE_ELF(fptest);
-DECLARE_ELF(mmaptest);
-DECLARE_ELF(pipetest);
-DECLARE_ELF(fbtest);
-DECLARE_ELF(inputtest);
-DECLARE_ELF(kerntest);
-DECLARE_ELF(spawntest);
+
+/* ROM recovery set: the 3 ring-3 servers + banner. ~150 KiB total. */
 DECLARE_ELF(consrv);
 DECLARE_ELF(kbdsrv);
 DECLARE_ELF(shellsrv);
-DECLARE_ELF(env);
-DECLARE_ELF(wc);
-DECLARE_ELF(pwd);
-DECLARE_ELF(uname);
-DECLARE_ELF(basename);
-DECLARE_ELF(dirname);
-DECLARE_ELF(tail);
-DECLARE_ELF(seq);
-DECLARE_ELF(yes);
-DECLARE_ELF(tee);
-DECLARE_ELF(date);
-DECLARE_ELF(printf);
-DECLARE_ELF(grep);
-DECLARE_ELF(sort);
-DECLARE_ELF(uniq);
-DECLARE_ELF(cut);
-DECLARE_ELF(tr);
 DECLARE_ELF(banner);
-DECLARE_ELF(which);
-DECLARE_ELF(clear);
-DECLARE_ELF(tree);
 
 #undef DECLARE_ELF
 
@@ -196,71 +147,12 @@ static const builtin_t builtins[] = {
             _binary_user_hello_elf_start, _binary_user_hello_elf_end,
             "first real ring-3 ELF (no libc)"),
 
-    /* Libc demo with formatted printf + malloc + free. */
-    ELF(hello_libc, "libc demo: printf, malloc, strcpy, formats"),
-
-    /* Tools — every one is an ELF that links against the osnos libc. */
-    ELF(hello, "prints hello, world"),
-    ELF(echo,  "prints its arguments"),
-    ELF(true,  "exits 0"),
-    ELF(false, "exits 1"),
-    ELF(init,  "first process (no-op today)"),
-    ELF(cat,   "prints the contents of files"),
-    ELF(touch, "creates an empty file (or no-op if exists)"),
-    ELF(mkdir, "creates a directory"),
-    ELF(rmdir, "removes an empty directory"),
-    ELF(rm,    "removes one or more files"),
-    ELF(mv,    "moves/renames a file or directory"),
-    ELF(cp,    "copies a file"),
-    ELF(ls,    "lists directory entries (uses opendir/readdir)"),
-    ELF(calc,  "integer arithmetic evaluator (+, -, *, /, %, parens)"),
-    ELF(osh,   "mini script interpreter: vars, if/while, print"),
-    ELF(sleep, "sleep SECONDS (cooperative hlt-loop)"),
-    ELF(kill,  "kill PID (sets task kill_pending; delivers at next return)"),
-    ELF(top,   "live task viewer (Ctrl+C to exit)"),
-    ELF(ovi,   "vim-style modal text editor: ovi FILE"),
-    ELF(tcc,   "C compiler (TinyCC) — STUB, real port pending"),
-    ELF(head,  "print the first N lines of stdin / FILE"),
-    ELF(libctest, "libc smoke test (FILE*, qsort, setjmp, inet_pton, etc.)"),
-    ELF(udptest,  "UDP echo on port 1234 via socket/bind/recvfrom/sendto"),
-    ELF(echotcp,  "TCP echo on port 80 via socket/bind/listen/accept/recv/send"),
-    ELF(selecttest, "select() demo: multiplex TCP listen + stdin"),
-    ELF(selectserver, "Beej's selectserver.c — multi-client chat on TCP 9034"),
-    ELF(tcpclient,    "outbound TCP demo: tcpclient HOST PORT"),
-    ELF(httpd,        "minimal HTTP/1.0 server, serves /sd/ files"),
-    ELF(ttytest,      "demo termios canonical vs raw mode"),
-    ELF(envtest,      "dump environ + setenv/unsetenv smoke test"),
-    ELF(fptest,       "stress per-task FXSAVE/FXRSTOR (run twice in //)"),
-    ELF(mmaptest,     "smoke test anonymous mmap/munmap"),
-    ELF(pipetest,     "exercise sys_pipe(2) + per-task pipe fds"),
-    ELF(fbtest,       "write a line to /dev/fb0 (FASE 10.0.c)"),
-    ELF(inputtest,    "read 5 keystrokes from /dev/input0 (FASE 10.0.c)"),
-    ELF(kerntest,     "FASE 10 ABI userland tests (sys_taskinfo, dev, pipe, dup)"),
-    ELF(spawntest,    "exercise SYS_SPAWN + fd inheritance (FASE 10.4 prereq)"),
-    ELF(consrv,       "console server ring-3 (FASE 10.1) — spawned by kmain"),
-    ELF(kbdsrv,       "keyboard policy server ring-3 (FASE 10.2) — spawned by kmain"),
-    ELF(shellsrv,     "ring-3 shell skeleton (FASE 10.4 chunk 1) — run as sub-shell"),
-    ELF(env,          "print the environment"),
-    ELF(wc,           "count lines, words, characters"),
-    ELF(pwd,          "print working directory"),
-    ELF(uname,        "system identification"),
-    ELF(basename,     "strip directory part of a path"),
-    ELF(dirname,      "print directory part of a path"),
-    ELF(tail,         "print last N lines of a file"),
-    ELF(seq,          "print arithmetic sequence"),
-    ELF(yes,          "repeat a string forever"),
-    ELF(tee,          "copy stdin to stdout and files"),
-    ELF(date,         "print uptime / time since boot"),
-    ELF(printf,       "format and print"),
-    ELF(grep,         "print lines matching a pattern"),
-    ELF(sort,         "sort lines lexicographically"),
-    ELF(uniq,         "dedupe consecutive identical lines"),
-    ELF(cut,          "extract fields from each line"),
-    ELF(tr,           "translate / delete characters"),
-    ELF(banner,       "print the osnos welcome banner"),
-    ELF(which,        "find a command in $PATH"),
-    ELF(clear,        "clear the terminal screen"),
-    ELF(tree,         "recursive directory listing"),
+    /* Recovery ROM — only the bare minimum to boot. Everything else
+     * lives in /sd/bin (populated by the build script). */
+    ELF(consrv,   "ring-3 console server (recovery ROM)"),
+    ELF(kbdsrv,   "ring-3 keyboard server (recovery ROM)"),
+    ELF(shellsrv, "ring-3 shell (recovery ROM)"),
+    ELF(banner,   "osnos welcome banner (recovery ROM)"),
 };
 
 #undef USER

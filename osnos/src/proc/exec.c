@@ -565,6 +565,14 @@ void proc_exit_current_user(int exit_code) {
     t->kernel_stack_base = 0;
     t->exit_code         = exit_code;
 
+    /* If the dying task held the TTY foreground, clear it. Otherwise
+     * the next Ctrl+C would chase a ghost pid and be silently lost —
+     * the failure mode after `exec /bin/top` exits and shellsrv
+     * respawns: the new shellsrv has a different pid, but
+     * kernel_fg_pid still points to dead top. */
+    extern uint64_t kernel_fg_pid;
+    if (kernel_fg_pid == t->pid) kernel_fg_pid = 0;
+
     uint64_t kpml4_phys =
         (uint64_t)vmm_kernel_pml4() - pmm_hhdm_offset();
     __asm__ volatile ("mov %0, %%cr3" :: "r"(kpml4_phys) : "memory");
@@ -685,6 +693,157 @@ int64_t proc_execve(const char *path, const char *args,
  * proc_execve and pass their own envp. */
 int64_t proc_exec(const char *path, const char *args) {
     return proc_execve(path, args, 0);
+}
+
+/* ---------------------------------------------------------------- */
+/* proc_execve_replace — in-place ELF replacement (Linux execve)    */
+/* ---------------------------------------------------------------- */
+
+/*
+ * Internal helper: resolve `path` to (blob, blob_size) honoring the
+ * VFS-first / builtin-ROM-fallback rule used by proc_execve. On
+ * success, *out_blob points at the bytes and *out_owned is set if
+ * the caller must kfree(*out_blob) after consuming them.
+ *
+ * The split into a helper keeps proc_execve and proc_execve_replace
+ * agreeing on lookup semantics without duplicating ~40 LOC.
+ */
+static osnos_status_t resolve_executable(const char *path,
+                                          const uint8_t **out_blob,
+                                          size_t *out_size,
+                                          uint8_t **out_owned)
+{
+    *out_blob  = 0;
+    *out_size  = 0;
+    *out_owned = 0;
+
+    if (os_strstarts(path, "/bin/")) {
+        vfs_stat_t st;
+        osnos_status_t s_check = vfs_stat(path, &st);
+        int vfs_has_file = (s_check == OSNOS_OK && st.type == VFS_NODE_REG &&
+                             st.size > 0);
+        if (!vfs_has_file) {
+            const char *bn = path + 5;
+            const builtin_t *b = builtin_find(bn);
+            if (b && b->elf_start) {
+                *out_blob = b->elf_start;
+                *out_size = (size_t)(b->elf_end - b->elf_start);
+                return OSNOS_OK;
+            }
+            if (b) return OSNOS_ENOENT;   /* known name but no ELF (flat blob) */
+        }
+    }
+
+    vfs_stat_t st;
+    osnos_status_t s = vfs_stat(path, &st);
+    if (s != OSNOS_OK)              return s;
+    if (st.type == VFS_NODE_DIR)    return OSNOS_EISDIR;
+    if (st.type != VFS_NODE_REG)    return OSNOS_ENOEXEC;
+    if (st.size == 0)               return OSNOS_ENOEXEC;
+    if (st.size > EXEC_VFS_BLOB_MAX) return OSNOS_E2BIG;
+
+    size_t sz = (size_t)st.size;
+    uint8_t *blob = (uint8_t *)kmalloc(sz);
+    if (!blob) return OSNOS_ENOMEM;
+
+    size_t got = 0;
+    s = vfs_read(path, (char *)blob, sz, &got);
+    if (s != OSNOS_OK || got != sz) {
+        kfree(blob);
+        return s != OSNOS_OK ? s : OSNOS_EIO;
+    }
+
+    *out_blob  = blob;
+    *out_size  = sz;
+    *out_owned = blob;
+    return OSNOS_OK;
+}
+
+int64_t proc_execve_replace(const char *path, const char *args,
+                              const char *const *envp)
+{
+    task_t *t = task_current();
+    if (!t || !t->pml4) return -(int64_t)OSNOS_ESRCH;
+    if (!path)          return -(int64_t)OSNOS_EFAULT;
+    if (!args) args = "";
+
+    /* 1. Resolve path → blob (VFS first, builtin ROM fallback). */
+    const uint8_t *blob = 0;
+    size_t blob_size = 0;
+    uint8_t *blob_owned = 0;
+    osnos_status_t s = resolve_executable(path, &blob, &blob_size, &blob_owned);
+    if (s != OSNOS_OK) return -(int64_t)s;
+
+    /* 2. Load into a SEPARATE new pml4. The old one stays live until
+     *    everything below succeeds — execve must be all-or-nothing. */
+    uint64_t *new_pml4 = 0;
+    uint64_t  new_entry = 0;
+    uint64_t  new_stack_top = 0;
+    s = elf_load(blob, blob_size, &new_pml4, &new_entry, &new_stack_top);
+    if (blob_owned) kfree(blob_owned);    /* blob copied into new_pml4 */
+    if (s != OSNOS_OK) return -(int64_t)s;
+
+    /* Derive basename for task name + as argv[0]. */
+    const char *base = path;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/') base = p + 1;
+    }
+
+    /* 3. Build the System V init block on the new stack. */
+    uint64_t init_rsp = build_argv_block(new_pml4, new_stack_top, base, args, envp);
+    if (init_rsp == 0) {
+        address_space_destroy(new_pml4);
+        return -(int64_t)OSNOS_E2BIG;
+    }
+
+    /* 4. SUCCESS — swap in the new image. POSIX execve preserves:
+     *      pid, kernel_stack, fds[], cwd, kill_pending? (cleared),
+     *      saved iret frame (cleared — fresh image starts at new_entry).
+     *    Mmap regions, brk, stdin/stdout_redir all reset. */
+    uint64_t *old_pml4 = t->pml4;
+    t->pml4              = new_pml4;
+    t->user_entry        = new_entry;
+    t->user_stack_top    = init_rsp;
+    t->heap_start        = USER_HEAP_BASE;
+    t->heap_brk          = USER_HEAP_BASE;
+    t->saved_valid       = 0;
+    t->kill_pending      = 0;
+    t->stop_pending      = 0;
+    t->mmap_next         = 0;
+    for (int i = 0; i < TASK_MMAP_MAX; i++) {
+        t->mmap_regions[i].addr = 0;
+        t->mmap_regions[i].len  = 0;
+    }
+    t->stdin_redir [0]   = 0;
+    t->stdout_redir[0]   = 0;
+    t->stdout_append     = 0;
+    t->stdin_redir_off   = 0;
+    t->stdout_redir_off  = 0;
+
+    /* Refresh task name from the new image's basename. */
+    size_t bn = 0;
+    while (base[bn] && bn + 1 < OSNOS_TASK_NAME_MAX) {
+        t->name[bn] = base[bn];
+        bn++;
+    }
+    t->name[bn] = 0;
+
+    fpu_state_init(t->fpu_state);
+
+    /* 5. Free the abandoned address space. Kernel high-half stays
+     *    valid in CR3 (we read kernel code/data from kernel_pml4),
+     *    so destroying the old user low-half here is safe even
+     *    though `current` CR3 still points at it — by the time we
+     *    return to user space we'll be on new_pml4 via the
+     *    trampoline's CR3 reload. */
+    address_space_destroy(old_pml4);
+
+    /* 6. Long-jump back to scheduler. Next dispatch enters
+     *    user_task_trampoline → saved_valid=0 path → iretq with the
+     *    new RIP/RSP. The current syscall stack frame is abandoned;
+     *    the per-task kstack base is reused on next dispatch. */
+    sched_resume_jump();
+    /* unreachable */
 }
 
 /*

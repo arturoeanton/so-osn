@@ -9,9 +9,14 @@ propio address space y entran al kernel vía `syscall` (preferido) o
 `int 0x80` (legacy compat).
 
 Scheduler preemptivo timer-driven (50 ms quantum, sólo CPL=3) sobre
-un loop cooperativo en ring 0. `fork`/`exec` POSIX puro todavía no;
-en su lugar hay `osn_spawn` (SYS_SPAWN=266) con fd inheritance
-estilo posix_spawn.
+un loop cooperativo en ring 0. `fork` POSIX puro todavía no; en su
+lugar hay `osn_spawn` (SYS_SPAWN=266, equivalente a posix_spawn con
+fd inheritance) + `execve` (SYS_EXECVE=59, in-place ELF replacement
+preservando pid/fds/cwd) — la combinación cubre fork+exec atómico.
+
+**Disk-resident** (Fase 2): sd.img se popula al build con todos
+los ELFs (~64) via mtools. El kernel solo embebe consrv/kbdsrv/
+shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 
 ## Capas (post-FASE 10)
 
@@ -42,7 +47,8 @@ estilo posix_spawn.
 |   read/write/open/close/lseek/fstat/mmap/munmap/brk/pipe/      |
 |   dup/dup2/nanosleep/getpid/socket/bind/listen/accept/connect/ |
 |   send/recv/select/fcntl/getcwd/chdir/mkdir/rmdir/rename/      |
-|   unlink/ioctl/getdents64/gettimeofday/time/kill/exit          |
+|   unlink/ioctl/getdents64/gettimeofday/time/kill/exit/         |
+|   execve (#59, in-place ELF replacement)                       |
 |                                                                 |
 |   osnos: IPC_SEND (260) IPC_RECV (261) SERVICE_REGISTER (262)  |
 |   SERVICE_LOOKUP (263) TTY_INPUT (264) TASKINFO (265)          |
@@ -93,9 +99,12 @@ estilo posix_spawn.
 |   block_ata (ATA PIO over IDE primary master, LBA28)           |
 |   pic / lapic / timer (PIT @ 100 Hz for preempt)                |
 +----------------------------------------------------------------+
-| servers/ (ÚNICO server kernel-side restante post-FASE 10):     |
+| Kernel-side cooperative tasks (NO servers, dos helpers):       |
 |   keyboard feeder — keyboard_poll → devfs_input_push           |
 |     (no toca políticas TTY — eso vive en ring 3 kbdsrv)         |
+|   init-respawn — cada ~100ms verifica que consrv/kbdsrv/       |
+|     shellsrv sigan vivos; respawnea si murieron (cubre el      |
+|     post-exec gap). Sleep via state=BLOCKED + wakeup_at_ms.    |
 +----------------------------------------------------------------+
 |                       Limine bootloader                         |
 +----------------------------------------------------------------+
@@ -340,12 +349,33 @@ traducción.
 - Comandos vía tabla `COMMANDS[]` con structs `{ name, fn, help }`.
   El `help` se genera iterando la tabla. Incluye: `help`, `exit`,
   `pwd`, `cd`, `ls`, `cat`, `echo`, `history`, `test`, `jobs`,
-  `fg`, `bg`, `kill`, `export`, `unset`, `setenv`.
+  `fg`, `bg`, `kill`, `export`, `unset`, `setenv`, `exec`.
+- **`exec CMD [args]`** builtin — calls `execve(2)` after
+  `osn_set_fg(getpid())` so Ctrl+C delivers to the new image
+  post-swap. If exec fails (path not found etc), shellsrv stays
+  alive and reports errno.
 - **$VAR / ${VAR} expansion** (post-FASE 10.4): `expand_vars` walk
   + substitución antes del parsing del pipeline. Soporta `\$` escape.
 - **Pipeline parser** (`line_split_stages` + `stage_parse` +
   `run_pipeline`): split en `|`, cada stage soporta `< file`,
   `> file`, `>> file`. Background con trailing `&`.
+- **Operadores de secuencia**: `dispatch` top-level splittea la
+  línea en `;`, `&&`, `||` antes del pipeline parsing. Cada
+  segmento corre via `dispatch_segment`. Decisiones:
+  - `;`  → siempre corre el siguiente
+  - `&&` → corre solo si `last_status == 0`
+  - `||` → corre solo si `last_status != 0`
+  - `last_status` se actualiza después de cada ejecución (builtin
+    return value, o `wait_pid_capture` para externos).
+- **`$?` substitution** en expand_vars — formatea `last_status`
+  como decimal.
+- **Glob `*`** en stage_parse (`expand_glob_into`): tokens con `*`
+  se machean contra entradas del dir implícito (dir prefix o "."
+  si no hay slash). Matcher recursivo (`glob_match`) soporta `*`
+  con captura greedy. Sin matches → token literal (bash default).
+  Storage en `glob_buf[4096]` estático.
+- **`do_ls` POSIX multi-arg**: pase 1 imprime files (sin header),
+  pase 2 lista dirs (con header `PATH:` si hay >1 path).
 - **History**: ring buffer de 16 entradas con dedup consecutivo,
   navegación con flechas up/down, persistencia en `/home/.history`.
 - **.oshrc autoload**: shellsrv ejecuta `/home/.oshrc` línea por
@@ -380,18 +410,18 @@ traducción.
    → `bootstrap_fs`.
 6. `bootstrap_fs`:
    - Monta `/`, `/sys`, `/dev` (synthetic backends).
-   - Si hay FAT mounted: monta `/sd`, hace `mkdir /sd/bin`, dumpea
-     los ELFs embedded a `/sd/bin/*` (con UI de progreso en framebuf;
-     idempotente por vfs_stat — solo writea archivos ausentes; con
-     **FAT16 dir-chain extension** ahora soporta los ~60 ELFs sin
-     ENOSPC). Monta aliasfs `/bin → /sd/bin`. Hace lo mismo con
+   - Si hay FAT mounted: monta `/sd`. **Fase 2 disk-resident**:
+     `sd.img` ya viene con `/bin/*` poblado por el build script
+     (GNUmakefile + mtools), y `/home/{README.TXT,HELLO.TXT,
+     .oshrc}` también pre-cargado. `bootstrap_fs` solo hace `mkdir
+     /sd/bin` (idempotente) y dumpea los 4 ROM ELFs si faltan
+     (recovery path). Monta aliasfs `/bin → /sd/bin` y
      `/home → /sd/home`.
-   - Diskless: monta binfs sintético en `/bin` (read-only blobs
-     desde el kernel) y crea `/home` ramfs.
-   - Seedea `/home/README.TXT`, `/home/.oshrc` (con `export PATH=/bin`
-     etc), etc.
-7. `task_create("keyboard", keyboard_server_tick)` — único server
-   kernel-side restante (poll PS/2 → /dev/input0 ring buffer).
+   - Diskless: monta binfs sintético en `/bin` (read-only sobre el
+     ROM set: consrv/kbdsrv/shellsrv/banner + user_hello) y crea
+     `/home` ramfs.
+7. `task_create("keyboard", keyboard_server_tick)` — kernel-side
+   feeder (poll PS/2 → /dev/input0 ring buffer).
 8. Spawn los 3 servers ring-3 vía `proc_execve` + `service_register`:
    ```c
    int64_t consrv_pid   = proc_execve("/bin/consrv",   "", 0);
@@ -403,9 +433,15 @@ traducción.
    ```
    Pre-registro evita la race: si shellsrv envía IPC antes de
    auto-registrarse, ya tiene el SID resuelto en service_pid[].
-9. `keyboard_server_init()` (PS/2 hardware init).
-10. `__asm__("sti")` — habilita IRQs. Timer empieza a contar.
-11. `scheduler_loop`: guarda resume point (longjmp host) y entra a
+9. `task_create("init-respawn", server_respawn_tick)` — watchdog
+   kernel task que cada ~100ms verifica los 3 servers y los
+   respawnea si murieron. Sleep usando `state=BLOCKED +
+   wakeup_at_ms = timer_ms()+100`. Resuelve el cuelgue post
+   `exec /bin/foo` (foo termina → shellsrv slot UNUSED → no shell
+   → sin watchdog quedaba colgado).
+10. `keyboard_server_init()` (PS/2 hardware init).
+11. `__asm__("sti")` — habilita IRQs. Timer empieza a contar.
+12. `scheduler_loop`: guarda resume point (longjmp host) y entra a
     `for(;;) scheduler_tick()`. Cada tick:
     - `reaper_drain` (libera kstacks de tareas muertas, reapja
       DEAD → UNUSED)
@@ -589,29 +625,57 @@ shellsrv (wait_pid_or_stop) ve TASK_DEAD, imprime prompt nuevo
 y pone `t->user_entry / user_stack_top` para que `user_task_trampoline`
 arme el iretq frame correcto.
 
-## Disk-resident /bin (Fase 1 post-FASE 10)
+## Disk-resident /bin (Fase 1 + Fase 2 FINAL)
 
-El kernel todavía embed los ELFs como blobs (objcopy → builtins[]),
-pero la canonical store es **FAT16** en `/sd/bin/`:
+La canonical store de los ELFs es **FAT16** en `/sd/bin/`. El kernel
+solo embebe un **ROM recovery set** mínimo (4 ELFs críticos +
+bare user_hello). El resto vive exclusivamente en disco. Kernel
+binary pasó de **7.6 MB → 1.1 MB** (-85%).
 
 ```
-build:    kernel.elf contiene _binary_hello_elf_start/end del blob
+build (host):
+   GNUmakefile target $(SD_IMG) depende de USER_ELF_LIST.
    ↓
-first boot:
-   bootstrap_fs.seed_disk_bin() itera builtins[], escribe cada blob
-   a /sd/bin/<name> si no existe (vfs_stat idempotente)
+   mformat -i sd.img ::
+   mmd     -i sd.img ::/bin ::/home
+   for elf in $(USER_ELF_LIST):
+       name = basename $$elf .elf
+       mcopy -i sd.img $$elf ::/bin/$$name      # 64 ELFs, no .elf
+   mcopy /home/{README.TXT,HELLO.TXT,.oshrc}    # seed user files
+   ↓
+kernel link:
+   solo objcopy → .elf.o los 4 ROM:
+     consrv kbdsrv shellsrv banner + user_hello (bare)
+   builtin.c registry refleja ese set mínimo
+   ↓
+boot:
+   bootstrap_fs detecta FAT16 en /sd, monta /sd via fat_vfs_ops.
+   `mkdir /sd/bin` idempotente (ya existe del build).
+   `seed_disk_bin()` itera builtins[] (4 entradas) — vfs_stat ve
+   que ya existen en /sd/bin/* → skip. Solo si el disco está vacío
+   o corrupto se re-escriben los 4 ROMs.
+   aliasfs /bin → /sd/bin   (todo el set de 64 ELFs accesible)
+   aliasfs /home → /sd/home
    ↓
 runtime:
    exec.c proc_execve("/bin/hello"):
      1. vfs_stat("/bin/hello") → aliasfs → /sd/bin/hello en FAT → OK
      2. vfs_read(blob), elf_load(blob), task_create_user_elf
-     3. Si vfs_stat falla (archivo borrado por el usuario):
-        fallback a builtin_find("hello") → embedded blob como ROM
+     3. Si vfs_stat falla (archivo no en disco):
+        fallback a builtin_find("hello") → solo funciona para los
+        4 ROM. Para los otros 60 ELFs no hay fallback (by design).
 ```
 
-**Próximo (Fase 2 final)**: popular sd.img al build via mtools
-(`mformat` + `mcopy` desde GNUmakefile) y **borrar los embedded
-blobs del kernel**. Hoy kernel binary pesa ~5 MB; sin blobs ~500 KB.
+**FAT16 NT case-bits**: los SFNs en FAT16 se guardan uppercase pero
+el byte 0x0C del dirent tiene bits 0x08 (base lowercase) y 0x10
+(ext lowercase) que Windows 95+ y mtools setean. Nuestro
+`name_from_83` los honra → `hello` no vuelve como `HELLO` y los
+matchers case-sensitive (glob, strcmp) funcionan.
+
+**FAT16 dir-chain extension**: `extend_dir_chain` alloca un cluster
+nuevo y lo encadena al dir cuando find_free_dir_slots_run pega
+ENOSPC. Permite subdirs grandes (los 64 ELFs viven en `/sd/bin/`
+sin problema).
 
 ## Limitaciones conscientes (post-FASE 10)
 
@@ -628,9 +692,13 @@ blobs del kernel**. Hoy kernel binary pesa ~5 MB; sin blobs ~500 KB.
   explícito por sender.
 - **VFS sin permisos**: no hay uid/gid, no atime/mtime, no chmod.
   FAT16 tiene attrs limitadas y aliasfs los pasa transparente.
-- **`fork`/`execve` POSIX puros NO**. Hoy hay `osn_spawn` (SYS_SPAWN
-  #266) que es fork+exec atómico estilo posix_spawn, con fd
-  inheritance (MOVES no copies — el caller pierde sus slots).
+- **`execve` (#59) SÍ funciona**: in-place ELF replacement, preserva
+  pid + fds + cwd. `proc_execve_replace` en exec.c. Combinado con
+  `osn_spawn` (#266, fork+exec atómico estilo posix_spawn con fd
+  inheritance MOVE-semantics) cubre la mayoría de los casos POSIX.
+- **`fork` POSIX puro NO**. Falta fork-sin-exec (necesita
+  copy-on-write o page fork). Es la única pieza POSIX core que
+  todavía no implementamos.
 - **Sin signals user-mode**. `kill` mata duro (proc_exit_current_user),
   no hay `sigaction`. Ctrl+C/Ctrl+Z se entregan via task.kill_pending
   / stop_pending checkeado al entry de cada syscall + timer IRQ.
@@ -707,6 +775,65 @@ read() en el read-end devuelven 0 = EOF).
    |  if background ("&"):  bg_jobs_remember(pid, cmd_label); return
    |  else:                  osn_set_fg(pid); wait_pid_or_stop(pid)
 ```
+
+## Flujo de un execve (SYS_EXECVE = #59 Linux)
+
+A diferencia de `osn_spawn` que crea una task NUEVA, `execve` mata
+el user-mode image actual y carga otro en su lugar, **manteniendo
+el mismo pid**. Es el bloque "exec" de fork+exec.
+
+```
+[ring 3]  shellsrv usa `exec` builtin (do_exec):
+   |  resolve_cmd_path(name) → /bin/foo via $PATH
+   |  leave_raw()                ← cooked TTY para el nuevo image
+   |  osn_set_fg(getpid())       ← claim foreground (pid preserved)
+   |  execve("/bin/foo", argv, environ)
+   v
+[ring 3 libc] execve wrapper:
+   |  osnos_syscall3(SYS_EXECVE=59, path, argv, envp)
+   v
+[ring 0]  sys_execve (src/micro/syscall.c):
+   |  copy_from_user de path / argv[] (incluido strings) / envp[]
+   |  args_kbuf = join argv[1..] con espacios
+   |  envp_arr  = kernel array NULL-terminated
+   |  proc_execve_replace(path, args_kbuf, envp_arr)
+   v
+[ring 0]  proc_execve_replace (src/proc/exec.c):
+   |  resolve_executable(path) → blob (VFS first, ROM fallback)
+   |  elf_load(blob) → new_pml4 / new_entry / new_stack_top
+   |  build_argv_block(new_pml4, new_stack_top, name, args, envp)
+   |     → init_rsp en el nuevo stack
+   |
+   |  --- todo OK, swap atómico ---
+   |  old_pml4 = t->pml4
+   |  t->pml4 = new_pml4
+   |  t->user_entry / user_stack_top / heap_* / mmap_* / redirs reset
+   |  t->saved_valid = 0          ← fresh start, no resume from prev
+   |  task name = basename(path)
+   |  fpu_state_init(t->fpu_state)
+   |  address_space_destroy(old_pml4)   ← libera el AS viejo
+   |
+   |  sched_resume_jump()                ← never returns
+   v
+[scheduler] next dispatch entra a user_task_trampoline
+   |  saved_valid=0 → "first-time" path → iretq con t->user_entry
+   |  y t->user_stack_top (= init_rsp del nuevo image).
+   v
+[ring 3]  /bin/foo arranca en su _start, lee argv/envp del stack,
+          llama a su main(). Mismo pid, mismos fds heredados, mismo
+          cwd. shellsrv ya no existe — la ejecución continúa con
+          el nuevo binario.
+```
+
+**Key invariants**:
+- Sólo el user-mode portion del task cambia. PID, kstack, fds[16],
+  cwd, slot index, kernel_fg_pid (si era ours) — todo igual.
+- Es ATÓMICO: si elf_load falla, devolvemos -errno y el viejo image
+  sigue vivo. Nada se destruye antes de que el nuevo esté listo.
+- POST EXIT: el watchdog `init-respawn` detecta cuando el nuevo
+  image (e.g. `/bin/top`) muere y trae shellsrv de vuelta. Sin él
+  un `exec /bin/top` interactivo dejaría el sistema sin shell tras
+  el Ctrl+C.
 
 ## VFS layered backend dispatch
 

@@ -27,6 +27,7 @@
 #define SYS_NANOSLEEP 35
 #define SYS_FCNTL    72
 #define SYS_GETPID   39
+#define SYS_EXECVE   59
 #define SYS_EXIT     60
 #define SYS_KILL     62
 #define SYS_ACCESS   21
@@ -150,6 +151,22 @@ int64_t sys_nanosleep(const osnos_timespec_t *req, osnos_timespec_t *rem);
  * task we shouldn't be killing).
  */
 int64_t sys_kill  (uint64_t pid, int sig);
+
+/*
+ * sys_execve (#59) — Linux execve(2). Replaces the current task's
+ * user-mode image with the program at `path`, preserving pid, kernel
+ * stack, fd table, and cwd. argv[0] is conventionally the program
+ * name (not always the path); we use the path's basename for the
+ * kernel-side task name and pass argv[1..N] as the args string.
+ *
+ * On success, NEVER RETURNS — execution resumes at the new ELF's
+ * entry point via sched_resume_jump. On failure (file not found, bad
+ * ELF, OOM) the old image is preserved untouched and -errno is
+ * returned to the caller.
+ */
+int64_t sys_execve(const char *u_path,
+                    char *const *u_argv,
+                    char *const *u_envp);
 
 /*
  * Linux getpid(2). Returns the calling task's pid (always non-zero for

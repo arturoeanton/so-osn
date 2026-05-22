@@ -168,31 +168,60 @@ static bool name_to_83(const char *in, char *out11) {
 }
 
 /*
- * Render an 11-byte on-disk name as "READMEX.TXT". `out` must hold at
- * least 13 bytes. Trailing spaces trimmed from base and ext.
+ * Render an 11-byte on-disk name as "readme.txt" / "READMEX.TXT".
+ * `out` must hold at least 13 bytes. Trailing spaces are trimmed
+ * from base and ext.
+ *
+ * `nt_flags` is the byte at dirent offset 0x0C (the "NTReserved"
+ * field repurposed by Windows 95+ to store case info):
+ *   bit 0x08 = base is lowercase
+ *   bit 0x10 = ext  is lowercase
+ * mtools (mformat/mcopy) sets these when copying a name like
+ * "hello" into a SFN-only slot. Without honoring them, readdir
+ * returns "HELLO" and case-sensitive matchers (our glob, strcmp
+ * lookups) miss the file even though it's there.
  */
-static void name_from_83(const uint8_t *raw, char *out) {
+static void name_from_83_ext(const uint8_t *raw, uint8_t nt_flags, char *out) {
+    int base_lower = (nt_flags & 0x08) != 0;
+    int ext_lower  = (nt_flags & 0x10) != 0;
     int o = 0;
     int base_end = 8;
     while (base_end > 0 && raw[base_end - 1] == ' ') base_end--;
-    for (int i = 0; i < base_end; i++) out[o++] = (char)raw[i];
+    for (int i = 0; i < base_end; i++) {
+        char c = (char)raw[i];
+        if (base_lower && c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        out[o++] = c;
+    }
 
     int ext_end = 11;
     while (ext_end > 8 && raw[ext_end - 1] == ' ') ext_end--;
     if (ext_end > 8) {
         out[o++] = '.';
-        for (int i = 8; i < ext_end; i++) out[o++] = (char)raw[i];
+        for (int i = 8; i < ext_end; i++) {
+            char c = (char)raw[i];
+            if (ext_lower && c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            out[o++] = c;
+        }
     }
     out[o] = 0;
 }
 
+/* Legacy wrapper used where the NT case-flags aren't available
+ * (mostly path-lookup code paths that already upcase before
+ * comparing). Defaults to all-uppercase. */
+static void name_from_83(const uint8_t *raw, char *out) {
+    name_from_83_ext(raw, 0, out);
+}
+
 static void parse_dirent(const uint8_t *raw, uint32_t lba, uint32_t off,
                           fat_dirent_t *out) {
-    name_from_83(raw, out->name);
-    /* Always keep the 8.3 alias too. fat_readdir will overwrite `name`
-     * with the LFN long form when a valid LFN sequence preceded; the
-     * short_name field stays as the on-disk 8.3 so path lookup can
-     * match against either spelling. */
+    /* Byte 0x0C carries the NT case-flags written by mtools/Windows
+     * — without honouring them, lowercase short names like `hello`
+     * come back as `HELLO` and case-sensitive matchers miss them. */
+    uint8_t nt_flags = raw[0x0C];
+    name_from_83_ext(raw, nt_flags, out->name);
+    /* short_name keeps the on-disk uppercase form for path lookups
+     * that already upcase their query. */
     name_from_83(raw, out->short_name);
     out->is_dir        = (raw[11] & ATTR_DIR) != 0;
     out->first_cluster = rd16(raw + 26);

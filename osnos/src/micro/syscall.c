@@ -1286,6 +1286,99 @@ int64_t sys_resume(uint64_t pid) {
 }
 
 /* ------------------------------------------------------------------ */
+/* sys_execve (#59) — Linux execve(2). Replaces the current task's    */
+/* user-mode image in place. Same pid, fds, cwd; new pml4 + entry.    */
+/* ------------------------------------------------------------------ */
+
+#define SYS_EXECVE_MAX_ARGV 32
+#define SYS_EXECVE_ARGS_BUF 1024
+#define SYS_EXECVE_ENVP_BUF 4096
+
+int64_t sys_execve(const char *u_path,
+                    char *const *u_argv,
+                    char *const *u_envp) {
+    task_t *t = task_current();
+    if (!t || !t->pml4) return err(OSNOS_ESRCH);
+    if (!u_path)        return err(OSNOS_EFAULT);
+
+    /* Copy path. */
+    char kpath[OSNOS_PATH_MAX];
+    if (copy_from_user(kpath, u_path, OSNOS_PATH_MAX) != OSNOS_OK) {
+        return err(OSNOS_EFAULT);
+    }
+    kpath[OSNOS_PATH_MAX - 1] = 0;
+
+    /* Walk argv: build a single space-separated args string from
+     * argv[1..N]. argv[0] is the program name — proc_execve_replace
+     * derives that from the path basename anyway. */
+    static char args_kbuf[SYS_EXECVE_ARGS_BUF];
+    args_kbuf[0] = 0;
+    size_t args_pos = 0;
+    if (u_argv) {
+        for (int i = 0; i < SYS_EXECVE_MAX_ARGV; i++) {
+            char *p_user = 0;
+            if (copy_from_user(&p_user, &u_argv[i], sizeof(p_user)) != OSNOS_OK) {
+                return err(OSNOS_EFAULT);
+            }
+            if (!p_user) break;
+            if (i == 0) continue;       /* skip argv[0] (program name) */
+
+            /* Copy this arg string into a small staging buffer. */
+            char arg[128];
+            if (copy_from_user(arg, p_user, sizeof(arg)) != OSNOS_OK) {
+                return err(OSNOS_EFAULT);
+            }
+            arg[sizeof(arg) - 1] = 0;
+
+            size_t arg_len = 0;
+            while (arg[arg_len]) arg_len++;
+            if (args_pos > 0) {
+                if (args_pos + 1 >= sizeof(args_kbuf)) return err(OSNOS_E2BIG);
+                args_kbuf[args_pos++] = ' ';
+            }
+            if (args_pos + arg_len + 1 > sizeof(args_kbuf)) return err(OSNOS_E2BIG);
+            for (size_t k = 0; k < arg_len; k++) args_kbuf[args_pos++] = arg[k];
+            args_kbuf[args_pos] = 0;
+        }
+    }
+
+    /* Walk envp: copy pointer + each string into a buffer, build a
+     * NULL-terminated kernel array pointing into it. */
+    static const char *envp_arr[SYS_EXECVE_MAX_ARGV + 1];
+    static char        envp_buf[SYS_EXECVE_ENVP_BUF];
+    int envc = 0;
+    size_t envp_pos = 0;
+    if (u_envp) {
+        for (int i = 0; i < SYS_EXECVE_MAX_ARGV; i++) {
+            char *p_user = 0;
+            if (copy_from_user(&p_user, &u_envp[i], sizeof(p_user)) != OSNOS_OK) {
+                return err(OSNOS_EFAULT);
+            }
+            if (!p_user) break;
+            char ent[256];
+            if (copy_from_user(ent, p_user, sizeof(ent)) != OSNOS_OK) {
+                return err(OSNOS_EFAULT);
+            }
+            ent[sizeof(ent) - 1] = 0;
+            size_t l = 0;
+            while (ent[l]) l++;
+            if (envp_pos + l + 1 > sizeof(envp_buf)) return err(OSNOS_E2BIG);
+            envp_arr[envc] = envp_buf + envp_pos;
+            for (size_t k = 0; k <= l; k++) envp_buf[envp_pos++] = ent[k];
+            envc++;
+        }
+    }
+    envp_arr[envc] = 0;
+
+    /* All inputs in kernel memory — safe to tear down the user image
+     * inside proc_execve_replace without losing our args/envp. On
+     * success, that function never returns. */
+    int64_t rc = proc_execve_replace(kpath, args_kbuf,
+                                       envc > 0 ? envp_arr : 0);
+    return rc;     /* only reached on failure */
+}
+
+/* ------------------------------------------------------------------ */
 /* sys_spawn — ring-3 wrapper for proc_execve with optional fd        */
 /* inheritance. Used by the future ring-3 shell (FASE 10.4) to set up */
 /* pipelines + redirects before exec'ing children.                    */
@@ -1384,6 +1477,7 @@ int64_t sys_taskinfo(size_t idx, struct osnos_taskinfo *out) {
     info.pid        = t->pid;
     info.is_user    = (t->pml4 != 0) ? 1 : 0;
     info.dispatches = t->dispatches;
+    info.exit_code  = t->exit_code;
     /* Map kernel task_state_t (numeric values may diverge from the
      * ABI in the future — translate explicitly). */
     switch (t->state) {
@@ -1776,6 +1870,11 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
                 (osnos_timespec_t *)frame->rsi));
         case SYS_KILL:
             return pack(sys_kill(frame->rdi, (int)frame->rsi));
+        case SYS_EXECVE:
+            return pack(sys_execve(
+                (const char *)frame->rdi,
+                (char *const *)frame->rsi,
+                (char *const *)frame->rdx));
         case SYS_GETPID:
             return pack(sys_getpid());
         case SYS_MKDIR:

@@ -353,8 +353,16 @@ static int  do_kill  (int argc, char **argv);
 static int  do_export(int argc, char **argv);
 static int  do_unset (int argc, char **argv);
 static int  do_setenv(int argc, char **argv);
+static int  do_exec  (int argc, char **argv);
+static void resolve_cmd_path(const char *name, char *out, size_t cap);
 static void wait_pid(long pid);
 static int  wait_pid_or_stop(long pid);
+static int  wait_pid_capture(long pid, int *stopped_out);
+
+/* Last-command exit status, exposed as $? via expand_vars. Set by
+ * dispatch() after every foreground command (builtin or spawn) and
+ * read by `&&` / `||` sequencing. Default 0 at startup. */
+static int last_status;
 
 /* Background-job tracking. shellsrv adds an entry every time the
  * user appends `&` to a pipeline; `jobs` enumerates the live ones. */
@@ -390,6 +398,7 @@ static const cmd_t COMMANDS[] = {
     { "export",  do_export, "export VAR=VAL (set env var)" },
     { "unset",   do_unset,  "unset VAR (remove env var)"  },
     { "setenv",  do_setenv, "setenv VAR VAL (alias of export)" },
+    { "exec",    do_exec,   "exec CMD [args]: replace shell with CMD" },
 };
 
 static int should_exit = 0;
@@ -473,8 +482,8 @@ static int do_cd(int argc, char **argv) {
     }
     return 0;
 }
-static int do_ls(int argc, char **argv) {
-    const char *path = (argc >= 2) ? argv[1] : ".";
+/* List one directory by reading its entries via opendir/readdir. */
+static int ls_one_dir(const char *path) {
     DIR *d = opendir(path);
     if (!d) { fprintf(stderr, "ls: %s: %s\n", path, strerror(errno)); return 1; }
     struct dirent *ent;
@@ -486,6 +495,65 @@ static int do_ls(int argc, char **argv) {
     }
     closedir(d);
     return 0;
+}
+
+/* `ls` semantics (POSIX):
+ *   ls            — list cwd
+ *   ls DIR        — list DIR
+ *   ls FILE       — print FILE (its own path; "exists" check)
+ *   ls A B C ...  — for each: if A is a dir, header + contents;
+ *                              if A is a file, print the name.
+ *
+ * Two passes so output matches GNU ls: files first (without header),
+ * then dirs (with "PATH:" header when >1 arg). Each pass preserves
+ * argv order. Common-case `ls` (no args) and `ls /home` keep their
+ * old shape (no header, just entries). */
+static int do_ls(int argc, char **argv) {
+    if (argc < 2) return ls_one_dir(".");
+
+    /* Classify each arg. file_idx[] / dir_idx[] hold positions in
+     * argv. missing args print an error in pass 0. */
+    int rc = 0;
+    int n_files = 0, n_dirs = 0;
+
+    struct stat st;
+    for (int i = 1; i < argc; i++) {
+        if (stat(argv[i], &st) != 0) {
+            fprintf(stderr, "ls: %s: %s\n", argv[i], strerror(errno));
+            rc = 1;
+            argv[i][0] = 0;            /* mark as skipped */
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) n_dirs++;
+        else                     n_files++;
+    }
+
+    /* Pass 1 — print regular files (one per line). */
+    for (int i = 1; i < argc; i++) {
+        if (!argv[i][0]) continue;
+        if (stat(argv[i], &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) continue;
+        printf("%s\n", argv[i]);
+    }
+
+    /* Pass 2 — list each directory. Header only when there are
+     * multiple paths involved (matches GNU ls). */
+    int needs_blank = (n_files > 0);
+    int total_paths = n_files + n_dirs;
+    int dir_seen = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!argv[i][0]) continue;
+        if (stat(argv[i], &st) != 0) continue;
+        if (!S_ISDIR(st.st_mode)) continue;
+
+        if (total_paths > 1) {
+            if (needs_blank || dir_seen) printf("\n");
+            printf("%s:\n", argv[i]);
+        }
+        if (ls_one_dir(argv[i]) != 0) rc = 1;
+        dir_seen = 1;
+    }
+    return rc;
 }
 static int do_cat(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "cat: missing argument\n"); return 1; }
@@ -654,6 +722,42 @@ static int do_unset(int argc, char **argv) {
     return 0;
 }
 
+/* `exec CMD [args]` — Linux convention: replace the shell with CMD
+ * via execve(2), preserving pid + fds + cwd. On success NEVER
+ * returns. On failure, print errno + keep running.
+ *
+ * IMPORTANT: claim "foreground" via osn_set_fg(getpid()) BEFORE the
+ * execve so the kernel TTY routes Ctrl+C / Ctrl+Z to the NEW image
+ * (same pid). Without this kernel_fg_pid stays 0 (cleared after the
+ * previous run_pipeline wait) and the user has no way to kill an
+ * interactive `exec /bin/top` other than rebooting. */
+static int do_exec(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, "usage: exec CMD [args...]\n");
+        return 1;
+    }
+    char path[PATH_MAX];
+    resolve_cmd_path(argv[1], path, sizeof(path));
+
+    /* Restore cooked TTY before handing off — the new process may
+     * want a clean termios baseline. */
+    leave_raw();
+
+    /* Hand foreground ownership to ourselves (preserved across
+     * execve since pid stays the same). */
+    osn_set_fg((long)getpid());
+
+    /* execve takes argv[0]=program name (NOT path) per POSIX. */
+    extern char **environ;
+    execve(path, &argv[1], environ);
+
+    /* Only reached on failure. Roll back the fg claim and report. */
+    osn_set_fg(0);
+    enter_raw();
+    fprintf(stderr, "exec: %s: %s\n", argv[1], strerror(errno));
+    return 1;
+}
+
 static int do_test(int argc, char **argv) {
     (void)argc; (void)argv;
     char envbuf[2048];
@@ -703,6 +807,106 @@ static int line_split_stages(char *line, char *stage_raw[MAX_STAGES]) {
     return n;
 }
 
+/* Glob expansion for a single token containing '*'. Walks the
+ * directory implied by the token's prefix (defaults to ".") and
+ * matches each entry against the pattern. Matches go straight into
+ * st->argv (so the caller doesn't have to interleave). If no entry
+ * matches, the token is kept literal (bash default behaviour).
+ *
+ * Supports only the wildcard `*` (zero or more chars). `?` and
+ * `[...]` are not implemented; the matcher stays tiny and covers
+ * the common cases like a.txt or prefix-globs. */
+static int glob_match(const char *pattern, const char *name) {
+    /* Recursive descent. *pattern may have at most a few wildcards
+     * per token in practice. */
+    while (*pattern) {
+        if (*pattern == '*') {
+            /* Collapse consecutive stars. */
+            while (*pattern == '*') pattern++;
+            if (!*pattern) return 1;            /* trailing *: matches rest */
+            /* Try matching the rest at every suffix of `name`. */
+            for (const char *q = name; ; q++) {
+                if (glob_match(pattern, q)) return 1;
+                if (!*q) return 0;
+            }
+        }
+        if (!*name) return 0;
+        if (*pattern != *name) return 0;
+        pattern++; name++;
+    }
+    return *name == 0;
+}
+
+static int expand_glob_into(const char *token, stage_t *st) {
+    /* No `*` → no expansion. Caller will push token literally. */
+    int has_star = 0;
+    for (const char *p = token; *p; p++) if (*p == '*') { has_star = 1; break; }
+    if (!has_star) return 0;
+
+    /* Split into dir + leaf pattern. dir defaults to "." if the token
+     * has no slash. */
+    char dir[PATH_MAX];
+    const char *leaf;
+    const char *last_slash = 0;
+    for (const char *p = token; *p; p++) if (*p == '/') last_slash = p;
+    if (last_slash) {
+        size_t dlen = (size_t)(last_slash - token);
+        if (dlen == 0) { dir[0] = '/'; dir[1] = 0; }
+        else {
+            if (dlen >= sizeof(dir)) return 0;
+            for (size_t k = 0; k < dlen; k++) dir[k] = token[k];
+            dir[dlen] = 0;
+        }
+        leaf = last_slash + 1;
+    } else {
+        dir[0] = '.'; dir[1] = 0;
+        leaf = token;
+    }
+
+    DIR *d = opendir(dir);
+    if (!d) return 0;          /* unreadable dir: keep token literal */
+
+    int matched = 0;
+    /* Storage for the matched names: tokens point into a heap-ish
+     * static buffer so they outlive stage_parse's call frame. */
+    static char glob_buf[4096];
+    static size_t glob_pos;
+    /* Reset only on the FIRST expand of a given stage_parse pass.
+     * We approximate that by using a per-stage offset stored in the
+     * stage_t — but simpler: reset every time. The buffer is reused
+     * across stages in a pipeline; pipelines are short so 4 KiB is
+     * comfortable. Once stage_parse returns, the buffer can be
+     * reused by the next stage in the same dispatch_segment because
+     * the stages are processed serially. */
+    (void)glob_pos;
+
+    struct dirent *e;
+    while ((e = readdir(d)) != 0) {
+        /* Skip "." and ".." unless explicitly requested. */
+        if (e->d_name[0] == '.' && leaf[0] != '.') continue;
+        if (!glob_match(leaf, e->d_name)) continue;
+        if (st->argc >= MAX_ARGV) break;
+
+        /* Build full path back into the static buffer. */
+        size_t dl = 0; while (dir[dl]) dl++;
+        size_t nl = 0; while (e->d_name[nl]) nl++;
+        if (glob_pos + dl + 1 + nl + 1 > sizeof(glob_buf)) break;
+
+        char *out = glob_buf + glob_pos;
+        if (!(dir[0] == '.' && dir[1] == 0)) {
+            for (size_t k = 0; k < dl; k++) glob_buf[glob_pos++] = dir[k];
+            if (dl == 0 || dir[dl - 1] != '/') glob_buf[glob_pos++] = '/';
+        }
+        for (size_t k = 0; k < nl; k++) glob_buf[glob_pos++] = e->d_name[k];
+        glob_buf[glob_pos++] = 0;
+
+        st->argv[st->argc++] = out;
+        matched++;
+    }
+    closedir(d);
+    return matched;
+}
+
 static void stage_parse(char *raw, stage_t *st) {
     st->argc = 0;
     st->stdin_file = 0;
@@ -721,7 +925,11 @@ static void stage_parse(char *raw, stage_t *st) {
             st->stdout_file   = toks[++i];
             st->stdout_append = 1;
         } else {
-            if (st->argc < MAX_ARGV) st->argv[st->argc++] = toks[i];
+            /* Try glob expansion first — pushes matches into argv. */
+            int n = expand_glob_into(toks[i], st);
+            if (n == 0) {
+                if (st->argc < MAX_ARGV) st->argv[st->argc++] = toks[i];
+            }
         }
     }
     st->argv[st->argc] = 0;
@@ -732,7 +940,20 @@ static void stage_parse(char *raw, stage_t *st) {
  *   1  — task is STOPPED (Ctrl+Z) — caller should drop the prompt
  *        without harvesting; `fg pid` / `bg pid` later resumes it.
  */
-static int wait_pid_or_stop(long pid) {
+/* Capture variant: returns the exit_code of the dead task. If
+ * `stopped_out` is non-NULL, gets set to 1 when the wait ends in
+ * TASK_STOPPED (Ctrl+Z) instead of TASK_DEAD.
+ *
+ * Race avoidance: the reaper transitions TASK_DEAD → UNUSED very
+ * quickly (every scheduler tick). If our 20ms poll lands AFTER the
+ * reaper has recycled the slot, sys_taskinfo no longer reports our
+ * pid and we'd lose the exit_code. We keep a running "last seen
+ * value" so when the slot disappears, we still return what we knew
+ * at last poll. */
+static int wait_pid_capture(long pid, int *stopped_out) {
+    if (stopped_out) *stopped_out = 0;
+    int last_ec = 0;          /* exit_code from most recent successful poll */
+    int saw_it  = 0;          /* have we EVER seen this pid? */
     for (;;) {
         int found = 0;
         uint8_t state = 0;
@@ -742,18 +963,39 @@ static int wait_pid_or_stop(long pid) {
             if (r < 0) continue;
             if ((long)info.pid != pid) continue;
             found = 1;
+            saw_it = 1;
             state = info.state;
+            last_ec = info.exit_code;
             break;
         }
-        if (!found || state == OSNOS_TASK_DEAD) return 0;
-        if (state == OSNOS_TASK_STOPPED)         return 1;
+        /* Slot gone (reaper got there first) — assume task finished
+         * normally with the exit_code we saw last. Without `saw_it`
+         * we'd block forever on a pid that never existed; treat
+         * never-seen as success (the spawner already returned the
+         * pid successfully, so the task did at least start). */
+        if (!found) return last_ec;
+        if (state == OSNOS_TASK_DEAD) return last_ec;
+        if (state == OSNOS_TASK_STOPPED) {
+            if (stopped_out) *stopped_out = 1;
+            return 0;
+        }
+        (void)saw_it;
         struct timespec ts = { 0, 20 * 1000000 };
         nanosleep(&ts, 0);
     }
 }
 
+static int wait_pid_or_stop(long pid) {
+    int stopped = 0;
+    int ec = wait_pid_capture(pid, &stopped);
+    last_status = stopped ? 128 + 19 /* SIGSTOP */ : ec;
+    return stopped ? 1 : 0;
+}
+
 static void wait_pid(long pid) {
-    (void)wait_pid_or_stop(pid);
+    int stopped = 0;
+    last_status = wait_pid_capture(pid, &stopped);
+    if (stopped) last_status = 128 + 19;
 }
 
 /* Resolve a command name against PATH. Absolute paths pass through;
@@ -959,6 +1201,14 @@ static void expand_vars(const char *in, char *out, size_t cap) {
         }
         if (c == '$' && !in_single) {
             in++;
+            /* `$?` — last command exit status. */
+            if (*in == '?') {
+                char buf[16];
+                int n = snprintf(buf, sizeof(buf), "%d", last_status);
+                for (int k = 0; k < n && op + 1 < cap; k++) out[op++] = buf[k];
+                in++;
+                continue;
+            }
             int braces = 0;
             if (*in == '{') { braces = 1; in++; }
             char name[64];
@@ -991,9 +1241,11 @@ static void expand_vars(const char *in, char *out, size_t cap) {
 
 /* ---- dispatch ---- */
 
-static void dispatch(char *line_in) {
-    /* Expand $VAR / ${VAR} BEFORE parsing, so children see the
-     * resolved arguments and pipes/redirects parse correctly. */
+/* Run ONE segment of the line (one pipeline). Updates last_status.
+ * Called by dispatch() once per ;/&&/|| segment. Variable expansion
+ * happens here, AFTER the segment split, so `$?` in segment N sees
+ * the status set by segment N-1. */
+static void dispatch_segment(char *line_in) {
     char line_buf[LINE_MAX_LEN];
     expand_vars(line_in, line_buf, sizeof(line_buf));
     char *line = line_buf;
@@ -1004,16 +1256,13 @@ static void dispatch(char *line_in) {
     safe_copy(line_copy, line, sizeof(line_copy));
 
     /* Detect a trailing `&` (with optional whitespace before it) so
-     * we can spawn the pipeline in the background. The flag is
-     * recognised across the whole line, not per-stage. */
+     * we can spawn the pipeline in the background. */
     int background = 0;
     int last = (int)strlen(line) - 1;
     while (last >= 0 && (line[last] == ' ' || line[last] == '\t')) last--;
     if (last >= 0 && line[last] == '&') {
         background = 1;
-        line[last] = ' ';   /* let the parser see it as plain whitespace */
-        /* Also strip the trailing '&' from the label so `jobs` shows
-         * a clean command. */
+        line[last] = ' ';
         int last_label = (int)strlen(line_copy) - 1;
         while (last_label >= 0 && (line_copy[last_label] == ' ' ||
                                     line_copy[last_label] == '\t')) last_label--;
@@ -1022,14 +1271,11 @@ static void dispatch(char *line_in) {
         }
     }
 
-    /* Pipe-aware path: split into stages, parse each, run pipeline.
-     * Builtins only run when there's exactly one stage AND no
-     * redirects AND no background — otherwise we fall through to
-     * /bin/<name> ELF so redirects + pipes + bg can wire its fds. */
     char *raw[MAX_STAGES];
     int n = line_split_stages(line, raw);
     if (n <= 0) {
         if (n < 0) fprintf(stderr, "shellsrv: too many pipeline stages\n");
+        last_status = (n < 0) ? 1 : 0;
         return;
     }
 
@@ -1042,13 +1288,83 @@ static void dispatch(char *line_in) {
         if (st->argc == 0) return;
         for (size_t i = 0; i < sizeof(COMMANDS)/sizeof(COMMANDS[0]); i++) {
             if (strcmp(st->argv[0], COMMANDS[i].name) == 0) {
-                (void)COMMANDS[i].fn(st->argc, st->argv);
+                last_status = COMMANDS[i].fn(st->argc, st->argv);
                 return;
             }
         }
     }
 
+    /* Background pipelines always count as success (0) for ;/&&/||
+     * — same as bash; the foreground ones get the real exit_code
+     * captured inside wait_pid_or_stop. */
+    if (background) last_status = 0;
     run_pipeline(stages, n, background, line_copy);
+}
+
+/* dispatch — top-level entry. Splits the line into segments on
+ * `;`, `&&`, `||` and runs each through dispatch_segment with the
+ * conditional logic:
+ *   `;`  → always run next
+ *   `&&` → run next only if last_status == 0
+ *   `||` → run next only if last_status != 0
+ * Pipes `|` are NOT split here (they're part of a single segment
+ * and handled by line_split_stages / run_pipeline). */
+static void dispatch(char *line_in) {
+    /* Work on a mutable copy so we can NUL-terminate segments in
+     * place. line_in came from read_line or .oshrc reader's stack
+     * buffer; mutating it is fine but copying keeps the contract
+     * narrow (caller doesn't see operator NULs). */
+    char buf[LINE_MAX_LEN];
+    safe_copy(buf, line_in, sizeof(buf));
+
+    char *p = buf;
+    enum { OP_FIRST, OP_SEMI, OP_AND, OP_OR } prev_op = OP_FIRST;
+
+    while (*p) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        char *seg = p;
+        /* Walk to next operator. `|` alone is a pipe (skip past),
+         * `||` is OR (stop). `&` alone is background (handled inside
+         * dispatch_segment), `&&` is AND (stop). */
+        while (*p) {
+            if (*p == ';') break;
+            if (p[0] == '&' && p[1] == '&') break;
+            if (p[0] == '|' && p[1] == '|') break;
+            p++;
+        }
+        int next_op;
+        if (*p == ';') {
+            *p++ = 0;
+            next_op = OP_SEMI;
+        } else if (p[0] == '&' && p[1] == '&') {
+            *p++ = 0; *p++ = 0;
+            next_op = OP_AND;
+        } else if (p[0] == '|' && p[1] == '|') {
+            *p++ = 0; *p++ = 0;
+            next_op = OP_OR;
+        } else {
+            /* End of line. */
+            next_op = -1;
+        }
+
+        /* Right-trim segment. */
+        size_t l = strlen(seg);
+        while (l > 0 && (seg[l-1] == ' ' || seg[l-1] == '\t')) seg[--l] = 0;
+
+        int should_run = 0;
+        switch (prev_op) {
+            case OP_FIRST: should_run = 1; break;
+            case OP_SEMI:  should_run = 1; break;
+            case OP_AND:   should_run = (last_status == 0); break;
+            case OP_OR:    should_run = (last_status != 0); break;
+        }
+        if (should_run && *seg) dispatch_segment(seg);
+
+        if (next_op < 0) break;
+        prev_op = (next_op == OP_SEMI) ? OP_SEMI :
+                  (next_op == OP_AND)  ? OP_AND  : OP_OR;
+    }
 }
 
 /* ---- main ---- */
