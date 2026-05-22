@@ -610,29 +610,37 @@ int64_t proc_execve(const char *path, const char *args,
 
     stdin_clear();
 
-    /* Path 1 — builtin /bin/ entry (zero-copy: the ELF blob sits
-     * in the kernel image already). Tried first because it's the
-     * fast path and how the shell launches every "type the name"
-     * command today. */
+    /* /bin: prefer the disk-resident copy when FAT is mounted (aliasfs
+     * routes /bin → /sd/bin in that case). Only fall back to the
+     * kernel-embedded blob if the disk file is missing — that way
+     * the kernel acts as a recovery ROM for /bin entries the user
+     * accidentally deleted, but day-to-day execution goes through
+     * VFS exactly like a "real" UNIX. Diskless boots use the binfs
+     * mount which still walks builtins from kernel memory. */
     if (os_strstarts(path, "/bin/")) {
-        const char *name = path + 5;
-        const builtin_t *b = builtin_find(name);
-        if (b) {
-            if (b->elf_start) {
-                return task_create_user_elf(b->name,
-                                            b->elf_start,
-                                            (size_t)(b->elf_end - b->elf_start),
-                                            args,
-                                            envp);
+        vfs_stat_t st;
+        osnos_status_t s_check = vfs_stat(path, &st);
+        int vfs_has_file = (s_check == OSNOS_OK && st.type == VFS_NODE_REG &&
+                             st.size > 0);
+        if (!vfs_has_file) {
+            const char *name = path + 5;
+            const builtin_t *b = builtin_find(name);
+            if (b) {
+                if (b->elf_start) {
+                    return task_create_user_elf(b->name,
+                                                b->elf_start,
+                                                (size_t)(b->elf_end - b->elf_start),
+                                                args,
+                                                envp);
+                }
+                if (b->user_start) {
+                    (void)args;
+                    return task_create_user(b->name, b->user_start, b->user_end);
+                }
+                return -(int64_t)OSNOS_ENOENT;
             }
-            if (b->user_start) {
-                (void)args;
-                return task_create_user(b->name, b->user_start, b->user_end);
-            }
-            return -(int64_t)OSNOS_ENOENT;
         }
-        /* Fall through — maybe /bin is a mount with non-builtin
-         * entries one day. Today binfs only serves builtins. */
+        /* Fall through to VFS path — loads /sd/bin/<name> from FAT. */
     }
 
     /*

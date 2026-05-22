@@ -6,31 +6,32 @@ filesystem virtual, syscalls compatibles con Linux x86_64 y una
 mini-libc propia para programas de usuario en ring 3.
 
 ```
-   OSnOS shell
-   /home > ls
-   readme.txt
-   hello.txt
-   /home > cat readme.txt
-   bienvenido a osnos.
-   /home > hello_libc
-   hola desde ring 3 con libc!
-   /home > echo persistente > /sd/note
-   /home > # reboot
-   /home > cat /sd/note
+   osnos x86_64 — shellsrv (ring 3, FASE 10.4)
+   shellsrv:/home$ ls
+   README.TXT  HELLO.TXT  .oshrc  .history
+   shellsrv:/home$ cat README.TXT
+   Welcome to osnos.
+   shellsrv:/home$ hello
+   hello, world
+   shellsrv:/home$ echo persistente > /sd/note
+   shellsrv:/home$ # reboot
+   shellsrv:/home$ cat /sd/note
    persistente
-   /home > env
+   shellsrv:/home$ env
    PATH=/bin
    HOME=/home
-   PWD=/home
-   SHELL=/bin/osh
-   TERM=osnos
-   /home > httpd &              # auto-exec /bin/httpd
-   [3]
-   /home > # desde otro host:
-   /home > # curl http://localhost:8080/
-   /home > ovi .oshrc           # editor modal estilo vim
+   SHELL=/bin/shellsrv
+   OSNAME=osnos
+   shellsrv:/home$ ls /home | grep TXT | sort   # full pipes + redirects
+   HELLO.TXT
+   README.TXT
+   shellsrv:/home$ httpd &        # background
+   [1] pid=7 &
+   shellsrv:/home$ jobs
+   [1] pid=7 running httpd
+   shellsrv:/home$ # desde otro host:  curl http://localhost:8080/
+   shellsrv:/home$ ovi .oshrc     # editor modal vim-style
    # i = insert, Esc = normal, hjkl = move,
-   # 0/$ = inicio/fin línea, gg/G = inicio/fin archivo,
    # x = del char, dd = del línea, :w = save, :q = quit
 ```
 
@@ -128,9 +129,11 @@ fijos definidos en el script).
     │   ├── micro/          #   core: task, scheduler, ipc, gdt/idt/tss,
     │   │                   #         pmm, vmm, kmalloc, syscall, uaccess
     │   ├── drivers/        #   framebuffer, teclado PS/2, PIC, LAPIC, timer,
-    │   │                   #   block_ata (ATA PIO sobre IDE primary master)
-    │   ├── servers/        #   shell, console, keyboard, fs (en ring 0 hoy)
-    │   ├── fs/             #   VFS + backends (ramfs, sysfs, devfs, binfs, fat)
+    │   │                   #   block_ata, rtl8139
+    │   ├── servers/        #   keyboard_server (poll PS/2 → /dev/input0).
+    │   │                   #   console/fs/shell migrados a ring 3 (FASE 10).
+    │   ├── fs/             #   VFS + backends (ramfs, sysfs, devfs, binfs,
+    │   │                   #         fat, aliasfs)
     │   ├── proc/           #   exec, ELF loader, builtins
     │   ├── lib/            #   helpers freestanding (memcpy, strlcpy, printf)
     │   └── include/        #   headers públicos (osnos_status, osnos_keys, ...)
@@ -140,12 +143,22 @@ fijos definidos en el script).
     │   ├── include/        #   stdio.h, stdlib.h, string.h, unistd.h, ...
     │   └── *.c             #   wrappers de syscalls + stdio + malloc
     │
-    ├── elfs/               # programas user-mode embebidos en el kernel
+    ├── elfs/               # programas user-mode (60+ ELFs ring 3)
     │   ├── shell/          #   osh (mini script interpreter)
-    │   ├── tools/          #   ls cat cp mv rm mkdir top calc echo ...
-    │   ├── net/            #   tcpclient httpd selectserver udptest ...
-    │   ├── tests/          #   libctest ttytest hello_libc user_hello
-    │   ├── osn-server/     #   FASE 10: servers movidos a ring 3
+    │   ├── tools/          #   coreutils completos: ls cat cp mv rm
+    │   │                   #     mkdir rmdir touch echo head tail wc
+    │   │                   #     grep sort uniq cut tr seq yes tee
+    │   │                   #     env pwd which printf date uname
+    │   │                   #     basename dirname clear tree banner
+    │   │                   #     calc top kill sleep ovi tcc hello
+    │   ├── net/            #   tcpclient httpd selectserver udptest
+    │   │                   #     echotcp selecttest
+    │   ├── tests/          #   libctest ttytest fptest mmaptest
+    │   │                   #     pipetest fbtest inputtest kerntest
+    │   │                   #     spawntest envtest user_hello (bare)
+    │   ├── osn-server/     #   FASE 10 servers ring 3:
+    │   │                   #     consrv (console), kbdsrv (keyboard),
+    │   │                   #     shellsrv (shell de verdad)
     │   └── libc.lds        #   linker script compartido
     │                       # objcopy strippea el dir; ELFs accesibles
     │                       # como /bin/<basename> sin importar carpeta
@@ -171,34 +184,43 @@ se comunican exclusivamente por IPC (excepto los drivers de bajo
 nivel). Cuando llegue la migración de servers a ring 3 (fase 10 del
 roadmap), mover los servidores debería ser mecánico.
 
-### Diagrama de capas (resumen)
+### Diagrama de capas (post-FASE 10)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ ring-3 user tasks: ELFs en /bin (hello_libc, ls, cat, osh) │
+│ ring-3 servers (FASE 10):                                   │
+│   consrv  — IPC_CONSOLE_WRITE → /dev/fb0                    │
+│   kbdsrv  — /dev/input0 → sys_tty_input + IPC_KEY_EVENT     │
+│   shellsrv — line editor + dispatch + pipes/redirs/jobs     │
+│              (registra SERVER_SHELL, ES EL shell del OS)    │
+├─────────────────────────────────────────────────────────────┤
+│ ring-3 user tasks: ~60 ELFs en /bin (coreutils + net + ...) │
 ├─────────────────────────────────────────────────────────────┤
 │             lib/libc — mini-libc osnos                      │
 │       printf, malloc, fopen, ... → syscall                  │
 ├─────────────────────────────────────────────────────────────┤
-│  Syscall ABI Linux x86_64 (rax + rdi/rsi/rdx/r10/r8/r9)     │
-│  int 0x80 (legacy)        ó       syscall (LSTAR)           │
-│              ↓                       ↓                       │
-│              └─→ syscall_dispatch(frame) ←─┘                │
+│  Syscall ABI Linux x86_64 + osnos-specific (>= 250):        │
+│   SYS_IPC_SEND/RECV (260/261), SERVICE_* (262/263),         │
+│   SYS_TTY_INPUT (264), SYS_TASKINFO (265),                  │
+│   SYS_SPAWN (266), SYS_SET_FG (267), SYS_RESUME (268)       │
+│   int 0x80 + syscall (LSTAR) → syscall_dispatch(frame)      │
 ├─────────────────────────────────────────────────────────────┤
-│  shell_server  (line editor + history + tabla de comandos)  │
+│ VFS: ramfs (/) │ sysfs (/sys) │ devfs (/dev: null/zero/fb0/ │
+│                │                  input0)                   │
+│      aliasfs (/home → /sd/home, /bin → /sd/bin)             │
+│      binfs (/bin fallback diskless) │ fat16 (/sd, sd.img)   │
 ├─────────────────────────────────────────────────────────────┤
-│ keyboard_server │ console_server │ fs_server (vfs wrapper)  │
+│  IPC: 1 cola, 64 slots, payload 1024B. ipc_send rewrite     │
+│       SID → pid; ring-3 receivers filtran por t->pid        │
 ├─────────────────────────────────────────────────────────────┤
-│ VFS: ramfs (/) │ sysfs (/sys) │ devfs (/dev) │ binfs (/bin) │
-│                │ fat16  (/sd, persistente sobre sd.img)     │
+│  micro/ core: task (per-task fds[16] + fpu_state), pipe,    │
+│  scheduler (preempt @ CPL=3 + coop), ipc, gdt/idt/tss,      │
+│  pmm/vmm/kmalloc, syscall, uaccess, service                 │
 ├─────────────────────────────────────────────────────────────┤
-│  IPC: 1 cola, 64 slots, payload 1024B, blocking + wakeup    │
-├─────────────────────────────────────────────────────────────┤
-│  micro/ core: task, scheduler (preempt @ CPL=3 + coop),     │
-│  ipc, gdt/idt/tss, pmm/vmm/kmalloc, syscall, uaccess        │
-├─────────────────────────────────────────────────────────────┤
-│  drivers/: PS/2, framebuffer + font 8x8, PIC, LAPIC, PIT,   │
-│            ATA PIO (block_ata: primary IDE master)          │
+│  drivers/: PS/2, framebuffer + font 8x8 + VT100 CSI parser, │
+│            PIC, LAPIC, PIT, ATA PIO, RTL8139                │
+│  kernel-side servers/: keyboard feeder (poll → ring buffer  │
+│            de /dev/input0 — único server kernel-side)       │
 ├─────────────────────────────────────────────────────────────┤
 │                    Limine bootloader                         │
 └─────────────────────────────────────────────────────────────┘
@@ -208,22 +230,29 @@ Diagrama completo + walkthroughs paso a paso ("una tecla viaja por
 todo el sistema", "un comando `ls /home` viaja por todo el sistema")
 están en [`osnos/ARCH.md`](osnos/ARCH.md).
 
-### Secuencia de boot (`kmain` en `src/kernel/main.c`)
+### Secuencia de boot (`kmain` en `src/kernel/main.c`, post-FASE 10)
 
 1. Validar Limine + framebuffer → `framebuffer_init`.
 2. Memoria: `pmm_init → vmm_init → kheap_init`.
 3. CPU: `gdt_init → tss_init → idt_init → uaccess_init → syscall_msr_init`.
 4. Interrupciones: `pic_init → lapic_init → timer_init` (PIT @ 100 Hz).
-   Acto seguido `block_ata_init` corre IDENTIFY contra el primary IDE
-   master; si responde, FASE 8 monta `/sd`.
-5. Microkernel: `ipc_init → task_init → reaper_init → scheduler_init →
-   syscall_init → ramfs_init → bootstrap_fs (monta `/`, `/sys`, `/dev`,
-   `/bin`, y `/sd` si hay FAT16 válido)`.
-6. Crear una task por server (`task_create`), registrar IDs
-   (`service_register`), llamar a cada `*_init()`. **El orden importa:**
-   el shell manda el banner inicial y necesita al console_server ya
-   registrado.
-7. `scheduler_loop()` — guarda un punto de longjmp y nunca vuelve.
+   `block_ata_init` corre IDENTIFY contra el primary IDE master; si
+   responde, FAT16 se monta en `/sd`.
+5. Microkernel: `ipc_init → pipe_init → task_init → reaper_init →
+   scheduler_init → syscall_init → ramfs_init → bootstrap_fs`.
+6. `bootstrap_fs` monta `/`, `/sys`, `/dev`, `/sd` (si hay FAT). En
+   primer boot dumpea los ~60 ELFs embedded a `/sd/bin` (FASE2-1 fix
+   permite dir-chain extension), luego monta `/bin → /sd/bin` via
+   aliasfs. Diskless: `/bin` queda servido por binfs sintético.
+7. Crear el keyboard feeder kernel-side (`task_create("keyboard",
+   keyboard_server_tick)`) — solo hace `keyboard_poll` →
+   `devfs_input_push`.
+8. Spawn de los 3 servers ring 3 vía `proc_execve("/bin/consrv")`,
+   `/bin/kbdsrv`, `/bin/shellsrv`. Cada uno se auto-registra contra
+   su SERVER_*; kmain también lo pre-registra para evitar la race
+   inicial.
+9. `keyboard_server_init()` (hardware), `sti`.
+10. `scheduler_loop()` — guarda un punto de longjmp y nunca vuelve.
 
 ---
 
@@ -235,32 +264,38 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | Subsistema | Estado |
 |---|---|
 | Boot Limine + framebuffer | ✅ |
-| Teclado PS/2 (Shift, Ctrl, flechas, Ctrl+C) | ✅ |
-| Microkernel cooperativo, IPC con queue de 64 | ✅ |
+| Teclado PS/2 (Shift, Ctrl, flechas, Ctrl+C/Z) | ✅ |
+| Microkernel cooperativo + preempt CPL=3, IPC queue de 64 | ✅ |
 | GDT + IDT + TSS, ring 0/3 selectors | ✅ |
-| PMM (bitmap) + VMM (paging 4-niveles propio) + kheap | ✅ |
-| Syscalls Linux x86_64 (`int 0x80` + `syscall`) | ✅ |
+| PMM (bitmap) + VMM (paging 4-niveles propio) + kheap + slab | ✅ |
+| Syscalls Linux x86_64 + osnos-specific (>= 250) | ✅ |
 | `copy_from_user` / `copy_to_user` con fault recovery | ✅ |
-| VFS + ramfs + sysfs + devfs + binfs | ✅ |
-| Shell con history, flechas, comandos (ls/cat/cp/mv/rm/echo/tree/…) | ✅ |
+| VFS + ramfs + sysfs + devfs + binfs + aliasfs + fat16 | ✅ |
+| **FASE 10 — Servers en ring 3** (consrv, kbdsrv, shellsrv) | ✅ |
+| **Shell ring-3** con line editor + history + flechas + pipes + redir + jobs + `cd ..` + `$VAR` + .oshrc | ✅ |
+| **Coreutils** (60+ ELFs: ls cat cp mv rm mkdir touch echo wc head tail grep sort uniq cut tr seq yes tee env pwd which printf date uname basename dirname clear tree banner …) | ✅ |
 | Wildcards `*` en ls/cat/rm | ✅ |
 | ELF loader (Elf64 ET_EXEC, PT_LOAD, ring 3) | ✅ |
-| mini-libc (stdio, stdlib, string, unistd, malloc) | ✅ |
-| Programas /bin en ring 3 (hello_libc, ls, cat, osh, top, …) | ✅ |
+| mini-libc (stdio, stdlib, string, unistd, malloc, env) | ✅ |
+| Per-task fd tables (16 fds) + pipe(2) + dup/dup2/fcntl | ✅ |
 | Scheduler preemptivo timer-driven (CPL=3, 50 ms quantum) | ✅ |
-| Sleep real + Ctrl+C live + background jobs (`&`) + `kill` | ✅ |
-| Driver ATA PIO + FAT16 read/write + persistencia en `/sd` | ✅ |
+| FXSAVE/FXRSTOR per-task (FP/SSE multi-task seguro) | ✅ |
+| Job control: `&`, `jobs`, `fg`, `bg`, Ctrl+Z, `kill` | ✅ |
+| `sys_spawn(2)` con fd inheritance + `osn_spawn` libc | ✅ |
+| Driver ATA PIO + FAT16 read/write + dir-chain extension + persistencia | ✅ |
+| **/bin disk-resident** via /bin→/sd/bin aliasfs + ROM fallback | ✅ |
 | Driver RTL8139 + ARP + IPv4 + ICMP + UDP + TCP completo | ✅ |
 | Sockets POSIX (socket/bind/listen/accept/connect/send/recv/select) | ✅ |
 | DNS resolver + getaddrinfo (vía slirp 10.0.2.3) | ✅ |
 | `/bin/httpd` sirviendo FAT16 sobre HTTP; `selectserver.c` de Beej verbatim | ✅ |
 | TTY line discipline POSIX (termios canonical/raw, ISIG, ioctl) | ✅ |
-| Shell con history persistente + `.oshrc` + env (PATH/HOME/PWD) | ✅ |
+| `/dev/fb0` + `/dev/input0` character devices | ✅ |
 | `/home` alias a `/sd/home` vía aliasfs (bind-mount VFS) | ✅ |
 | `/bin/ovi` editor modal vim-style (hjkl + flechas, i/a/o, :w/:q) | ✅ |
 | `getcwd` / `chdir` syscalls + per-task cwd (POSIX) | ✅ |
-| Servers en ring 3 (hoy todos ring 0) | ⏳ (fase 10) |
-| `fork` / `exec` real | ❌ |
+| mmap/munmap anónimo + brk/sbrk | ✅ |
+| Pre-populate sd.img al build (Fase 2 final) | ⏳ |
+| `fork` / `exec` real (hoy sólo `osn_spawn`) | ❌ |
 | Multi-core (SMP) | ❌ |
 
 ---
@@ -271,24 +306,29 @@ Cuatro patrones cubren el ~95% de las extensiones útiles.
 
 ### 1. Agregar un comando al shell
 
-Editar `src/servers/shell_server.c`:
+El shell vive en `elfs/osn-server/shellsrv.c` (ring 3). Editás el
+array `COMMANDS[]` y agregás tu builtin:
 
 ```c
-static void cmd_hola(const char *args) {
-    (void)args;
-    console_write("hola humano\n");
+static int do_hola(int argc, char **argv) {
+    (void)argc; (void)argv;
+    printf("hola humano\n");
+    return 0;
 }
 
-static const command_t commands[] = {
+static const cmd_t COMMANDS[] = {
     // ...
-    CMD("hola", cmd_hola, "saluda"),
+    { "hola", do_hola, "saluda" },
 };
 ```
 
-La línea de `help` se autogenera. Si tu comando necesita pedirle algo
-al fs_server, usá `shell_send_fs1(IPC_FS_*, path)` o
-`shell_send_fs2(...)` — devuelven `osnos_status_t` y propagan errores
-al usuario.
+Como `shellsrv` es un ELF ring-3, tu builtin usa la libc normal
+(`printf`, `getcwd`, `open`, etc) — sin acceso directo a estructuras
+del kernel. La línea de `help` se autogenera.
+
+Si querés algo más complejo o reutilizable como herramienta
+standalone (que también funcione vía pipes/redirects), considerá
+hacerlo un ELF separado en `elfs/tools/` — ver opción 2.
 
 ### 2. Agregar un programa de usuario en ring 3 (ELF + libc)
 
@@ -325,18 +365,38 @@ Para utilidades simples que no justifican un ELF entero. Tutorial en
 una función `int fn(const char *args)` que se llama desde el shell y
 puede usar la syscall API directamente.
 
-### 4. Agregar un server nuevo
+### 4. Agregar un server ring-3 nuevo
 
-1. `foo_server.{c,h}` exportando `foo_server_init()` y `foo_server_tick()`.
-2. Constante `SERVER_FOO` en `src/micro/service.h`.
-3. Opcodes nuevos `IPC_FOO_*` en `src/micro/ipc.h` (respetar los rangos
-   numéricos: `0x00–0x0F` sistema, `0x10–0x1F` console, `0x20–0x3F`
-   fs/vfs, `0x40+` reservado para nuevos).
-4. En `kmain`:
+Post-FASE-10, los servers son ELFs en `elfs/osn-server/`. Pasos:
+
+1. Crear `elfs/osn-server/foosrv.c`:
    ```c
-   int foo_pid = task_create("foo", foo_server_tick);
-   service_register(SERVER_FOO, foo_pid);
-   foo_server_init();   // ¡este orden importa!
+   #include "osnos_ipc.h"
+   #include "osnos_ipc_abi.h"
+
+   int main(int argc, char **argv) {
+       (void)argc; (void)argv;
+       ipc_service_register(SERVER_FOO);
+       for (;;) {
+           ipc_msg_t msg;
+           if (ipc_recv_block(&msg) != 0) continue;
+           switch (msg.type) {
+               case IPC_FOO_DO_THING: /* handle */ break;
+           }
+       }
+   }
+   ```
+2. Constante `SERVER_FOO` en `src/include/osnos_ipc_abi.h` (ABI
+   compartido kernel ↔ ring-3).
+3. Opcodes nuevos `IPC_FOO_*` en el mismo header (rangos: `0x00–0x0F`
+   sistema, `0x10–0x1F` console, `0x20–0x3F` fs/vfs, `0x40–0x5F`
+   process lifecycle, `0x60+` reservado para nuevos).
+4. Registrar el ELF en `GNUmakefile` (`USER_ELF_LIBC_SRCS`) y
+   `src/proc/builtin.c` (`DECLARE_ELF(foosrv); ELF(foosrv, "...")`).
+5. En `kmain`:
+   ```c
+   int64_t foosrv_pid = proc_execve("/bin/foosrv", "", 0);
+   if (foosrv_pid > 0) service_register(SERVER_FOO, (uint64_t)foosrv_pid);
    ```
 
 ---
@@ -367,15 +427,21 @@ lejano y muy difícil de debuggear. Están repetidas en
   array; un `const ramfs_file_t *` devuelto por `ramfs_find` sigue
   válido hasta que **ese** slot específico se borre. Crítico para el
   futuro layer de file descriptors.
-- **Scheduler cooperativo.** Una task que entra en un loop infinito
-  cuelga el kernel entero. Ctrl+C no salva. Operaciones largas
-  simplemente **no deben existir** en este código hasta que llegue la
-  fase 9 (preempción real).
-- **Cola IPC compartida única.** Outputs de N líneas se empaquetan en
-  un solo mensaje (ver cómo `cmd_help` y `cmd_history` construyen un
-  buffer con `os_strlcat` y emiten una sola vez). Mandar línea por
-  línea desborda la cola y los mensajes se pierden silenciosamente
-  como `EAGAIN`.
+- **Scheduler con preempción CPL=3.** Tasks ring-3 son preempt cada
+  50ms; tasks kernel-side (keyboard feeder) son cooperativas y NO
+  deben loopear sin yield. Ctrl+C/Ctrl+Z funcionan en fg tasks
+  ring-3 via signal routing del TTY → kernel_fg_pid → task->kill/
+  stop_pending.
+- **Cola IPC compartida única (64 slots, 1KB/msg).** Outputs largos
+  conviene batchearlos. `ipc_send` rewrite msg.to de SID → pid en el
+  queue: los ring-3 receivers filtran por su propio pid (no por SID).
+  Si la cola se llena, `ipc_send` devuelve `EAGAIN` — los emisores
+  hot deben re-encolar o yieldear.
+- **ABI Linux + osnos extensions (≥ 250).** Los números osnos-specific
+  no chocan con Linux: SYS_IPC_SEND=260, RECV=261, SERVICE_REGISTER=
+  262, LOOKUP=263, TTY_INPUT=264, TASKINFO=265, SPAWN=266, SET_FG=
+  267, RESUME=268. Cualquier syscall futuro osnos también arriba de
+  250.
 
 ---
 
@@ -418,50 +484,45 @@ lejano y muy difícil de debuggear. Están repetidas en
 
 Cerrado recientemente:
 
-- **Arrow keys + `getcwd`/`chdir`**: `keyboard_server` traduce arrow
-  keycodes a `ESC [ A/B/C/D` y los empuja al TTY, así programas raw
-  (ovi) navegan con flechas además de hjkl. `SYS_GETCWD` (#79) y
-  `SYS_CHDIR` (#80) per-task — `task_t.cwd` se siembra al exec desde
-  `PWD=` del envp. `libc resolve_path` ahora consulta `getcwd` y cae
-  a `$PWD` si falla.
-- **`/bin/ovi` + VT100 mínimo + TIOCGWINSZ**: editor modal vim-flavour
-  (hjkl + flechas, i/a/o/O, x/dd, gg/G, $/0, :w/:q/:wq/:q!). El
-  framebuffer ahora parsea `ESC[2J`, `ESC[H`, `ESC[r;cH`, `ESC[K`,
-  `ESC[7m` (reverse).
-- **Shell rc + history persistente**: `/home/.oshrc` se ejecuta al boot
-  (con guard anti-recursión, en silencio); `/home/.history` carga al
-  inicio y se appendea por comando. Soporta env: PATH/HOME/PWD/TERM/
-  SHELL, con `env`/`export`/`unset`. Auto-prefix `/bin/`. `getenv` /
-  `setenv` / `execvp` en libc.
-- **`/home` como alias de `/sd/home`** vía aliasfs (bind-mount VFS):
-  con disco las ediciones a `/home/...` persisten cross-reboot.
-- **TTY 1+2** (line discipline + termios ABI Linux): canonical / raw,
-  ISIG (Ctrl+C → SIGINT), ioctl TCGETS/TCSETS/TIOCGWINSZ.
-- **kheap robusto**: growth dinámico (cap 4 MiB) + slab allocator
-  power-of-2 (16…2048) + 28 tests SOCK/KHEAP/SLAB. 603/603 pass.
+- **FASE 10 — Servers a ring 3** (cerrada completa): console + keyboard
+  + shell viven como ELFs en `elfs/osn-server/`. kmain solo bootea
+  drivers + spawnea los 3 servers + scheduler. Trayecto:
+  - 10.0 pre-reqs: per-task fd tables (16/task), pipe(2) syscall,
+    /dev/fb0 + /dev/input0, osnos_ipc_abi.h compartido, SYS_TASKINFO,
+    /bin/kerntest ELF de ABI tests.
+  - 10.1 consrv: ring-3 console server, IPC_CONSOLE_WRITE → /dev/fb0.
+  - 10.2 kbdsrv: ring-3 keyboard policy, /dev/input0 → sys_tty_input.
+  - 10.3 fs_server eliminado (-290 LOC): shell habla VFS directo.
+  - 10.4 shellsrv: shell ring-3 con line editor (raw mode + history +
+    flechas + cursor visible), pipes/redirects/jobs, fg/bg/Ctrl+Z,
+    $VAR expansion, .oshrc, export/unset, PATH search.
+- **Disk-resident /bin (Fase 1)**: bootstrap dumpea los ~60 ELFs a
+  /sd/bin al primer boot. aliasfs /bin → /sd/bin. exec.c prefiere
+  disco; embedded ROM es fallback. FAT16 dir-chain extension fix
+  (extend_dir_chain) permite >9 entries por subdir.
+- **Coreutils completos**: env, wc, pwd, uname, basename, dirname,
+  tail, seq, yes, tee, date, printf, grep, sort, uniq, cut, tr,
+  banner, which, clear, tree — todos como ELFs.
 - **FASE 8.5 — Networking completo**: driver RTL8139 + Ethernet/ARP +
-  IPv4/ICMP + UDP + TCP completo (handshake, data, close, listen+accept
-  multi-cliente, connect outbound, retransmisión RTO 500 ms) + DNS
-  resolver + select/setsockopt. `/bin/httpd` sirve FAT16 sobre HTTP a
-  Firefox real; `selectserver.c` de Beej corre verbatim.
-- **FASE 9 — Scheduler preempt** con timer-driven quantum sobre CPL=3
-  + sleep real + Ctrl+C live + background jobs.
-- **FASE 8 — Disco real**: driver ATA PIO + FAT16 read/write sobre
-  `sd.img` (16 MiB). `/sd` se monta solo si hay disco, con persistencia
-  verificada (escribir → reboot → leer).
+  IPv4/ICMP + UDP + TCP + DNS + sockets POSIX. `/bin/httpd` sirve
+  FAT16 sobre HTTP a Firefox real; `selectserver.c` de Beej verbatim.
+- **FASE 9 — Scheduler preempt** + sleep real + Ctrl+C/Z live.
+- **FASE 8 — Disco real**: ATA PIO + FAT16 read/write + persistencia.
 
 Las próximas fases grandes:
 
-1. **Mover servers a ring 3** (FASE 10): shell, fs, console, keyboard
-   como procesos de usuario con IPC kernel-mediated.
-2. **fork/exec** real (hoy `exec` reemplaza la task actual, no hay
-   `fork`).
-3. **TUI potente** (FASE 11): mini Norton Commander, viewer, editor
-   con flechas — `/bin/ovi` ya tiene hjkl + flechas funcionando, el
-   VT100 parser, TIOCGWINSZ y keycode passthrough están listos.
-   Falta: multi-pane split, file browser, mouse, syntax highlighting.
-4. **Gráfico** (FASE 12): window server + terminal en ventana + mouse.
-5. **SMP** (mucho después).
+1. **Fase 2 final disk-resident**: popular sd.img al build (mtools en
+   GNUmakefile) + borrar embedded blobs del kernel. Kernel shrink:
+   ~5MB → ~500KB.
+2. **fork/exec** POSIX real (hoy hay `osn_spawn` con fd inheritance,
+   estilo posix_spawn).
+3. **FASE 11 — Drivers a ring 3**: PS/2, framebuffer, ATA, RTL8139
+   como ELFs en `elfs/osn-driver/`. Requiere IRQ delegation, MMIO
+   mapping per-task, port-IO syscall, DMA bouncing.
+4. **TUI potente** (FASE 12): mini Norton Commander, viewer, syntax
+   highlighting en ovi, multi-pane.
+5. **Gráfico** (FASE 13): window server + terminal en ventana + mouse.
+6. **SMP** (mucho después).
 
 Detalle en `osnos/PLAN.md` y `osnos/STATUS.md`.
 

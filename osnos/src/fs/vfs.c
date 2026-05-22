@@ -116,6 +116,32 @@ osnos_status_t vfs_stat(const char *path, vfs_stat_t *out) {
     return m->ops->stat(m->priv, path, out);
 }
 
+/* Helper: count non-root mounts whose mountpoint is exactly one
+ * directory below "/" (i.e. "/sys", "/bin", "/dev", "/home", "/sd"
+ * — not their sub-paths). Used by vfs_readdir to expose them as
+ * synthetic entries when listing the root dir. */
+static int submount_at_index(int want, char *name_out) {
+    int i_real = 0;
+    for (size_t i = 0; i < VFS_MAX_MOUNTS; i++) {
+        if (!mounts[i].used) continue;
+        const char *mp = mounts[i].mountpoint;
+        if (mp[0] != '/') continue;
+        if (mp[1] == 0) continue;            /* root itself */
+        int has_more_slash = 0;
+        for (size_t k = 1; mp[k]; k++) if (mp[k] == '/') { has_more_slash = 1; break; }
+        if (has_more_slash) continue;
+        if (i_real == want) {
+            size_t k = 1;
+            int n = 0;
+            while (mp[k] && n + 1 < OSNOS_NAME_MAX) name_out[n++] = mp[k++];
+            name_out[n] = 0;
+            return 1;
+        }
+        i_real++;
+    }
+    return 0;
+}
+
 osnos_status_t vfs_readdir(
     const char *path,
     size_t *cursor,
@@ -124,6 +150,25 @@ osnos_status_t vfs_readdir(
     osnos_status_t s = check_path(path);
     if (s != OSNOS_OK) return s;
     if (!cursor || !out) return OSNOS_EINVAL;
+
+    /* Listing the root: synthesise entries for the top-level mounts
+     * (/bin, /dev, /sys, /home, /sd). Ramfs at "/" today only stores
+     * files in subdirectories that are themselves mounts, so once
+     * the synthetic entries are exhausted there's nothing more to
+     * return. Just signal ENOENT. */
+    if (path[0] == '/' && path[1] == 0) {
+        char name[OSNOS_NAME_MAX];
+        if (!submount_at_index((int)*cursor, name)) return OSNOS_ENOENT;
+        size_t nl = 0;
+        while (name[nl] && nl + 1 < OSNOS_NAME_MAX) {
+            out->name[nl] = name[nl];
+            nl++;
+        }
+        out->name[nl] = 0;
+        out->type = VFS_NODE_DIR;
+        (*cursor)++;
+        return OSNOS_OK;
+    }
 
     const vfs_mount_t *m = find_mount(path);
     if (!m) return OSNOS_ENOENT;

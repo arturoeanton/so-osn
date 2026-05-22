@@ -136,6 +136,9 @@ USER_ELF_LIBC_SRCS := \
     elfs/tools/cut.c \
     elfs/tools/tr.c \
     elfs/tools/banner.c \
+    elfs/tools/which.c \
+    elfs/tools/clear.c \
+    elfs/tools/tree.c \
     elfs/net/udptest.c \
     elfs/net/echotcp.c \
     elfs/net/selecttest.c \

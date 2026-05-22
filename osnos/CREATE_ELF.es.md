@@ -3,12 +3,18 @@
 Una guía paso a paso para escribir un programa C, compilarlo en Linux
 como ELF64, embedderlo en el kernel y correrlo en ring 3 sobre osnos.
 
-> **Nota de organización (post-FASE 8.5)**: este doc fue escrito cuando
+> **Nota de organización (post-FASE 10)**: este doc fue escrito cuando
 > los ELFs vivían en `tests/`. Ese directorio se renombró a `elfs/` con
-> subcategorías: `elfs/shell/` (osh), `elfs/tools/` (coreutils), `elfs/net/`
-> (sockets), `elfs/tests/` (libc + termios smoke tests, donde está
-> `user_hello.lds`), `elfs/osn-server/` (placeholder FASE 10). El linker
-> script compartido es `elfs/libc.lds`. Donde el tutorial dice
+> subcategorías:
+>   - `elfs/shell/` — osh (script interpreter)
+>   - `elfs/tools/` — coreutils ELFs (~40+ comandos)
+>   - `elfs/net/` — sockets (tcpclient, httpd, ...)
+>   - `elfs/tests/` — libc + ABI smoke tests (kerntest, pipetest,
+>     spawntest, libctest, fptest, mmaptest, user_hello bare)
+>   - `elfs/osn-server/` — servers ring-3 de FASE 10 (consrv, kbdsrv,
+>     shellsrv).
+>
+> El linker script compartido es `elfs/libc.lds`. Donde el tutorial dice
 > "`tests/`", leer "`elfs/<categoría>/`". El resto del flujo es idéntico.
 
 Hay **dos formas** de escribir un ELF en osnos:
@@ -59,19 +65,32 @@ Cuando el kernel carga tu ELF libc-linked, vivís en ring 3 con esto:
 - **Syscall ABI Linux x86_64** completa abajo de la libc — podés
   bypassear y llamar `syscall` directo si querés.
 
+Lo que tenés **a partir de FASE 10**:
+
+- **`osn_spawn`** (libc helper sobre `SYS_SPAWN`): podés spawnear
+  otro ELF desde tu programa con fd inheritance (stdin/stdout via
+  los fds del caller). Equivalente a posix_spawn. Ver `osnos_ipc.h`.
+- **`pipe(2)`**, **`dup`/`dup2`**, **`fcntl`** (F_GETFL/SETFL,
+  F_DUPFD): per-task fd tables ya soportan todo el pipeline POSIX.
+- **`mmap`/`munmap`** anónimo (PROT_*/MAP_ANONYMOUS).
+- **FPU/SSE** ya tiene FXSAVE/FXRSTOR per-task. Si querés usar
+  float en tu ELF, sacá `-mno-80387 -mno-sse` del Makefile de tu
+  binario.
+- **IPC entre tasks** vía SYS_IPC_SEND/RECV + SYS_SERVICE_REGISTER/
+  LOOKUP. Cualquier ELF puede registrarse como un SERVER_*
+  (definir nuevo SID en `osnos_ipc_abi.h`).
+
 Lo que **no** tenés todavía:
 
-- **Networking impl**. `sys/socket.h` está, las funciones están
-  declaradas, pero `socket()` devuelve `-1 + errno=ENOSYS`. Llega
-  después de FASE 8 (FAT).
+- **`fork`** real. `osn_spawn` cubre fork+exec atómico, pero no hay
+  fork-sin-exec.
+- **`execve`** in-place (reemplazar el current ELF). Tampoco
+  necesario hoy con osn_spawn.
 - **Signal handlers**. `kill()` existe pero como exit forzado, no
   hay `sigaction`. `sigsetjmp`/`siglongjmp` aliasean setjmp/longjmp
-  pero no salvan signal mask.
+  pero no salvan signal mask. Ctrl+C/Ctrl+Z se entregan vía
+  kill_pending / stop_pending del task struct, sin handlers user-mode.
 - **Threads**. Un task = un thread.
-- **FPU/SSE**. Compilado con `-mno-80387 -mno-sse`. Sin float.
-- **`fork`/`execve`**. La spawneo de tasks es vía el shell con
-  `exec /bin/foo` — desde un programa C todavía no podés crear
-  otra task.
 - **TLS / FS register**. Cero soporte.
 - **Loader dinámico**. Sólo `ET_EXEC` estático, nunca `ET_DYN`/PIE.
 

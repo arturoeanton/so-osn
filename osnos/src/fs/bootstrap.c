@@ -1,6 +1,8 @@
 #include "bootstrap.h"
 
+#include "../drivers/framebuffer.h"
 #include "../lib/string.h"
+#include "../proc/builtin.h"
 #include "aliasfs.h"
 #include "binfs.h"
 #include "devfs.h"
@@ -22,9 +24,73 @@ static void seed_if_absent(const char *path, const char *content) {
     seed_file(path, content);
 }
 
-/* Storage for the /home → /sd/home bind mount. Lives in BSS so it
- * survives forever (the VFS layer keeps a pointer into here). */
+/* Storage for the /home → /sd/home and /bin → /sd/bin bind mounts.
+ * Lives in BSS — the VFS layer keeps pointers into here. */
 static aliasfs_t home_alias_slot;
+static aliasfs_t bin_alias_slot;
+
+/* Walk the embedded ELF registry and write each blob into /sd/bin/<name>
+ * if the file isn't already there. With FASE2-1's dir-chain extension
+ * fix the full set (~60 entries) now fits, so we drop the curated
+ * subset. Skipping happens via vfs_stat — subsequent boots seed
+ * zero new files and return instantly. */
+static void seed_disk_bin(void) {
+    char path[64];
+    size_t n = builtin_count();
+    int    needed = 0;
+    for (size_t i = 0; i < n; i++) {
+        const builtin_t *b = builtin_at(i);
+        if (!b || !b->elf_start || !b->elf_end) continue;
+        os_strlcpy(path, "/sd/bin/", sizeof(path));
+        os_strlcat(path, b->name, sizeof(path));
+        vfs_stat_t st;
+        if (vfs_stat(path, &st) != OSNOS_OK) needed++;
+    }
+    if (needed == 0) return;
+
+    framebuffer_clear(0x000000);
+    framebuffer_draw_string(
+        "osnos first-boot: seeding /sd/bin (full set)...\n",
+        0xffff00);
+
+    int done = 0;
+    for (size_t i = 0; i < n; i++) {
+        const builtin_t *b = builtin_at(i);
+        if (!b || !b->elf_start || !b->elf_end) continue;
+        os_strlcpy(path, "/sd/bin/", sizeof(path));
+        os_strlcat(path, b->name, sizeof(path));
+
+        vfs_stat_t st;
+        if (vfs_stat(path, &st) == OSNOS_OK) continue;
+
+        framebuffer_draw_string("  ", 0xcccccc);
+        framebuffer_draw_string(b->name, 0xcccccc);
+        framebuffer_draw_string(" ", 0xcccccc);
+
+        size_t sz = (size_t)(b->elf_end - b->elf_start);
+        osnos_status_t s = vfs_write(path, (const char *)b->elf_start, sz);
+        if (s == OSNOS_OK) {
+            framebuffer_draw_string("ok\n", 0x00ff66);
+        } else {
+            char msg[24];
+            os_strlcpy(msg, "FAIL (", sizeof(msg));
+            char num[8];
+            uint32_t code = (uint32_t)s;
+            int ni = 0;
+            char tmp[8];
+            if (code == 0) tmp[ni++] = '0';
+            while (code > 0 && ni < 7) { tmp[ni++] = (char)('0' + (code % 10)); code /= 10; }
+            for (int j = ni - 1, k = 0; j >= 0; j--, k++) num[k] = tmp[j];
+            num[ni] = 0;
+            os_strlcat(msg, num, sizeof(msg));
+            os_strlcat(msg, ")\n", sizeof(msg));
+            framebuffer_draw_string(msg, 0xff5555);
+        }
+        done++;
+        (void)done;
+    }
+    framebuffer_draw_string("seeded. starting shell...\n", 0xffff00);
+}
 
 void bootstrap_fs(void) {
     vfs_init();
@@ -38,15 +104,38 @@ void bootstrap_fs(void) {
     /* devfs at "/dev" — synthetic character devices. */
     vfs_mount("/dev", &devfs_vfs_ops, 0);
 
-    /* binfs at "/bin" — synthetic, backed by the builtin registry. */
-    vfs_mount("/bin", &binfs_vfs_ops, 0);
-
     /* /sd — FAT16 on the ATA primary master, when present. Mounting
      * only if the parser bound to a valid BPB keeps the mount table
      * tidy when there's no disk attached. */
     bool fat_mounted = (fat_init() == 0);
     if (fat_mounted) {
         vfs_mount("/sd", &fat_vfs_ops, 0);
+    }
+
+    /*
+     * /bin backing:
+     *   - With a disk: dump every embedded ELF into /sd/bin (first
+     *     boot only), then alias /bin → /sd/bin. From here on the
+     *     binaries live on FAT — editable, replaceable, persisted.
+     *   - Without a disk: synthetic binfs over the in-kernel builtin
+     *     registry (read-only).
+     */
+    /* /bin backing:
+     *   - With a disk: dump every embedded ELF into /sd/bin (first
+     *     boot only — FASE2-1 fixed the FAT16 dir-chain extension so
+     *     the full set fits), then alias /bin → /sd/bin. From here
+     *     on the binaries live on disk and are editable / replaceable.
+     *   - Diskless: synthetic binfs over the in-kernel builtin
+     *     registry (read-only).
+     */
+    if (fat_mounted) {
+        vfs_mkdir("/sd/bin");
+        seed_disk_bin();
+        if (aliasfs_init(&bin_alias_slot, "/bin", "/sd/bin")) {
+            vfs_mount("/bin", &aliasfs_ops, &bin_alias_slot);
+        }
+    } else {
+        vfs_mount("/bin", &binfs_vfs_ops, 0);
     }
 
     /*

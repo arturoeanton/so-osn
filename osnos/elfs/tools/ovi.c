@@ -74,11 +74,44 @@ static char status_msg[128];   /* one-shot message for the status bar */
 
 static struct termios saved_termios;
 
-/* ---- low-level output helpers ---- */
+/* ---- low-level output helpers ----
+ *
+ * Each render emits ~30 small writes (cursor positioning, line
+ * contents, status bar, SGR sequences). Without buffering, every
+ * write becomes a sys_write → IPC_CONSOLE_WRITE → 1 slot in the
+ * shared queue. The queue is 64 slots; two renders saturate it and
+ * subsequent writes get dropped, leaving the screen half-painted.
+ *
+ * Batch everything into a 16 KB buffer and flush once at the end
+ * of each render. ovi_flush() is called explicitly after render()
+ * + after every input handling step that might want to repaint.
+ */
+#define OVI_OUTBUF 16384
+static char   out_buf[OVI_OUTBUF];
+static size_t out_pos;
 
-static void out(const char *s) { write(1, s, strlen(s)); }
+static void ovi_flush(void) {
+    if (out_pos > 0) {
+        size_t off = 0;
+        while (off < out_pos) {
+            ssize_t w = write(1, out_buf + off, out_pos - off);
+            if (w <= 0) break;
+            off += (size_t)w;
+        }
+    }
+    out_pos = 0;
+}
 
-static void out_n(const char *s, size_t n) { write(1, s, n); }
+static void out_n(const char *s, size_t n) {
+    if (out_pos + n > OVI_OUTBUF) ovi_flush();
+    if (n > OVI_OUTBUF) {
+        write(1, s, n);
+        return;
+    }
+    for (size_t i = 0; i < n; i++) out_buf[out_pos++] = s[i];
+}
+
+static void out(const char *s) { out_n(s, strlen(s)); }
 
 static void clr_screen(void) { out("\x1b[2J\x1b[H"); }
 static void cursor_at(int row1, int col1) {
@@ -328,6 +361,10 @@ static void render(void) {
         out_n(cmd_buf, cmd_len);
     }
     clr_eol();
+
+    /* Push everything to the framebuffer in one shot — avoids
+     * saturating the IPC console queue and leaving partial paints. */
+    ovi_flush();
 }
 
 /* ---- input helpers ---- */

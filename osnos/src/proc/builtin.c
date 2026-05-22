@@ -167,6 +167,9 @@ DECLARE_ELF(uniq);
 DECLARE_ELF(cut);
 DECLARE_ELF(tr);
 DECLARE_ELF(banner);
+DECLARE_ELF(which);
+DECLARE_ELF(clear);
+DECLARE_ELF(tree);
 
 #undef DECLARE_ELF
 
@@ -255,6 +258,9 @@ static const builtin_t builtins[] = {
     ELF(cut,          "extract fields from each line"),
     ELF(tr,           "translate / delete characters"),
     ELF(banner,       "print the osnos welcome banner"),
+    ELF(which,        "find a command in $PATH"),
+    ELF(clear,        "clear the terminal screen"),
+    ELF(tree,         "recursive directory listing"),
 };
 
 #undef USER

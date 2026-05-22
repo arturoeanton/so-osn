@@ -1104,6 +1104,41 @@ static int compute_entry_naming(const fat_dirent_t *parent,
  * reverse seq order on disk so the 0x40-marked highest-seq slot lands
  * first) then the 8.3 payload. Cleans up any partial state on failure.
  */
+/* Allocate one fresh cluster and append it to `dir`'s existing chain.
+ * Used to extend a subdir that ran out of slot space — fixes the
+ * ENOSPC-after-~9-files limit we hit when seeding /sd/bin in
+ * bootstrap. Not valid for the FAT12/16 root dir (first_cluster==0
+ * → fixed-size root area). */
+static int extend_dir_chain(const fat_dirent_t *dir) {
+    if (dir->first_cluster == 0) return FAT_ENOSPC;
+
+    uint16_t cur = dir->first_cluster;
+    uint16_t next;
+    for (;;) {
+        if (cur < 2 || cur >= FAT16_EOF_MIN) return FAT_EIO;
+        if (fat_get_entry(cur, &next) != 0)  return FAT_EIO;
+        if (next >= FAT16_EOF_MIN) break;
+        cur = next;
+    }
+
+    uint16_t new_c = fat_alloc_cluster();
+    if (new_c == 0) return FAT_ENOSPC;
+
+    /* Zero the new cluster so the first byte of every slot reads
+     * 0x00 — that's how read_dir_slot detects "end of dir". */
+    uint8_t zero[SECTOR_SIZE];
+    for (uint32_t i = 0; i < SECTOR_SIZE; i++) zero[i] = 0;
+    uint32_t lba0 = cluster_to_lba(new_c);
+    for (uint32_t s = 0; s < fs.sectors_per_cluster; s++) {
+        if (block_ata_write_sector(lba0 + s, zero) != 0) {
+            return FAT_EIO;
+        }
+    }
+
+    if (fat_set_entry(cur, new_c) != 0) return FAT_EIO;
+    return 0;
+}
+
 static int write_entry_with_naming(const fat_dirent_t *parent,
                                      const entry_naming_t *naming,
                                      const uint8_t dirent_raw[DIRENT_SIZE]) {
@@ -1112,6 +1147,17 @@ static int write_entry_with_naming(const fat_dirent_t *parent,
     uint32_t slot_offs[LFN_MAX_SEQ + 1];
 
     int rc = find_free_dir_slots_run(parent, total_slots, slot_lbas, slot_offs);
+    if (rc == FAT_ENOSPC && parent->first_cluster != 0) {
+        /* Subdir ran out of slot space — try growing the chain by one
+         * cluster and looking again. Keep trying a few times in case
+         * the slot run we need is larger than one cluster. */
+        for (int attempt = 0; attempt < 4; attempt++) {
+            int ext = extend_dir_chain(parent);
+            if (ext != 0) return ext;
+            rc = find_free_dir_slots_run(parent, total_slots, slot_lbas, slot_offs);
+            if (rc != FAT_ENOSPC) break;
+        }
+    }
     if (rc != 0) return rc;
 
     if (naming->needs_lfn) {

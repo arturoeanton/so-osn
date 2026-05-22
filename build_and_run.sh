@@ -55,7 +55,7 @@ fi
 # --- pick a QEMU display backend that exists on this host -------------------
 DISPLAY_FLAG=""
 case "$(uname -s)" in
-    Darwin) DISPLAY_FLAG="-display cocoa" ;;
+    Darwin) DISPLAY_FLAG="-display cocoa,zoom-to-fit=on" ;;
     Linux)  DISPLAY_FLAG="-display gtk"   ;;
 esac
 

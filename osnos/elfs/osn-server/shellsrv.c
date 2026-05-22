@@ -413,9 +413,61 @@ static int do_pwd(int argc, char **argv) {
     }
     printf("%s\n", buf); return 0;
 }
+/* Normalize an absolute path in place, collapsing "//", "./", "../".
+ * Caller has guaranteed path[0] == '/'. */
+static void path_normalize(char *path) {
+    char tmp[PATH_MAX];
+    size_t op = 0;
+    tmp[op++] = '/';
+    size_t i = 1;
+    while (path[i]) {
+        while (path[i] == '/') i++;
+        if (!path[i]) break;
+        char tok[64];
+        int tn = 0;
+        while (path[i] && path[i] != '/' && tn < 63) tok[tn++] = path[i++];
+        tok[tn] = 0;
+        if (tn == 1 && tok[0] == '.') continue;
+        if (tn == 2 && tok[0] == '.' && tok[1] == '.') {
+            /* Pop trailing segment from tmp. */
+            if (op > 1) {
+                op--;                        /* drop separator */
+                while (op > 0 && tmp[op - 1] != '/') op--;
+            }
+            if (op == 0) tmp[op++] = '/';
+            continue;
+        }
+        if (op > 1) tmp[op++] = '/';
+        for (int j = 0; j < tn && op < PATH_MAX - 1; j++) tmp[op++] = tok[j];
+    }
+    if (op == 0) tmp[op++] = '/';
+    tmp[op] = 0;
+    safe_copy(path, tmp, PATH_MAX);
+}
+
+/* Resolve `target` against the shell's cwd into `out` (absolute,
+ * normalized). Handles "..", ".", relative paths, mixed slashes. */
+static void resolve_path(const char *target, char *out, size_t cap) {
+    char buf[PATH_MAX];
+    if (target[0] == '/') {
+        safe_copy(buf, target, sizeof(buf));
+    } else {
+        if (getcwd(buf, sizeof(buf)) == 0) safe_copy(buf, "/", sizeof(buf));
+        size_t l = strlen(buf);
+        if (l == 0 || buf[l - 1] != '/') {
+            if (l + 1 < sizeof(buf)) { buf[l++] = '/'; buf[l] = 0; }
+        }
+        safe_cat(buf, target, sizeof(buf));
+    }
+    path_normalize(buf);
+    safe_copy(out, buf, cap);
+}
+
 static int do_cd(int argc, char **argv) {
     const char *target = (argc >= 2) ? argv[1] : "/home";
-    if (chdir(target) != 0) {
+    char resolved[PATH_MAX];
+    resolve_path(target, resolved, sizeof(resolved));
+    if (chdir(resolved) != 0) {
         fprintf(stderr, "cd: %s: %s\n", target, strerror(errno));
         return 1;
     }
@@ -704,14 +756,41 @@ static void wait_pid(long pid) {
     (void)wait_pid_or_stop(pid);
 }
 
-/* Build "/bin/<name>" or pass absolute. */
+/* Resolve a command name against PATH. Absolute paths pass through;
+ * relative names get tried against each colon-separated component of
+ * $PATH (defaulting to "/bin" if unset). First file that vfs_stat's
+ * as a regular file wins. Falls back to "/bin/<name>" so the kernel
+ * fallback ELFs still work when no /bin entry exists on disk yet. */
 static void resolve_cmd_path(const char *name, char *out, size_t cap) {
-    if (name[0] == '/') {
-        safe_copy(out, name, cap);
-    } else {
-        safe_copy(out, "/bin/", cap);
-        safe_cat (out, name,    cap);
+    if (name[0] == '/') { safe_copy(out, name, cap); return; }
+
+    const char *path_env = getenv("PATH");
+    if (!path_env || !*path_env) path_env = "/bin";
+
+    const char *p = path_env;
+    while (*p) {
+        char dir[PATH_MAX];
+        size_t dn = 0;
+        while (*p && *p != ':' && dn + 1 < sizeof(dir)) dir[dn++] = *p++;
+        dir[dn] = 0;
+        if (*p == ':') p++;
+        if (dn == 0) continue;
+
+        char candidate[PATH_MAX];
+        safe_copy(candidate, dir,  sizeof(candidate));
+        if (dn > 0 && dir[dn - 1] != '/') safe_cat(candidate, "/", sizeof(candidate));
+        safe_cat(candidate, name, sizeof(candidate));
+
+        struct stat st;
+        if (stat(candidate, &st) == 0) {
+            safe_copy(out, candidate, cap);
+            return;
+        }
     }
+    /* Not found anywhere — return "/bin/<name>" so the kernel-side
+     * builtin fallback still gets a chance. */
+    safe_copy(out, "/bin/", cap);
+    safe_cat (out, name,    cap);
 }
 
 /* Pack argv[1..argc-1] into a single space-separated args string
