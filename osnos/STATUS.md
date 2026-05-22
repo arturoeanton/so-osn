@@ -86,8 +86,8 @@ abiertos):
 - ☐ Process groups + sessions POSIX-strict (hoy job control usa
   pid 1-to-1 vía fg_pid; pgid/sid no existen)
 - ☐ Pipelines con más de 4 stages (hoy MAX_PIPELINE_STAGES=4)
-- ☐ Shell builtins (cat/ls/...) que respeten redirects sin
-  short-circuit a ELF (echo ya lo hace via echo_unescape)
+- ☐ Shell builtins (`cat` / `ls` / …) que respeten redirects sin
+  short-circuit a ELF (`echo` ya lo hace vía `echo_unescape`)
 - ☐ Open file description shared offsets para dup POSIX-strict
 - ☐ tmpfile unlink-on-close (necesita anonymous FD layer)
 - ☐ RTC real (hoy time/clock_gettime = segundos desde boot)
@@ -117,7 +117,7 @@ abiertos):
 | Lib freestanding | `src/lib/`: memory, printf, string |
 | Kernel-side feeder (no es server) | `src/servers/keyboard_server.c` — solo poll PS/2 + push a /dev/input0. Queda en ring-0 hasta FASE 11 (driver migration) |
 
-**Ring 3 — ELFs separados embebidos en el kernel vía objcopy:**
+**Ring 3 — ELFs separados: ROM recovery embebido + disk-resident en /sd/bin:**
 
 | Categoría | ELFs | Cantidad | Detalle |
 |-----------|------|----------|---------|
@@ -161,14 +161,16 @@ disk-resident final.
 
 ### Microkernel
 ✓ drivers separados (framebuffer, keyboard)
-✓ servers separados (console, keyboard, shell, fs)
+✓ frontend servers en ring 3: consrv (console), kbdsrv (keyboard), shellsrv (shell)
+✓ fs_server eliminado (FASE 10.3) — VFS corre sin IPC roundtrip
+✓ SERVER_FS reservado en ABI, no registrado
 ✓ IPC con queue de 64 slots, payload 1024B
 ✓ IPC blocking + wakeup por task_unblock
 ✓ IPC contract documentado en ipc.h (rangos de opcode, convención de respuesta)
 ✓ ipc_send retorna osnos_status_t (OK / EAGAIN / ESRCH); shell propaga errores al usuario
 ✓ IPC_PROC_EXITED (rango 0x40) para parent-notification de child death
 ✓ service registry (SERVER_FS/KEYBOARD/SHELL/CONSOLE)
-✓ scheduler cooperativo round-robin + task.dispatches counter
+✓ scheduler round-robin con preemption por timer (CPL=3, 50 ms quantum) + yield/block voluntario en ring 0 + task.dispatches counter
 ✓ GDT propia (kcode/kdata/ucode/udata + TSS slots)
 ✓ IDT 256 entries con exception handlers (#PF, #GP, #DF, #UD, etc.)
 ✓ TSS instalado (RSP0 al kernel stack), ltr OK, IOPB cerrado
