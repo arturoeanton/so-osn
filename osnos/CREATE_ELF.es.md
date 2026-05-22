@@ -84,12 +84,23 @@ Lo que tenés **a partir de FASE 10**:
   LOOKUP. Cualquier ELF puede registrarse como un SERVER_*
   (definir nuevo SID en `osnos_ipc_abi.h`).
 
+Lo que tenés **a partir de Fase 2 disk-resident** (la sesión que
+cerró ABI POSIX core):
+
+- **`fork(2)` real**: SYS_FORK=57. Deep-copy del pml4 del parent (no
+  COW yet — full page copy), clona la fd table con pipe refcount
+  bumps, snapshot del syscall context → child resume en la instr
+  siguiente con `rax=0`. Tanto el clásico `if (fork()==0) ...` como
+  `fork() + wait_via_taskinfo` funcionan. Ver `elfs/tests/forktest.c`.
+- **`execve(2)` real**: SYS_EXECVE=59. Reemplaza la imagen user-mode
+  del task actual, mismo pid + fds + cwd. libc tiene `execve` /
+  `execv` / `execvp` listos (PATH search). Combinable con fork
+  para el patrón clásico fork+exec.
+- **Coexisten con `osn_spawn`** (SYS_SPAWN=266) que es fork+exec
+  atómico estilo posix_spawn con fd inheritance MOVE-semantics.
+
 Lo que **no** tenés todavía:
 
-- **`fork`** real. `osn_spawn` cubre fork+exec atómico, pero no hay
-  fork-sin-exec.
-- **`execve`** in-place (reemplazar el current ELF). Tampoco
-  necesario hoy con osn_spawn.
 - **Signal handlers**. `kill()` existe pero como exit forzado, no
   hay `sigaction`. `sigsetjmp`/`siglongjmp` aliasean setjmp/longjmp
   pero no salvan signal mask. Ctrl+C/Ctrl+Z se entregan vía
@@ -569,13 +580,32 @@ matarla:
 
 ---
 
-## Cosas que YA podés usar (FASE 8 / 8.5 / 9 / 10 cerradas)
+## Cosas que YA podés usar (FASE 8 / 8.5 / 9 / 10 + Fase 2 cerradas)
 
 - **Disco real**: `fopen` / `fread` / `fwrite` / `open` / `read` /
   `write` sobre `/home/*` o `/sd/*` persisten entre reboots (FAT16).
+- **`fork(2)` + `execve(2)`** (ABI POSIX core completo): patrón clásico
+  ```c
+  pid_t pid = fork();
+  if (pid == 0) {
+      char *argv[] = {"ls", "/home", NULL};
+      execve("/bin/ls", argv, environ);
+      _exit(127);          // execve solo retorna en error
+  } else if (pid > 0) {
+      // parent: esperar al child via taskinfo polling
+      // (wait/waitpid POSIX todavía no — ver forktest.c)
+  }
+  ```
+- **`osn_spawn`** (SYS_SPAWN=266): si querés fork+exec atómico (más
+  barato que fork+execve separados), con fd inheritance MOVE-semantics.
+  Útil cuando shellsrv arma pipes/redirects para los children.
 - **Pipelines Unix**: `cat archivo | grep foo | sort | head` —
   shellsrv soporta pipes multi-stage y redirects `< > >>`. Desde C,
-  `pipe(2)` + `dup2(2)` + `osn_spawn` arman cualquier pipeline.
+  `pipe(2)` + `dup2(2)` + `fork(2)` + `execve(2)` arman cualquier
+  pipeline (también `osn_spawn` si preferís el atómico).
+- **Operadores de shell**: `;` `&&` `||` con tracking de `$?`,
+  glob `*` (`ls *.txt`), background `&`, redirects `< > >>`,
+  `$VAR` / `${VAR}` expansion + `$?`.
 - **Sockets POSIX completos**: TCP cliente/servidor, UDP, `select`,
   DNS via `getaddrinfo`. Ver `elfs/net/httpd.c` y `selectserver.c`.
 - **Background jobs**: `&`, `jobs`, `fg`, `bg`, Ctrl+Z (en shellsrv).
@@ -586,8 +616,45 @@ matarla:
 - **mmap anónimo + brk/sbrk**: heap grande o regiones aisladas.
 - **IPC con otros ring-3**: SYS_IPC_SEND/RECV permite escribir
   servers como `consrv` / `kbdsrv` / `shellsrv` desde ring 3.
-- **`osn_spawn`**: spawneás procesos hijos con fd inheritance
-  (stdin/stdout via los fds del caller). Equivalente a posix_spawn.
+
+### Ejemplo: fork(2) + execve(2) classic POSIX
+
+```c
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+extern char **environ;
+
+int main(void) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "fork failed: errno=%d\n", errno);
+        return 1;
+    }
+    if (pid == 0) {
+        /* CHILD: same memory image, same fds, same cwd, rax=0.
+         * Replace ourselves with /bin/echo. */
+        char *argv[] = { "echo", "hola desde el child", NULL };
+        execve("/bin/echo", argv, environ);
+        /* Only reached on failure. */
+        fprintf(stderr, "execve failed: errno=%d\n", errno);
+        _exit(127);
+    }
+    /* PARENT: pid is the child's pid. wait() POSIX no existe todavía;
+     * polleá via sys_taskinfo (#265) — ver forktest.c, función
+     * `wait_child`. */
+    printf("forked child pid=%d\n", (int)pid);
+    return 0;
+}
+```
+
+Output esperado:
+```
+forked child pid=N
+hola desde el child
+```
 
 ---
 
