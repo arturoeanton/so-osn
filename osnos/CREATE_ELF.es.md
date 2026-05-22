@@ -312,26 +312,26 @@ del disco, el embedded sigue sirviendo como ROM fallback. Tres pasos:
 
 ### Paso 1 — Listar el `.c` en el Makefile
 
-Edit `osnos/GNUmakefile`. Busca:
+Edit `osnos/GNUmakefile`. Busca `USER_ELF_LIBC_SRCS`:
 
 ```make
-USER_ELF_LIBC_SRCS := tests/hello_libc.c \
-                      tests/hello.c \
+USER_ELF_LIBC_SRCS := elfs/tests/hello_libc.c \
+                      elfs/tools/hello.c \
                       ...
-                      tests/top.c \
-                      tests/libctest.c
+                      elfs/tools/top.c \
+                      elfs/tools/which.c
 ```
 
 Y añadí tu archivo:
 
 ```make
 USER_ELF_LIBC_SRCS := ... \
-                      tests/libctest.c \
-                      tests/wc.c
+                      elfs/tools/which.c \
+                      elfs/tools/wc.c
 ```
 
-La regla `$(BUILD)/tests/%.elf` y `$(BUILD)/tests/%.elf.o` se aplica
-automáticamente, usando `tests/libc.lds`.
+La regla `$(BUILD)/elfs/%.elf` y `$(BUILD)/elfs/%.elf.o` se aplica
+automáticamente, usando `elfs/libc.lds`.
 
 ### Paso 2 — Declarar el símbolo en `builtin.c`
 
@@ -397,8 +397,8 @@ Casos donde tiene sentido:
   (los bare ELFs pesan ~4 KiB vs ~20 KiB de los libc-linked).
 - Estás escribiendo un test del loader o de la ABI.
 
-El único ejemplo vivo es `tests/user_hello.c` + `tests/user_hello.lds`.
-Si necesitás otro, esa es la plantilla.
+El único ejemplo vivo es `elfs/tests/user_hello.c` +
+`elfs/tests/user_hello.lds`. Si necesitás otro, esa es la plantilla.
 
 Diferencias clave vs libc-linked:
 
@@ -406,7 +406,7 @@ Diferencias clave vs libc-linked:
 |----------------------|--------------------------|-------------------------------|
 | Entry point          | `int main(int, char**)`  | `void _start(void)`           |
 | `_start`             | provisto por `crt0.S`    | escribís el tuyo              |
-| Linker script        | `tests/libc.lds`         | `tests/<n>.lds` propio        |
+| Linker script        | `elfs/libc.lds`          | `elfs/<categoría>/<n>.lds`    |
 | Makefile var         | `USER_ELF_LIBC_SRCS`     | `USER_ELF_SRCS`               |
 | stdlib funcs         | sí (`printf` etc.)       | escribís wrappers a mano      |
 | `argc`/`argv`        | parseados por crt0       | el bloque está en el stack    |
@@ -414,8 +414,8 @@ Diferencias clave vs libc-linked:
 | `errno`              | sí                       | mirás `rax < 0`               |
 | Tamaño binario       | ~20 KiB                  | ~1-4 KiB                      |
 
-Para escribir un bare ELF: copiá `tests/user_hello.c` y
-`tests/user_hello.lds`, cambiale los nombres, agregalo a
+Para escribir un bare ELF: copiá `elfs/tests/user_hello.c` y
+`elfs/tests/user_hello.lds`, cambiale los nombres, agregalo a
 `USER_ELF_SRCS` (no a `USER_ELF_LIBC_SRCS`). El símbolo en
 `builtin.c` se declara igual con `DECLARE_ELF(name)`.
 
@@ -479,8 +479,8 @@ Tu ELF cargó pero alguna instrucción es inválida. Causas:
 Inspeccioná con:
 
 ```bash
-objdump -d build/tests/<nombre>.elf | less
-readelf -l build/tests/<nombre>.elf
+objdump -d build/elfs/<categoría>/<nombre>.elf | less
+readelf -l build/elfs/<categoría>/<nombre>.elf
 ```
 
 El RIP impreso en pantalla te dice qué instrucción explotó. Restale
@@ -501,10 +501,10 @@ usá `mmap` para tu propia área grande de scratch.
 ### Tu ELF compila pero no anda
 
 ```bash
-file build/tests/<nombre>.elf
+file build/elfs/<categoría>/<nombre>.elf
 # debería decir "ELF 64-bit LSB executable, x86-64, ... statically linked"
 
-readelf -h build/tests/<nombre>.elf | grep -E "Type|Machine|Entry"
+readelf -h build/elfs/<categoría>/<nombre>.elf | grep -E "Type|Machine|Entry"
 # Type:     EXEC
 # Machine:  Advanced Micro Devices X86-64
 # Entry:    0x400000   (libc-linked siempre arranca acá vía crt0)
@@ -562,7 +562,7 @@ matarla:
 | `-nostdlib`           | sin crt0/libc del host                        |
 | `-static -no-pie`     | sin loader dinámico, sin PIE                  |
 | `-z noexecstack`      | marcar stack como no-ejecutable (defensiva)   |
-| `-T tests/libc.lds`   | linker script común (libc-linked)             |
+| `-T elfs/libc.lds`    | linker script común (libc-linked)             |
 | `crt0.S.o + main.o + libosnos_c.a` | orden de objetos para linkeo             |
 
 ---
@@ -594,29 +594,30 @@ matarla:
 ### libc-linked (default):
 
 ```
-[ ] tests/<nombre>.c               — código C con int main(argc, argv)
+[ ] elfs/<categoría>/<nombre>.c    — código C con int main(argc, argv)
 [ ] GNUmakefile                    — agregar a USER_ELF_LIBC_SRCS
 [ ] src/proc/builtin.c             — DECLARE_ELF(<nombre>);
 [ ] src/proc/builtin.c             — ELF(<nombre>, "desc"),
-[ ] make run-bios                  — build + boot
-[ ] osnos> exec /bin/<nombre>      — verificar que corre
+[ ] ./build_and_run.sh             — build + boot
+[ ] shellsrv:/$ <nombre>           — verificar que corre
 ```
 
 ### bare ELF (raro):
 
 ```
-[ ] tests/<nombre>.c               — _start handwritten, sin libc
-[ ] tests/<nombre>.lds             — linker script propio
+[ ] elfs/tests/<nombre>.c          — _start handwritten, sin libc
+[ ] elfs/tests/<nombre>.lds        — linker script propio
 [ ] GNUmakefile                    — agregar a USER_ELF_SRCS
 [ ] GNUmakefile                    — pattern rule específico (mirá
                                      la regla de user_hello.elf)
 [ ] src/proc/builtin.c             — DECLARE_ELF(<nombre>);
 [ ] src/proc/builtin.c             — USERELF(...) directo
-[ ] make run-bios
-[ ] osnos> exec /bin/<nombre>
+[ ] ./build_and_run.sh
+[ ] shellsrv:/$ <nombre>
 ```
 
-Cuando termines, `cat /bin/<nombre>` te muestra la descripción que
-pusiste, `ls /bin/` lo lista, y `exec /bin/<nombre>` lo dispara.
+Cuando termines, `cat /bin/<nombre>` te muestra los bytes del ELF,
+`ls /bin/` lo lista, y `<nombre>` o `/bin/<nombre>` lo ejecuta
+(shellsrv hace PATH search via `$PATH`).
 
 Listo.

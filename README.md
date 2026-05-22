@@ -503,6 +503,15 @@ Cerrado recientemente:
 - **Coreutils completos**: env, wc, pwd, uname, basename, dirname,
   tail, seq, yes, tee, date, printf, grep, sort, uniq, cut, tr,
   banner, which, clear, tree — todos como ELFs.
+- **Polish + bug-fixes finales** (post-FASE 10.4): shellsrv `cd` con
+  `..` `.` paths relativos (`path_normalize`); `ls /` muestra mount
+  points sintéticos (vfs_readdir injection); ovi output buffering
+  16 KB + framebuffer chunk safe-split (CSI sequences no se parten
+  al medio); task_t.name inline 32 B (sys_taskinfo ya no faulta con
+  user-pointer leaks de proc_execve VFS path); ipc_send rewrite
+  SID→pid (ring-3 receivers filtran por t->pid); shellsrv `$VAR` /
+  `${VAR}` expansion + `export` / `unset` / `setenv` builtins +
+  .oshrc auto-load al boot.
 - **FASE 8.5 — Networking completo**: driver RTL8139 + Ethernet/ARP +
   IPv4/ICMP + UDP + TCP + DNS + sockets POSIX. `/bin/httpd` sirve
   FAT16 sobre HTTP a Firefox real; `selectserver.c` de Beej verbatim.
