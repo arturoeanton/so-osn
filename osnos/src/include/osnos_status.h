@@ -21,6 +21,7 @@ typedef enum {
     OSNOS_EIO            = 5,   /* i/o error */
     OSNOS_E2BIG          = 7,   /* argument list too long */
     OSNOS_EBADF          = 9,   /* bad file descriptor */
+    OSNOS_ECHILD         = 10,  /* no child processes (wait(2)) */
     OSNOS_EAGAIN         = 11,  /* try again (used for queue full) */
     OSNOS_ENOMEM         = 12,  /* out of memory */
     OSNOS_EACCES         = 13,  /* permission denied */

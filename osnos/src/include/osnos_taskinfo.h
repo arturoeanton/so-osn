@@ -20,6 +20,7 @@
 #define OSNOS_TASK_BLOCKED  3
 #define OSNOS_TASK_STOPPED  4
 #define OSNOS_TASK_DEAD     5
+#define OSNOS_TASK_ZOMBIE   6   /* added after DEAD to preserve ABI */
 
 typedef struct {
     uint64_t pid;

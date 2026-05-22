@@ -43,6 +43,7 @@ static const char *task_state_str(task_state_t s) {
         case TASK_RUNNING: return "RUNNING";
         case TASK_BLOCKED: return "BLOCKED";
         case TASK_STOPPED: return "STOPPED";
+        case TASK_ZOMBIE:  return "ZOMBIE";
         case TASK_DEAD:    return "DEAD";
         case TASK_UNUSED:  return "UNUSED";
     }

@@ -39,10 +39,56 @@ typedef void (*sighandler_t)(int);
 #define SIG_ERR  ((sighandler_t)-1)
 
 /*
- * `signal(sig, handler)` returns the previous handler or SIG_ERR.
- * osnos has no handler table yet — every call returns SIG_ERR.
- * `raise(sig)` delivers `sig` to the current process via kill(2)
- * and is the only way to trigger the kernel's signal path today.
+ * `signal(sig, handler)` installs a handler via sigaction(2). Returns
+ * the previous handler or SIG_ERR on error. `raise(sig)` delivers
+ * `sig` to the current process via kill(2).
  */
 sighandler_t signal(int sig, sighandler_t handler);
 int          raise (int sig);
+
+/*
+ * Simple sigaction(2) — sa_handler-only model.
+ *
+ * sigset_t is a 32-bit mask: bit (s-1) corresponds to signal s.
+ * Used today only for sa_mask field of struct sigaction; we do not
+ * implement sigprocmask blocking yet, but the field has to exist
+ * for source compatibility with POSIX programs.
+ */
+typedef unsigned int sigset_t;
+
+struct sigaction {
+    sighandler_t sa_handler;
+    sigset_t     sa_mask;
+    int          sa_flags;
+    void       (*sa_restorer)(void);   /* libc-supplied trampoline epilogue */
+};
+
+/* sigaction flags (we only honor SA_RESTART semantics at the kernel
+ * level by NOT setting it — i.e. blocking syscalls return EINTR by
+ * default). The bits are reserved so source code that sets them
+ * still compiles. */
+#define SA_NOCLDSTOP   0x00000001
+#define SA_NOCLDWAIT   0x00000002
+#define SA_SIGINFO     0x00000004
+#define SA_ONSTACK     0x08000000
+#define SA_RESTART     0x10000000
+#define SA_NODEFER     0x40000000
+#define SA_RESETHAND   0x80000000
+#define SA_RESTORER    0x04000000
+
+/* sigprocmask `how` values. */
+#define SIG_BLOCK     0
+#define SIG_UNBLOCK   1
+#define SIG_SETMASK   2
+
+int sigaction  (int signum,
+                const struct sigaction *act,
+                struct sigaction *oldact);
+int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+
+/* sigset_t manipulation. */
+int sigemptyset(sigset_t *set);
+int sigfillset (sigset_t *set);
+int sigaddset  (sigset_t *set, int sig);
+int sigdelset  (sigset_t *set, int sig);
+int sigismember(const sigset_t *set, int sig);

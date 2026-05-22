@@ -1,6 +1,7 @@
 #include "syscall.h"
 
 #include "../proc/exec.h"
+#include "scheduler.h"
 #include "task.h"
 
 /*
@@ -31,14 +32,61 @@ uint64_t int80_dispatch_wrapper(syscall_frame_t *frame) {
      * task_unblock, and the scheduler picks it up on its next
      * dispatch. */
 
-    /*
-     * Honour a pending Ctrl+C kill before returning to ring 3. The
-     * shell sets kill_pending when the user typed ^C; we now route
-     * to proc_exit_current_user (never returns) instead of iretq'ing.
-     */
     task_t *t = task_current();
-    if (t && t->pml4 && t->kill_pending) {
-        proc_exit_current_user(130);   /* 128 + SIGINT */
+
+    /*
+     * Signal delivery on syscall return.
+     *
+     * Replaces the legacy `kill_pending → proc_exit(130)` fast-path
+     * which used to live here. That hardcoded SIGINT for every kill,
+     * so SIGTERM-killed children showed as exit_code 130 instead of
+     * 143 (WTERMSIG returned SIGINT not SIGTERM). The sig_pending
+     * path below carries the actual signal number through to
+     * user_task_resume, which calls proc_exit_current_user(128 + sig)
+     * for SIG_DFL — POSIX-correct.
+     *
+     * user_task_resume handles signals when a task wakes up from a
+     * suspended state (saved_valid path), but a plain "syscall →
+     * return to user" goes back via iretq from this wrapper without
+     * touching user_task_resume. Without an injection here, signals
+     * fired by sys_kill/raise/tty during a syscall would never be
+     * delivered — handler installed via sigaction would never run.
+     *
+     * Trick: snapshot the current iret + GPRs into saved_*, set
+     * saved_rax = the syscall's return value, then sched_resume_jump.
+     * The scheduler re-dispatches us; user_task_trampoline sees
+     * saved_valid=1, hands off to user_task_resume which spots
+     * sig_pending and constructs the sigframe + handler redirect.
+     * The handler runs; on return, __sigtramp does rt_sigreturn
+     * which restores saved_iret_* with the syscall RIP just past
+     * the syscall and rax = result. Net effect: signal handler runs
+     * BETWEEN the syscall and the next user instruction, with the
+     * syscall's return value preserved.
+     */
+    if (t && t->pml4 && t->sig_pending != 0) {
+        uint64_t *iret = (uint64_t *)(t->kernel_stack_top - 40);
+        t->saved_iret_rip    = iret[0];
+        t->saved_iret_cs     = iret[1];
+        t->saved_iret_rflags = iret[2];
+        t->saved_iret_rsp    = iret[3];
+        t->saved_iret_ss     = iret[4];
+        t->saved_rax = result;
+        t->saved_rbx = frame->rbx;
+        t->saved_rcx = frame->rcx;
+        t->saved_rdx = frame->rdx;
+        t->saved_rsi = frame->rsi;
+        t->saved_rdi = frame->rdi;
+        t->saved_rbp = frame->rbp;
+        t->saved_r8  = frame->r8;
+        t->saved_r9  = frame->r9;
+        t->saved_r10 = frame->r10;
+        t->saved_r11 = frame->r11;
+        t->saved_r12 = frame->r12;
+        t->saved_r13 = frame->r13;
+        t->saved_r14 = frame->r14;
+        t->saved_r15 = frame->r15;
+        t->saved_valid = 1;
+        sched_resume_jump();           /* never returns */
     }
 
     return result;

@@ -158,6 +158,8 @@ USER_ELF_LIBC_SRCS := \
     elfs/tests/spawntest.c \
     elfs/tests/exectest.c \
     elfs/tests/forktest.c \
+    elfs/tests/sigtest.c \
+    elfs/tests/waittest.c \
     elfs/osn-server/consrv.c \
     elfs/osn-server/kbdsrv.c \
     elfs/osn-server/shellsrv.c

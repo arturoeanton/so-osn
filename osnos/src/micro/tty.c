@@ -61,12 +61,28 @@ static void tty_echo_erase(void) {
 extern uint64_t kernel_fg_pid;
 
 static void tty_signal(int sig) {
-    (void)sig;
     uint64_t pid = kernel_fg_pid;
     if (pid == 0) return;
     task_t *t = task_by_pid(pid);
     if (!t || !t->pml4) return;
-    t->kill_pending = 1;
+    if (sig < 1 || sig > 31) return;
+    /* Set bit in sig_pending; user_task_resume handles delivery
+     * (default = terminate; user handler if installed). Also flip
+     * kill_pending so the existing trampoline fast-path catches
+     * SIGINT/SIGTERM even before the next user_task_resume runs. */
+    t->sig_pending |= 1u << (sig - 1);
+    if (sig == 2 /* SIGINT */ || sig == 15 /* SIGTERM */) {
+        t->kill_pending = 1;
+    }
+    /* If the fg task is BLOCKED in a syscall, force-wake with EINTR
+     * so the syscall returns -1 + errno=EINTR (POSIX). */
+    if (t->state == TASK_BLOCKED) {
+        if (t->saved_valid) {
+            t->saved_rax = (uint64_t)(int64_t)-(int64_t)4 /* OSNOS_EINTR */;
+        }
+        t->wakeup_at_ms = 0;
+        t->state        = TASK_READY;
+    }
     stat_signals++;
 }
 

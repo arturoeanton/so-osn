@@ -205,7 +205,8 @@ roadmap), mover los servidores debería ser mecánico.
 │       printf, malloc, fopen, ... → syscall                  │
 ├─────────────────────────────────────────────────────────────┤
 │  Syscall ABI Linux x86_64 (read/write/open/pipe/dup/...):   │
-│   SYS_FORK (57)  + SYS_EXECVE (59) → ABI POSIX core ✅       │
+│   SYS_FORK (57) + SYS_EXECVE (59) + SYS_WAIT4 (61) +        │
+│   SYS_RT_SIGACTION (13) / SIGRETURN (15) → POSIX core ✅     │
 │   osnos-specific (≥ 250):                                    │
 │   SYS_IPC_SEND/RECV (260/261), SERVICE_* (262/263),         │
 │   SYS_TTY_INPUT (264), SYS_TASKINFO (265),                  │
@@ -221,10 +222,11 @@ roadmap), mover los servidores debería ser mecánico.
 │       SID → pid; ring-3 receivers filtran por t->pid        │
 ├─────────────────────────────────────────────────────────────┤
 │  micro/ core: task (per-task fds[16] + fpu_state + saved    │
-│    iret/GPRs for nanosleep/fork resume), pipe (+ ref dup),  │
-│    scheduler (preempt @ CPL=3 + coop), ipc, gdt/idt/tss,    │
-│    pmm/vmm (address_space_clone para fork), kmalloc,        │
-│    syscall, uaccess, service                                │
+│    iret/GPRs for nanosleep/fork/wait resume + parent_pid +  │
+│    sa_handler[32] + sig_pending + TASK_ZOMBIE state),       │
+│    pipe (+ refcount dup), scheduler (preempt @ CPL=3 +      │
+│    coop), ipc, gdt/idt/tss, pmm/vmm (address_space_clone    │
+│    para fork), kmalloc, syscall, uaccess, service           │
 ├─────────────────────────────────────────────────────────────┤
 │  drivers/: PS/2, framebuffer + font 8x8 + VT100 CSI parser, │
 │            PIC, LAPIC, PIT, ATA PIO, RTL8139                │
@@ -295,6 +297,9 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | `sys_spawn(2)` con fd inheritance + `osn_spawn` libc | ✅ |
 | **`execve(2)` real** (SYS_EXECVE=59) — in-place ELF replacement, same pid+fds+cwd | ✅ |
 | **`fork(2)` real** (SYS_FORK=57) — deep-copy pml4, fd table con pipe refcount bumps, child resumes at saved iret with rax=0 | ✅ |
+| **`wait(2)` / `waitpid(2)` real** (SYS_WAIT4=61) + TASK_ZOMBIE state + WIFEXITED/WEXITSTATUS/WIFSIGNALED/WTERMSIG macros | ✅ |
+| **`sigaction(2)` real** (SYS_RT_SIGACTION=13, SYS_RT_SIGRETURN=15) — sa_handler-only, sigframe en user stack, libc __sigtramp epilogue | ✅ |
+| **EINTR** en blocking syscalls (`read`/`wait`/`nanosleep`/`recvfrom`/`accept`) cuando llega signal | ✅ |
 | **init-respawn watchdog** — consrv/kbdsrv/shellsrv auto-restart on death | ✅ |
 | Driver ATA PIO + FAT16 read/write + dir-chain extension + NT case-bits + persistencia | ✅ |
 | **/bin disk-resident** — sd.img poblado al build via mtools, kernel binary 1.1 MB (era 7.6 MB) | ✅ |
@@ -309,7 +314,7 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | `getcwd` / `chdir` syscalls + per-task cwd (POSIX) | ✅ |
 | mmap/munmap anónimo + brk/sbrk | ✅ |
 | Pre-populate sd.img al build (Fase 2 final) | ✅ |
-| `fork` + `execve` POSIX (ABI core 100% completo) | ✅ |
+| `fork` + `execve` + `wait` + `sigaction` POSIX (ABI core 100% **de verdad** completo) | ✅ |
 | Multi-core (SMP) | ❌ |
 
 ---
@@ -530,8 +535,30 @@ Cerrado recientemente:
   child resume via `user_task_trampoline` con `rax=0`. Parent
   retorna child pid. libc `fork()` listo. `/bin/forktest` verifica
   semánticas (pid distintos, fd inheritance, stack COW correcto,
-  exit code propagation). **ABI POSIX core 100% completo**: read/
-  write/open/close/pipe/dup/fork/execve/exit/kill/wait-via-taskinfo.
+  exit code propagation).
+- **wait(2) / waitpid(2) real** (SYS_WAIT4=61) + nuevo estado
+  `TASK_ZOMBIE`: child muerto queda zombie con exit_code preservado
+  hasta que parent waitea; orphan se va directo a DEAD. parent
+  BLOCKED en wait4 se despierta vía proc_exit_current_user del
+  child (escribe status vía vmm_lookup en el pml4 del parent,
+  saved_rax = child_pid). WNOHANG retorna 0; ECHILD si no hay
+  children. libc `wait()` + `waitpid()` + WIFEXITED/WEXITSTATUS/
+  WIFSIGNALED/WTERMSIG macros. `/bin/waittest` valida.
+- **sigaction(2) real** (SYS_RT_SIGACTION=13, SYS_RT_SIGRETURN=15)
+  modelo sa_handler-only: handlers user-mode reales que reciben
+  signum. Delivery en `user_task_resume` antes del iretq: pushea
+  sigframe (orig iret+GPRs) al user stack, redirige rip=handler /
+  rsp=sigframe_base / rdi=signum; el ret del handler salta al
+  libc `__sigtramp` (sigtramp.S) que llama SYS_RT_SIGRETURN para
+  restaurar. SIG_DFL = exit con 128+sig, SIG_IGN = swallow.
+  SIGKILL/SIGSTOP uncatchable (POSIX). `/bin/sigtest` valida
+  raise(SIGUSR1)/SIG_IGN/SIGKILL/signal()-wrapper/fork+SIGTERM.
+- **EINTR** en blocking syscalls: cuando un signal llega a un task
+  BLOCKED (nanosleep/wait4/etc), sys_kill / tty_signal escriben
+  `saved_rax = -EINTR` antes de despertar; el handler corre primero
+  y al volver, syscall retorna -1 + errno=EINTR. POSIX-compliant.
+- **ABI POSIX core 100% COMPLETO**: read/write/open/close/pipe/dup/
+  fork/execve/exit/kill/wait/sigaction/sigreturn/EINTR.
 - **init-respawn watchdog**: kernel task que checkea cada ~100ms
   si consrv/kbdsrv/shellsrv siguen vivos; si murieron (e.g. exec
   /bin/top + Ctrl+C), los respawnea + re-registra SERVER_*.

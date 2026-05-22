@@ -20,10 +20,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
-
-#include "../../src/include/osnos_taskinfo.h"
 
 static int total = 0;
 static int fails = 0;
@@ -34,42 +33,16 @@ static int fails = 0;
     else     { printf("FAIL %s\n", name); fails++; }        \
 } while (0)
 
-/* Direct syscall wrapper for SYS_TASKINFO #265. */
-static long sys_taskinfo_raw(size_t idx, osnos_taskinfo_t *out) {
-    long ret;
-    register long r10 __asm__("r10") = 0;
-    register long r8  __asm__("r8")  = 0;
-    register long r9  __asm__("r9")  = 0;
-    __asm__ volatile (
-        "syscall"
-        : "=a"(ret)
-        : "a"(265), "D"(idx), "S"((long)out),
-          "r"(r10), "r"(r8), "r"(r9)
-        : "rcx", "r11", "memory"
-    );
-    return ret;
-}
-
-/* Poll until the given pid no longer matches a live task slot; returns
- * the last-seen exit_code (relies on the kernel's 4-pass reap grace). */
+/* Wait for the child via POSIX waitpid(2). Returns the child's
+ * exit code if exited normally, -1 otherwise. Now that wait(2) is a
+ * real syscall we don't need the sys_taskinfo polling dance. */
 static int wait_child(long pid) {
-    int last_ec = 0;
-    for (;;) {
-        int seen = 0;
-        for (size_t i = 0; i < 16; i++) {
-            osnos_taskinfo_t info;
-            long r = sys_taskinfo_raw(i, &info);
-            if (r < 0) continue;
-            if ((long)info.pid != pid) continue;
-            seen = 1;
-            last_ec = info.exit_code;
-            if (info.state == OSNOS_TASK_DEAD) return info.exit_code;
-            break;
-        }
-        if (!seen) return last_ec;
-        struct timespec ts = { 0, 20 * 1000000 };
-        nanosleep(&ts, 0);
-    }
+    int status = 0;
+    pid_t r = waitpid((pid_t)pid, &status, 0);
+    if (r < 0) return -1;
+    if (WIFEXITED(status))    return WEXITSTATUS(status);
+    if (WIFSIGNALED(status))  return 128 + WTERMSIG(status);
+    return -1;
 }
 
 int main(int argc, char **argv) {

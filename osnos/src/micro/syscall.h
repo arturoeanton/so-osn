@@ -30,7 +30,12 @@
 #define SYS_FORK     57
 #define SYS_EXECVE   59
 #define SYS_EXIT     60
+#define SYS_WAIT4    61
 #define SYS_KILL     62
+/* signal-handling syscalls — Linux x86_64 rt_sig* family. */
+#define SYS_RT_SIGACTION   13
+#define SYS_RT_SIGPROCMASK 14
+#define SYS_RT_SIGRETURN   15
 #define SYS_ACCESS   21
 #define SYS_GETCWD   79
 #define SYS_CHDIR    80
@@ -184,6 +189,50 @@ int64_t sys_execve(const char *u_path,
  * replays the frame.
  */
 int64_t sys_fork(void);
+
+/*
+ * sys_wait4 (#61) — Linux wait4(pid, *status, options, *rusage).
+ * We ignore `rusage` (no resource accounting yet) but follow POSIX
+ * waitpid(3) semantics for the other args:
+ *   pid > 0   → wait for that specific child
+ *   pid == -1 → wait for any child
+ *   options & WNOHANG → return 0 if no zombie ready (don't block)
+ * Returns the reaped child's pid on success; 0 if WNOHANG and no
+ * child ready; -ECHILD if no matching child at all; -EINTR if a
+ * signal arrived while blocked.
+ */
+int64_t sys_wait4(int64_t pid, int *u_status, int options, void *u_rusage);
+
+/*
+ * sys_rt_sigaction (#13) — Linux rt_sigaction.
+ *
+ * Layout of `struct sigaction` matches libc surface in
+ * lib/libc/include/signal.h: { sa_handler, sa_mask, sa_flags,
+ * sa_restorer }. Today we ignore sa_mask + sa_flags entirely (no
+ * signal-block in scope); sa_handler + sa_restorer are stored in
+ * the task's per-signal arrays so user_task_resume can dispatch
+ * the right handler.
+ *
+ * Returns 0 on success or -errno (EINVAL if signum out of range
+ * or if attempting to override SIGKILL/SIGSTOP, EFAULT if act/oldact
+ * pointers fault).
+ */
+int64_t sys_rt_sigaction(int signum,
+                          const void *u_act,
+                          void *u_oldact,
+                          size_t sigsetsize);
+
+/* sys_rt_sigprocmask (#14) — stub; we don't implement blocking yet.
+ * Returns 0 always (does nothing). Reserved here so libc surface
+ * compiles. */
+int64_t sys_rt_sigprocmask(int how, const void *u_set, void *u_oldset,
+                            size_t sigsetsize);
+
+/* sys_rt_sigreturn (#15) — called by libc's __sigtramp after a user
+ * handler returns. Pops the sigframe from the user stack, restores
+ * saved_iret_* / saved_* from it, sched_resume_jump. Never returns
+ * normally. */
+int64_t sys_rt_sigreturn(void);
 
 /*
  * Linux getpid(2). Returns the calling task's pid (always non-zero for

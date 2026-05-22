@@ -615,24 +615,45 @@ int64_t sys_nanosleep(const osnos_timespec_t *req, osnos_timespec_t *rem) {
 /* ------------------------------------------------------------------ */
 
 int64_t sys_kill(uint64_t pid, int sig) {
-    (void)sig;
     task_t *t = task_by_pid(pid);
     if (!t || !t->pml4) return -(int64_t)OSNOS_ESRCH;
-    t->kill_pending = 1;
+    if (sig < 1 || sig > 31) return -(int64_t)OSNOS_EINVAL;
 
-    /*
-     * If the target is BLOCKED (e.g., inside a long nanosleep) or
-     * STOPPED (after Ctrl+Z), it never makes it back to a kernel
-     * return point that checks kill_pending — so the kill wouldn't
-     * fire until the user manually resumes it (which they probably
-     * won't, because they wanted it dead). Force-wake here so the
-     * scheduler dispatches it one more tick, where user_task_
-     * trampoline notices kill_pending and routes through
-     * proc_exit_current_user(130).
-     */
-    if (t->state == TASK_BLOCKED || t->state == TASK_STOPPED) {
+    /* Deliver via the unified signal-pending bitmap. user_task_resume
+     * consumes the lowest bit on the next dispatch and either runs
+     * the registered handler or applies the default disposition
+     * (terminate for SIGINT/SIGTERM/SIGKILL/etc). */
+    t->sig_pending |= 1u << (sig - 1);
+
+    /* Legacy compat: SIGINT used to flip kill_pending — keep doing so
+     * for SIGINT/SIGKILL/SIGTERM so the existing user_task_trampoline
+     * fast-path (proc_exit_current_user from kill_pending check)
+     * still fires even before user_task_resume runs. Removing this
+     * line would be safe once kill_pending is fully retired. */
+    if (sig == 2 /* SIGINT */ ||
+        sig == 9 /* SIGKILL */ ||
+        sig == 15 /* SIGTERM */) {
+        t->kill_pending = 1;
+    }
+
+    /* If the target is BLOCKED or STOPPED, force-wake so it sees the
+     * signal soon. Same rationale as before — without this, a task
+     * sleeping in nanosleep would only get its SIGINT at wake-time.
+     *
+     * EINTR semantics: the BLOCKED task is suspended inside some
+     * syscall (nanosleep / wait4 / future read-on-pipe). Its
+     * snapshotted saved_rax reflects the success-path return value;
+     * override it to -EINTR so libc returns -1 + errno=EINTR. The
+     * signal handler runs first via user_task_resume; after
+     * sigreturn the sigframe replay still has rax = -EINTR. */
+    if (t->state == TASK_BLOCKED) {
+        if (t->saved_valid) {
+            t->saved_rax = (uint64_t)(int64_t)-(int64_t)OSNOS_EINTR;
+        }
         t->wakeup_at_ms = 0;
         t->state        = TASK_READY;
+    } else if (t->state == TASK_STOPPED) {
+        t->state = TASK_READY;
     }
     return 0;
 }
@@ -1331,6 +1352,22 @@ int64_t sys_fork(void) {
     child->kernel_stack_top  = (uint64_t)child_kstack + USER_KSTACK_BYTES;
     child->kernel_stack_base = child_kstack;
 
+    /* fork(2) parent-child link — enables wait(2) on the parent. */
+    child->parent_pid        = parent->pid;
+    /* Child starts NOT waiting and with no inherited signal state.
+     * POSIX says fd table inherited (done above) + sigactions
+     * inherited (preserved across fork; CLOSED on execve). */
+    child->waiting_for_pid   = 0;
+    child->wait_options      = 0;
+    child->wait_status_ptr   = 0;
+    /* Inherit sa_handler[] / sa_restorer[] from parent — POSIX rule:
+     * forked child keeps the parent's signal dispositions. */
+    for (int i = 0; i < 32; i++) {
+        child->sa_handler [i] = parent->sa_handler [i];
+        child->sa_restorer[i] = parent->sa_restorer[i];
+    }
+    child->sig_pending = 0;     /* signals not inherited (POSIX) */
+
     /* 5. Clone fd table. For pipe fds, bump the kernel pipe object's
      *    refcount so it doesn't close when one of the two tasks
      *    eventually exits. Sockets are not refcounted in our impl —
@@ -1412,6 +1449,243 @@ int64_t sys_fork(void) {
      *    user_task_trampoline's saved_valid path with rax=0. Both
      *    execute the instruction right after the `syscall`. */
     return (int64_t)child->pid;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_wait4 (#61) — Linux waitpid(2) / wait4(2). Blocks the caller   */
+/* until one of its children transitions to TASK_ZOMBIE, then reaps. */
+/* ------------------------------------------------------------------ */
+
+#define WNOHANG    1
+#define WUNTRACED  2
+
+/* Encode an exit code into POSIX wait status word.
+ *  - Normal exit:   (code & 0xff) << 8     WIFEXITED == 1
+ *  - Signal kill:   sig & 0x7f             WIFSIGNALED == 1 (low 7 bits)
+ * exit_code conventions in osnos:
+ *   < 128       — normal exit code from sys_exit (clamped to 0..255)
+ *   128 + sig   — signal-terminated (e.g. 130 = SIGINT, 137 = SIGKILL).
+ * We translate the latter back to "signal status" so wait()
+ * callers' WIFSIGNALED works.
+ */
+static int encode_wait_status(int exit_code) {
+    if (exit_code >= 128 && exit_code <= 128 + 31) {
+        int sig = exit_code - 128;
+        return sig & 0x7f;                    /* WIFSIGNALED + WTERMSIG */
+    }
+    return (exit_code & 0xff) << 8;           /* WIFEXITED + WEXITSTATUS */
+}
+
+/* Look through the task table for a child of `parent` whose state
+ * is TASK_ZOMBIE and whose pid matches the waitpid filter (pid > 0
+ * → exact match; pid == -1 → any). Returns the slot or NULL.
+ *
+ * Also tracks whether the parent has ANY children at all (zombie or
+ * not) so wait() can return -ECHILD when there's nothing to wait
+ * for. */
+static task_t *find_zombie_child(uint64_t parent_pid, int64_t want_pid,
+                                  int *out_have_any_child) {
+    *out_have_any_child = 0;
+    for (size_t i = 0; i < MAX_TASKS; i++) {
+        task_t *c = (task_t *)task_slot(i);
+        if (!c) continue;
+        /* Skip already-reaped slots — POSIX wait4 returns ECHILD when
+         * no MORE children remain to wait on. TASK_DEAD = wait already
+         * consumed; reaper will recycle the slot. */
+        if (c->state == TASK_UNUSED || c->state == TASK_DEAD) continue;
+        if (c->parent_pid != parent_pid) continue;
+        if (want_pid > 0 && (int64_t)c->pid != want_pid) continue;
+        *out_have_any_child = 1;
+        if (c->state == TASK_ZOMBIE) return c;
+    }
+    return 0;
+}
+
+int64_t sys_wait4(int64_t pid, int *u_status, int options, void *u_rusage) {
+    (void)u_rusage;                           /* no rusage in osnos yet */
+
+    task_t *t = task_current();
+    if (!t || !t->pml4) return err(OSNOS_ESRCH);
+
+    /* First sweep — synchronous reap if a zombie is already ready. */
+    int have_any;
+    task_t *child = find_zombie_child(t->pid, pid, &have_any);
+    if (!have_any) return err(OSNOS_ECHILD);
+
+    if (child) {
+        /* Reap it: write status to user, transition ZOMBIE → DEAD,
+         * return its pid. The reaper will recycle the slot next
+         * scheduler tick. */
+        int status = encode_wait_status(child->exit_code);
+        if (u_status) {
+            if (copy_to_user(u_status, &status, sizeof(status)) != OSNOS_OK) {
+                return err(OSNOS_EFAULT);
+            }
+        }
+        uint64_t reaped_pid = child->pid;
+        child->state = TASK_DEAD;
+        return (int64_t)reaped_pid;
+    }
+
+    /* No zombie ready. WNOHANG → poll-style return-0. */
+    if (options & WNOHANG) return 0;
+
+    /*
+     * Block. Same recipe as sys_nanosleep: snapshot the iret frame
+     * + GPRs from our kernel stack, mark BLOCKED with the wait
+     * parameters recorded so proc_exit_current_user can find us
+     * when a matching child dies, then sched_resume_jump.
+     *
+     * The wake-up path (proc_exit_current_user) writes:
+     *   - status into *u_status via copy_to_user equivalent
+     *   - child pid into our saved_rax
+     *   - state → READY
+     * Then user_task_trampoline replays our iret frame and we
+     * return to user with rax = child pid (positive).
+     */
+    uint64_t *iret = (uint64_t *)(t->kernel_stack_top - 40);
+    t->saved_iret_rip    = iret[0];
+    t->saved_iret_cs     = iret[1];
+    t->saved_iret_rflags = iret[2];
+    t->saved_iret_rsp    = iret[3];
+    t->saved_iret_ss     = iret[4];
+
+    syscall_frame_t *sf =
+        (syscall_frame_t *)(t->kernel_stack_top - 40 - sizeof(*sf));
+    /* saved_rax overwritten by waker (child's pid). Default to
+     * -EINTR-equivalent in case we wake via signal (we'll re-check
+     * sig_pending in user_task_resume; for now safer to default
+     * 0 and let the wake-up path write the real value). */
+    t->saved_rax = 0;
+    t->saved_rbx = sf->rbx;
+    t->saved_rcx = sf->rcx;
+    t->saved_rdx = sf->rdx;
+    t->saved_rsi = sf->rsi;
+    t->saved_rdi = sf->rdi;
+    t->saved_rbp = sf->rbp;
+    t->saved_r8  = sf->r8;
+    t->saved_r9  = sf->r9;
+    t->saved_r10 = sf->r10;
+    t->saved_r11 = sf->r11;
+    t->saved_r12 = sf->r12;
+    t->saved_r13 = sf->r13;
+    t->saved_r14 = sf->r14;
+    t->saved_r15 = sf->r15;
+
+    t->saved_valid       = 1;
+    t->waiting_for_pid   = (pid > 0) ? (int)pid : -1;
+    t->wait_options      = options;
+    t->wait_status_ptr   = u_status;
+    t->state             = TASK_BLOCKED;
+
+    sched_resume_jump();                      /* never returns */
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_rt_sigaction (#13) + sys_rt_sigprocmask (#14) + rt_sigreturn   */
+/* (#15) — sa_handler-only POSIX signals.                              */
+/* ------------------------------------------------------------------ */
+
+/* Layout the libc sees (lib/libc/include/signal.h). MUST stay in
+ * sync with that struct's field order. */
+typedef struct {
+    uint64_t sa_handler;           /* SIG_DFL=0, SIG_IGN=1, else fn */
+    uint32_t sa_mask;              /* ignored today */
+    uint32_t sa_flags;             /* ignored today */
+    uint64_t sa_restorer;          /* trampoline epilogue (libc __sigtramp) */
+} kuser_sigaction_t;
+
+/* On-user-stack sigframe pushed by user_task_resume on signal
+ * delivery and consumed by sys_rt_sigreturn. Layout chosen to match
+ * the iret/GPR snapshot fields in task_t, so the kernel just memcpys
+ * back into task->saved_* on return. */
+typedef struct {
+    uint64_t rip;
+    uint64_t cs;
+    uint64_t rflags;
+    uint64_t rsp;
+    uint64_t ss;
+    uint64_t rax, rbx, rcx, rdx, rsi, rdi, rbp;
+    uint64_t r8,  r9,  r10, r11, r12, r13, r14, r15;
+} sigframe_t;
+
+int64_t sys_rt_sigaction(int signum, const void *u_act, void *u_oldact,
+                          size_t sigsetsize) {
+    (void)sigsetsize;
+    task_t *t = task_current();
+    if (!t || !t->pml4) return err(OSNOS_ESRCH);
+    if (signum < 1 || signum > 31) return err(OSNOS_EINVAL);
+    /* SIGKILL (9) and SIGSTOP (19) are POSIX-uncatchable. */
+    if (signum == 9 || signum == 19) return err(OSNOS_EINVAL);
+
+    /* Return old disposition first, if requested. */
+    if (u_oldact) {
+        kuser_sigaction_t old = { 0 };
+        old.sa_handler  = t->sa_handler [signum - 1];
+        old.sa_restorer = t->sa_restorer[signum - 1];
+        if (copy_to_user(u_oldact, &old, sizeof(old)) != OSNOS_OK) {
+            return err(OSNOS_EFAULT);
+        }
+    }
+
+    /* Install new disposition. */
+    if (u_act) {
+        kuser_sigaction_t k;
+        if (copy_from_user(&k, u_act, sizeof(k)) != OSNOS_OK) {
+            return err(OSNOS_EFAULT);
+        }
+        t->sa_handler [signum - 1] = k.sa_handler;
+        t->sa_restorer[signum - 1] = k.sa_restorer;
+    }
+    return 0;
+}
+
+int64_t sys_rt_sigprocmask(int how, const void *u_set, void *u_oldset,
+                            size_t sigsetsize) {
+    (void)how; (void)u_set; (void)u_oldset; (void)sigsetsize;
+    /* No mask infrastructure yet — accept the call but do nothing.
+     * Returning success keeps glibc programs happy; correctness for
+     * signal-blocking races will land if/when SA_NOCLDSTOP etc are
+     * implemented. */
+    return 0;
+}
+
+int64_t sys_rt_sigreturn(void) {
+    task_t *t = task_current();
+    if (!t || !t->pml4 || !t->kernel_stack_top) return err(OSNOS_ESRCH);
+
+    /* The trampoline does `syscall` with the user RSP pointing just
+     * above the sigframe (the sa_restorer return slot is already
+     * popped by `ret`). Read the iret frame on OUR kernel stack to
+     * get that RSP value. */
+    uint64_t *iret = (uint64_t *)(t->kernel_stack_top - 40);
+    uint64_t user_rsp = iret[3];                  /* RSP at syscall entry */
+
+    sigframe_t f;
+    if (copy_from_user(&f, (const void *)user_rsp, sizeof(f)) != OSNOS_OK) {
+        /* The trampoline's stack frame is corrupt — kill the task to
+         * avoid resuming with garbage. */
+        proc_exit_current_user(128 + 11 /* SIGSEGV-like */);
+        __builtin_unreachable();
+    }
+
+    /* Restore the pre-signal user context into the saved_* slots.
+     * user_task_resume will replay these on next dispatch. */
+    t->saved_iret_rip    = f.rip;
+    t->saved_iret_cs     = f.cs;
+    t->saved_iret_rflags = f.rflags;
+    t->saved_iret_rsp    = f.rsp;
+    t->saved_iret_ss     = f.ss;
+    t->saved_rax = f.rax; t->saved_rbx = f.rbx; t->saved_rcx = f.rcx;
+    t->saved_rdx = f.rdx; t->saved_rsi = f.rsi; t->saved_rdi = f.rdi;
+    t->saved_rbp = f.rbp;
+    t->saved_r8  = f.r8;  t->saved_r9  = f.r9;  t->saved_r10 = f.r10;
+    t->saved_r11 = f.r11; t->saved_r12 = f.r12; t->saved_r13 = f.r13;
+    t->saved_r14 = f.r14; t->saved_r15 = f.r15;
+    t->saved_valid = 1;
+    t->state       = TASK_READY;
+
+    sched_resume_jump();                           /* never returns */
 }
 
 /* ------------------------------------------------------------------ */
@@ -1615,6 +1889,7 @@ int64_t sys_taskinfo(size_t idx, struct osnos_taskinfo *out) {
         case TASK_RUNNING: info.state = OSNOS_TASK_RUNNING; break;
         case TASK_BLOCKED: info.state = OSNOS_TASK_BLOCKED; break;
         case TASK_STOPPED: info.state = OSNOS_TASK_STOPPED; break;
+        case TASK_ZOMBIE:  info.state = OSNOS_TASK_ZOMBIE;  break;
         case TASK_DEAD:    info.state = OSNOS_TASK_DEAD;    break;
         default:           info.state = OSNOS_TASK_UNUSED;  break;
     }
@@ -2001,6 +2276,26 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
             return pack(sys_kill(frame->rdi, (int)frame->rsi));
         case SYS_FORK:
             return pack(sys_fork());
+        case SYS_WAIT4:
+            return pack(sys_wait4(
+                (int64_t)frame->rdi,
+                (int *)frame->rsi,
+                (int)frame->rdx,
+                (void *)frame->r10));
+        case SYS_RT_SIGACTION:
+            return pack(sys_rt_sigaction(
+                (int)frame->rdi,
+                (const void *)frame->rsi,
+                (void *)frame->rdx,
+                (size_t)frame->r10));
+        case SYS_RT_SIGPROCMASK:
+            return pack(sys_rt_sigprocmask(
+                (int)frame->rdi,
+                (const void *)frame->rsi,
+                (void *)frame->rdx,
+                (size_t)frame->r10));
+        case SYS_RT_SIGRETURN:
+            return pack(sys_rt_sigreturn());
         case SYS_EXECVE:
             return pack(sys_execve(
                 (const char *)frame->rdi,

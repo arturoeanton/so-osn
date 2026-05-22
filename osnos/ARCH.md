@@ -9,13 +9,15 @@ propio address space y entran al kernel vía `syscall` (preferido) o
 `int 0x80` (legacy compat).
 
 Scheduler preemptivo timer-driven (50 ms quantum, sólo CPL=3) sobre
-un loop cooperativo en ring 0. **ABI POSIX core 100% completo**:
-`fork(2)` (SYS_FORK=57, deep-copy del pml4 + fd table con pipe
-refcount bumps) + `execve(2)` (SYS_EXECVE=59, in-place ELF
-replacement preservando pid/fds/cwd). También `osn_spawn`
-(SYS_SPAWN=266, fork+exec atómico estilo posix_spawn con fd
-inheritance MOVE-semantics) para casos donde fork+exec sería
-overkill.
+un loop cooperativo en ring 0. **ABI POSIX core 100% COMPLETO**:
+`fork(2)` (SYS_FORK=57) + `execve(2)` (SYS_EXECVE=59) + `wait(2)/
+waitpid(2)` (SYS_WAIT4=61, con nuevo estado TASK_ZOMBIE para
+preservar exit_code) + `sigaction(2)` (SYS_RT_SIGACTION=13,
+sa_handler-only model con sigframe en user stack +
+SYS_RT_SIGRETURN=15 epilogue via libc __sigtramp) + EINTR estándar
+en blocking syscalls. También `osn_spawn` (SYS_SPAWN=266, fork+exec
+atómico estilo posix_spawn con fd inheritance MOVE-semantics) para
+casos donde fork+exec sería overkill.
 
 **Disk-resident** (Fase 2): sd.img se popula al build con todos
 los ELFs (~64) via mtools. El kernel solo embebe consrv/kbdsrv/
@@ -51,7 +53,8 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 |   dup/dup2/nanosleep/getpid/socket/bind/listen/accept/connect/ |
 |   send/recv/select/fcntl/getcwd/chdir/mkdir/rmdir/rename/      |
 |   unlink/ioctl/getdents64/gettimeofday/time/kill/exit/         |
-|   fork (#57, deep-clone task) execve (#59, in-place ELF swap)  |
+|   fork (#57) execve (#59) wait4 (#61) — POSIX core              |
+|   rt_sigaction (#13) rt_sigprocmask (#14) rt_sigreturn (#15)   |
 |                                                                 |
 |   osnos: IPC_SEND (260) IPC_RECV (261) SERVICE_REGISTER (262)  |
 |   SERVICE_LOOKUP (263) TTY_INPUT (264) TASKINFO (265)          |
@@ -82,7 +85,9 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 +----------------------------------------------------------------+
 | micro/ core:                                                    |
 |   task (16 slots; per-task fds[16], FPU state, mmap regions,   |
-|     cwd, kill/stop_pending, stdin/stdout_redir, saved iret)    |
+|     cwd, kill/stop_pending, stdin/stdout_redir, saved iret,    |
+|     parent_pid + wait_status_ptr (wait4), sa_handler[32] +     |
+|     sig_pending (sigaction), TASK_ZOMBIE state)                |
 |   scheduler (preempt CPL=3 + cooperative + resume_jump)        |
 |   reaper (kstack free queue + DEAD→UNUSED reaping)             |
 |   ipc, service, fd, pipe, fpu, extable, uaccess (fault-recov)  |
@@ -695,15 +700,18 @@ sin problema).
   explícito por sender.
 - **VFS sin permisos**: no hay uid/gid, no atime/mtime, no chmod.
   FAT16 tiene attrs limitadas y aliasfs los pasa transparente.
-- **`fork` (#57) + `execve` (#59) SÍ funcionan**: ABI POSIX core
-  100% completo. `fork` deep-copy del pml4 (no COW yet, full page
-  copy — TODO refinar a copy-on-write). `execve` in-place ELF
-  swap, preserva pid + fds + cwd. `osn_spawn` (#266) sigue
-  disponible como fork+exec atómico estilo posix_spawn con
-  fd inheritance MOVE-semantics.
-- **Sin signals user-mode**. `kill` mata duro (proc_exit_current_user),
-  no hay `sigaction`. Ctrl+C/Ctrl+Z se entregan via task.kill_pending
-  / stop_pending checkeado al entry de cada syscall + timer IRQ.
+- **ABI POSIX core 100% completo**: `fork(2)` + `execve(2)` +
+  `wait/waitpid(2)` (con TASK_ZOMBIE) + `sigaction(2)` (sa_handler-
+  only, sigframe-based delivery) + EINTR en blocking syscalls.
+  Fork sigue siendo full page copy (no COW todavía). osn_spawn
+  (#266) coexiste para el caso atómico optimizado.
+- **Signals user-mode**: `sigaction(2)` con sa_handler-only funciona
+  (`SYS_RT_SIGACTION=13`, sigframe en user stack, libc `__sigtramp`
+  + `SYS_RT_SIGRETURN=15`). Default disposition correctly applies
+  (SIG_DFL → `proc_exit_current_user(128+sig)`). SIGKILL/SIGSTOP
+  uncatchable. **Pendiente**: `sa_mask` / `sigprocmask` reales
+  (hoy stub no-op); `SA_SIGINFO`+`siginfo_t`; `SIGCHLD` automático
+  al child exit; signals para faults (SEGV/FPE — hoy proc_exit duro).
 - **Sin TLS / FS register / thread-local storage**.
 - **Sin loader dinámico**. Solo `ET_EXEC` estático.
 - **Solo 16 tasks** simultáneas (MAX_TASKS = 16).
@@ -846,9 +854,14 @@ retornan distinto: parent ve el child pid, child ve 0.
 - fds compartidas (con refcount): pipe abierto por el parent → el
   child también lo ve. Cuando uno de los dos cierra, sólo decrementa
   el contador; el pipe vive hasta que ambos cierren.
-- Sin SIGCHLD: el parent no se entera "automáticamente" cuando el
-  child muere. Usa `wait_child` con `sys_taskinfo` polling (ver
-  forktest.c). Mismo patrón que shellsrv's `wait_pid_or_stop`.
+- Sin SIGCHLD automático: el parent no recibe SIGCHLD cuando el
+  child muere. Usa `wait(2)` / `waitpid(2)` (bloqueantes vía
+  TASK_ZOMBIE + parent_pid + wake-up async desde
+  `proc_exit_current_user`). forktest y waittest usan esta API
+  POSIX-real. shellsrv todavía polea con `sys_taskinfo` para
+  soportar `WUNTRACED` (Ctrl+Z), pero las apps user-mode usan
+  `waitpid` directo. Cuando llegue SIGCHLD se podrá hacer el
+  classic `signal(SIGCHLD, reaper); fork(); wait();` pattern.
 
 ## Flujo de un execve (SYS_EXECVE = #59 Linux)
 
@@ -908,6 +921,131 @@ el mismo pid**. Es el bloque "exec" de fork+exec.
   image (e.g. `/bin/top`) muere y trae shellsrv de vuelta. Sin él
   un `exec /bin/top` interactivo dejaría el sistema sin shell tras
   el Ctrl+C.
+
+## Flujo de un wait (SYS_WAIT4 = #61) + TASK_ZOMBIE
+
+`wait/waitpid` blocks the parent until a child enters TASK_ZOMBIE.
+Lifecycle:
+
+```
+parent: pid_t r = waitpid(child, &status, 0);
+   |  libc → osnos_syscall4(SYS_WAIT4, child, &status, 0, 0)
+   v
+[ring 0] sys_wait4:
+   |  1st sweep: walk task table for tasks with parent_pid == self.
+   |  - Si alguno está ZOMBIE: status = encode_wait_status(exit_code)
+   |    (WIFEXITED << 8 ó WTERMSIG & 0x7f); copy_to_user; transición
+   |    ZOMBIE → DEAD; return child pid. ✓
+   |  - Si no hay ZOMBIE pero hay children vivos: WNOHANG → 0; sino
+   |    snapshot iret+GPRs (saved_rax=0), state=BLOCKED,
+   |    waiting_for_pid=child, wait_status_ptr=u_status,
+   |    sched_resume_jump.
+   |  - Si no hay children al all: -ECHILD.
+   v
+[meanwhile]  child eventualmente llama _exit(N):
+   v
+[ring 0] proc_exit_current_user(N):
+   |  parent_t = task_by_pid(t->parent_pid).
+   |  state = parent vivo ? TASK_ZOMBIE : TASK_DEAD.
+   |  Si parent está BLOCKED esperándonos (-1 o == nuestro pid):
+   |    - status_value = encode_wait_status(N).
+   |    - vmm_lookup(parent->pml4, parent->wait_status_ptr) →
+   |      HHDM-mapped phys + offset → escribe int.
+   |    - parent->saved_rax = our pid (wait4 return value).
+   |    - parent->state = READY.
+   |  address_space_destroy(our pml4).
+   |  reaper_add_kstack(our kstack).
+   |  sched_resume_jump.
+   v
+[scheduler] dispatches parent → user_task_trampoline → saved_valid
+   path → iretq con rax = child pid.
+   v
+[ring 3] wait4 retorna child pid. *status escrito vía pml4.
+   |  Si llegó signal antes que child wake → sig_pending != 0 ó
+   |  saved_rax = -EINTR (sys_kill lo escribió). user_task_resume
+   |  delivers signal o syscall retorna -EINTR.
+```
+
+**Decisión de diseño**: ZOMBIE en vez de "extend reap grace" — un
+slot ZOMBIE se queda explícitamente hasta que wait() lo consume
+(transition ZOMBIE → DEAD). El reaper solo reapea DEAD. Esto
+preserva el exit_code sin races y permite que `ps` futuro muestre
+"defunct" como Linux.
+
+**Orphan handling**: si parent_pid es 0 (kernel task) ó parent ya
+está DEAD/UNUSED, child al exit pasa direct a DEAD (sin pasar por
+ZOMBIE) — el reaper lo recoge. Sin "init" pid 1 todavía.
+
+## Flujo de un signal (sigaction + delivery + sigreturn)
+
+POSIX sa_handler-only. El kernel mantiene 32 handlers per task,
+delivery en `user_task_resume` justo antes del iretq.
+
+```
+[ring 3] sigaction(SIGINT, &act, NULL):
+   |  libc wrap: si !act.sa_restorer, fill with __sigtramp.
+   v
+[ring 0] sys_rt_sigaction(SIGINT, &act, NULL, _):
+   |  Validación: SIGKILL/SIGSTOP → EINVAL.
+   |  copy_from_user(&kact, &act, sizeof(kuser_sigaction_t)).
+   |  t->sa_handler [1] = kact.sa_handler.
+   |  t->sa_restorer[1] = kact.sa_restorer.
+   v
+... más tarde, signal delivery:
+
+[ring 3] otra task hace kill(t->pid, SIGINT) o user toca Ctrl+C:
+   v
+[ring 0] sys_kill / tty_signal:
+   |  t->sig_pending |= 1 << (SIGINT-1) ;
+   |  Si t->state == BLOCKED:
+   |    Si t->saved_valid: t->saved_rax = -EINTR;
+   |    t->state = READY;
+   |  return.
+   v
+[scheduler] dispatches t → user_task_trampoline → user_task_resume:
+   |  Build buf[] del iret+GPRs como siempre.
+   |  Loop: lowest_signal(t->sig_pending) = SIGINT.
+   |        handler = t->sa_handler[SIGINT-1].
+   |        Si SIG_IGN (1): clear bit, continue.
+   |        Si SIG_DFL (0): SIGINT/TERM/etc → proc_exit_current_user(128+sig);
+   |          SIGCHLD/URG/WINCH → clear+continue.
+   |        Si fn ptr: build sigframe_t en user stack via
+   |          write_other_user(t->pml4, sigframe_base, ...). 160 B
+   |          aligned a 16. Escribe restorer en sigframe_base - 8.
+   |          buf[4] = handler. buf[1] = restorer_slot.
+   |          buf[10] = signum (rdi). Clear bit. break.
+   |  iretq con buf modificado.
+   v
+[ring 3] entra al handler con rdi=signum, rsp apuntando a restorer.
+   handler corre user code; cuando hace `ret`, pop restorer.
+   v
+[ring 3] __sigtramp (sigtramp.S):
+   |  movq $15, %rax       ; SYS_RT_SIGRETURN
+   |  syscall
+   v
+[ring 0] sys_rt_sigreturn:
+   |  user_rsp = iret[3] (current iret frame's RSP — top of sigframe).
+   |  copy_from_user(&f, user_rsp, sizeof(sigframe_t)).
+   |  t->saved_iret_* = f.{rip,cs,rflags,rsp,ss}.
+   |  t->saved_* = f.{rax,...,r15}.
+   |  t->saved_valid = 1; t->state = READY.
+   |  sched_resume_jump.
+   v
+[scheduler] re-dispatches t → user_task_resume restaura saved_* →
+   iretq al RIP/RSP justo después del syscall original (antes del
+   signal). RAX = lo que era antes del signal (e.g. -EINTR si
+   estábamos en wait4 interrumpido).
+```
+
+**Invariantes**:
+- `sa_handler == 0` = SIG_DFL, `== 1` = SIG_IGN, otros = user ptr.
+- Solo se entrega UN signal por dispatch (loop break tras delivery
+  exitosa). Otros pendientes esperan al próximo iretq.
+- Stack overflow: si user stack no llega a sigframe_base (~200 B
+  abajo del orig RSP), `write_other_user` devuelve 0 y dropeamos
+  el signal silenciosamente. Mejor que kernel panic.
+- POSIX exec-on-handler: NO implementado (al fork las handlers se
+  heredan, al execve se resetean en proc_execve_replace — TODO).
 
 ## VFS layered backend dispatch
 

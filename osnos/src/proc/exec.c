@@ -59,6 +59,47 @@
  * pointer into the buffer (loaded last so we don't clobber it
  * mid-restore).
  */
+/* Layout MUST match sigframe_t in src/micro/syscall.c (used by
+ * sys_rt_sigreturn to restore). Total 160 bytes (5 iret + 15 GPRs). */
+typedef struct {
+    uint64_t rip, cs, rflags, rsp, ss;
+    uint64_t rax, rbx, rcx, rdx, rsi, rdi, rbp;
+    uint64_t r8,  r9,  r10, r11, r12, r13, r14, r15;
+} signal_frame_t;
+
+/* Copy `n` bytes into another task's user-virtual address via its
+ * pml4 (we are running on kernel pml4 or a different task's). Walks
+ * vmm_lookup page-by-page so a sigframe straddling a page boundary
+ * still lands correctly. Returns 1 on success, 0 if any page is
+ * unmapped (caller drops the signal silently). */
+static int write_other_user(uint64_t *pml4, uint64_t user_va,
+                             const void *src, size_t n) {
+    const uint8_t *s = (const uint8_t *)src;
+    while (n > 0) {
+        uint64_t page = user_va & ~0xFFFULL;
+        uint64_t phys = vmm_lookup(pml4, page);
+        if (!phys) return 0;
+        size_t in_page = 0x1000 - (user_va & 0xFFFu);
+        size_t take    = (n < in_page) ? n : in_page;
+        uint8_t *dst = (uint8_t *)((phys & 0xFFFFFFFFFFFFF000ULL) +
+                                    (user_va & 0xFFFu) +
+                                    pmm_hhdm_offset());
+        for (size_t i = 0; i < take; i++) dst[i] = s[i];
+        s        += take;
+        user_va  += take;
+        n        -= take;
+    }
+    return 1;
+}
+
+/* Lowest set bit (1-based). Returns 0 if mask == 0. */
+static int lowest_signal(uint32_t mask) {
+    for (int s = 1; s <= 31; s++) {
+        if (mask & (1u << (s - 1))) return s;
+    }
+    return 0;
+}
+
 __attribute__((noreturn))
 static void user_task_resume(task_t *t) {
     tss_set_rsp0(t->kernel_stack_top);
@@ -85,6 +126,74 @@ static void user_task_resume(task_t *t) {
     buf[17] = t->saved_r13;
     buf[18] = t->saved_r14;
     buf[19] = t->saved_r15;
+
+    /* Signal delivery: if a signal is pending, redirect the iretq to
+     * the user handler (with a sigframe pushed on the user stack and
+     * the trampoline epilogue as return address). Done BEFORE the
+     * CR3 switch so we can still walk the kernel pml4 to discover the
+     * target task's pages via vmm_lookup. */
+    while (t->sig_pending) {
+        int sig = lowest_signal(t->sig_pending);
+        if (sig == 0) break;
+        uint64_t handler  = t->sa_handler [sig - 1];
+        uint64_t restorer = t->sa_restorer[sig - 1];
+
+        /* SIG_IGN — clear bit and re-check for another signal. */
+        if (handler == 1) {
+            t->sig_pending &= ~(1u << (sig - 1));
+            continue;
+        }
+
+        /* SIG_DFL — default disposition. SIGINT/SIGTERM/SIGKILL/etc
+         * kill the task; SIGCHLD/SIGURG/SIGWINCH default to ignore. */
+        if (handler == 0) {
+            t->sig_pending &= ~(1u << (sig - 1));
+            if (sig == 17 /* SIGCHLD */ ||
+                sig == 23 /* SIGURG  */ ||
+                sig == 28 /* SIGWINCH */) {
+                continue;
+            }
+            /* fall-through: terminate. Restore the kernel pml4 first
+             * because proc_exit_current_user expects to be running
+             * on a sane address space (it'll destroy t->pml4). */
+            proc_exit_current_user(128 + sig);
+            __builtin_unreachable();
+        }
+
+        /* User handler: build sigframe on the user stack, redirect.
+         * Stack layout (grows down):
+         *   [high]  signal_frame_t (160 B = orig iret + 15 GPRs)
+         *   [low ]  restorer addr  ← new RSP (8-mod-16 for SysV ABI) */
+        uint64_t orig_rsp      = buf[1];
+        uint64_t sigframe_base = (orig_rsp - sizeof(signal_frame_t)) & ~15ULL;
+        uint64_t restorer_slot = sigframe_base - 8;
+
+        signal_frame_t f;
+        f.rip = buf[4]; f.cs  = buf[3]; f.rflags = buf[2];
+        f.rsp = buf[1]; f.ss  = buf[0];
+        f.rax = buf[5]; f.rbx = buf[6]; f.rcx = buf[7];  f.rdx = buf[8];
+        f.rsi = buf[9]; f.rdi = buf[10]; f.rbp = buf[11];
+        f.r8  = buf[12]; f.r9 = buf[13]; f.r10 = buf[14]; f.r11 = buf[15];
+        f.r12 = buf[16]; f.r13 = buf[17]; f.r14 = buf[18]; f.r15 = buf[19];
+
+        if (!write_other_user(t->pml4, sigframe_base, &f, sizeof(f)) ||
+            !write_other_user(t->pml4, restorer_slot, &restorer, 8)) {
+            /* User stack unmapped at the spot we'd push the frame —
+             * drop the signal silently. Continuing without consuming
+             * the bit would loop infinitely; clear and move on. */
+            t->sig_pending &= ~(1u << (sig - 1));
+            continue;
+        }
+
+        /* Reroute iretq: rip=handler, rsp=top of restorer slot,
+         * rdi=signum (handler's first arg per SysV ABI). */
+        buf[4]  = handler;        /* rip   */
+        buf[1]  = restorer_slot;  /* rsp   */
+        buf[10] = (uint64_t)sig;  /* rdi   */
+
+        t->sig_pending &= ~(1u << (sig - 1));
+        break;                    /* one signal per dispatch; rest queued */
+    }
 
     t->saved_valid = 0;     /* consume; next dispatch is "fresh" again */
 
@@ -133,7 +242,23 @@ static void user_task_trampoline(void) {
      * trip the usual delivery points, so the trampoline does it here.
      */
     if (t->kill_pending) {
-        proc_exit_current_user(130);
+        /* Translate to the actual pending signal: kill_pending is
+         * set in tandem with sig_pending for SIGINT/SIGTERM/SIGKILL
+         * (see sys_kill / tty_signal). The first bit set in
+         * sig_pending tells us the real signum so we exit with the
+         * POSIX-correct code (128 + sig). Falling back to SIGINT if
+         * sig_pending is somehow empty preserves the prior behaviour
+         * for any legacy code path that still toggles kill_pending
+         * by itself. */
+        int sig = 2 /* SIGINT default */;
+        if (t->sig_pending) {
+            for (int s = 1; s <= 31; s++) {
+                if (t->sig_pending & (1u << (s - 1))) { sig = s; break; }
+            }
+        }
+        t->kill_pending = 0;
+        t->sig_pending &= ~(1u << (sig - 1));
+        proc_exit_current_user(128 + sig);
         __builtin_unreachable();
     }
 
@@ -559,7 +684,29 @@ void proc_exit_current_user(int exit_code) {
     }
     t->mmap_next = 0;
 
-    t->state             = TASK_DEAD;
+    /*
+     * State transition (POSIX zombie model):
+     *
+     *   parent alive + ring-3        →  TASK_ZOMBIE
+     *      Slot stays around with exit_code visible until the parent
+     *      calls waitpid(2). At that point sys_wait4 transitions the
+     *      slot to TASK_DEAD and the reaper collects it.
+     *
+     *   no parent (orphan/init/kernel) →  TASK_DEAD
+     *      Reaper collects directly. (Without an `init` process we
+     *      can't reparent, so a dying parent's children just lose
+     *      their wait waiter — they become orphans on exit.)
+     */
+    task_t *parent_t = task_by_pid(t->parent_pid);
+    int has_live_parent =
+        (t->parent_pid != 0) &&
+        (parent_t != 0) &&
+        (parent_t->pml4 != 0) &&
+        (parent_t->state != TASK_DEAD) &&
+        (parent_t->state != TASK_ZOMBIE) &&
+        (parent_t->state != TASK_UNUSED);
+
+    t->state             = has_live_parent ? TASK_ZOMBIE : TASK_DEAD;
     t->pml4              = 0;
     t->kernel_stack_top  = 0;
     t->kernel_stack_base = 0;
@@ -572,6 +719,63 @@ void proc_exit_current_user(int exit_code) {
      * kernel_fg_pid still points to dead top. */
     extern uint64_t kernel_fg_pid;
     if (kernel_fg_pid == t->pid) kernel_fg_pid = 0;
+
+    /*
+     * If the parent is BLOCKED inside sys_wait4(2) waiting for ANY
+     * child (-1) or specifically for us (== t->pid), wake it now.
+     * Write the encoded status into *parent->wait_status_ptr via
+     * the parent's pml4, set saved_rax = our pid so wait4 returns
+     * the right value, and transition the parent → READY. The
+     * waited-on child stays in ZOMBIE until the parent's syscall
+     * reaping path flips it to DEAD.
+     */
+    if (has_live_parent &&
+        parent_t->state == TASK_BLOCKED &&
+        (parent_t->waiting_for_pid == -1 ||
+         parent_t->waiting_for_pid == (int)t->pid))
+    {
+        /* Encode status (matches sys_wait4's encode_wait_status):
+         *   exit_code 128..159 = signal-terminated → status = sig & 0x7f
+         *      (WIFSIGNALED true, WTERMSIG returns sig)
+         *   else                = normal exit       → status = (code<<8)
+         *      (WIFEXITED true, WEXITSTATUS returns code)
+         * Without this branch SIGTERM-killed children showed up as
+         * exit=143 with WIFEXITED=true — wrong by POSIX. */
+        int status_value;
+        if (exit_code >= 128 && exit_code <= 128 + 31) {
+            status_value = (exit_code - 128) & 0x7f;
+        } else {
+            status_value = (exit_code & 0xff) << 8;
+        }
+
+        if (parent_t->wait_status_ptr) {
+            uint64_t va = (uint64_t)parent_t->wait_status_ptr;
+            uint64_t phys = vmm_lookup(parent_t->pml4, va & ~0xFFFULL);
+            if (phys) {
+                int *kva = (int *)((phys & PTE_ADDR_MASK) +
+                                    (va & 0xFFFu) +
+                                    pmm_hhdm_offset());
+                *kva = status_value;
+            }
+            /* If unmapped, silently drop the status — parent can't
+             * have given us a valid pointer; nothing better we can
+             * do without rolling the syscall back. */
+        }
+
+        parent_t->saved_rax        = t->pid;        /* wait4 return value */
+        parent_t->waiting_for_pid  = 0;
+        parent_t->wait_options     = 0;
+        parent_t->wait_status_ptr  = 0;
+        parent_t->state            = TASK_READY;
+
+        /* We just delivered this child's status to the parent — the
+         * waitpid syscall is going to return here. Transition the
+         * child slot from ZOMBIE → DEAD so a follow-up
+         * waitpid(WNOHANG) doesn't re-find it (POSIX: ECHILD when
+         * nothing left to wait for). Reaper will recycle the slot
+         * on its next pass. */
+        t->state = TASK_DEAD;
+    }
 
     uint64_t kpml4_phys =
         (uint64_t)vmm_kernel_pml4() - pmm_hhdm_offset();

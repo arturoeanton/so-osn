@@ -90,12 +90,26 @@ cerró ABI POSIX core):
 - **`fork(2)` real**: SYS_FORK=57. Deep-copy del pml4 del parent (no
   COW yet — full page copy), clona la fd table con pipe refcount
   bumps, snapshot del syscall context → child resume en la instr
-  siguiente con `rax=0`. Tanto el clásico `if (fork()==0) ...` como
-  `fork() + wait_via_taskinfo` funcionan. Ver `elfs/tests/forktest.c`.
+  siguiente con `rax=0`. Ver `elfs/tests/forktest.c`.
 - **`execve(2)` real**: SYS_EXECVE=59. Reemplaza la imagen user-mode
   del task actual, mismo pid + fds + cwd. libc tiene `execve` /
   `execv` / `execvp` listos (PATH search). Combinable con fork
   para el patrón clásico fork+exec.
+- **`wait(2)` / `waitpid(2)` real**: SYS_WAIT4=61. Block hasta que
+  un child entra TASK_ZOMBIE. W* macros (WIFEXITED, WEXITSTATUS,
+  WIFSIGNALED, WTERMSIG) en `<sys/wait.h>`. WNOHANG retorna 0 si
+  no hay zombie ready. ECHILD si no hay children. Ver
+  `elfs/tests/waittest.c`.
+- **`sigaction(2)` real**: SYS_RT_SIGACTION=13. Modelo sa_handler-
+  only — instalá `void handler(int sig)` que el kernel llama
+  cuando un signal llega. Después del handler, libc `__sigtramp`
+  hace SYS_RT_SIGRETURN para restaurar el contexto pre-signal.
+  SIGKILL/SIGSTOP son uncatchable (EINVAL). Ver
+  `elfs/tests/sigtest.c`.
+- **EINTR estándar**: `read()`, `wait()`, `nanosleep()`, `accept()`,
+  `recvfrom()` retornan -1 + errno=EINTR cuando llega signal
+  mientras bloquean. El handler corre primero; luego la syscall
+  retorna -EINTR para que el programa decida retry vs abort.
 - **Coexisten con `osn_spawn`** (SYS_SPAWN=266) que es fork+exec
   atómico estilo posix_spawn con fd inheritance MOVE-semantics.
 
@@ -219,6 +233,10 @@ Números de syscall que existen hoy (ver `src/micro/syscall.h`):
 |  57 | `fork`        | `(void)` → child pid (parent) / 0 (child) / -errno |
 |  59 | `execve`      | `(const char *path, argv[], envp[])` — never returns on success |
 |  60 | `exit`        | `(int code)`                                      |
+|  61 | `wait4`       | `(pid, *status, options, *rusage)` — block until child zombie |
+|  13 | `rt_sigaction`| `(int sig, const struct sigaction *act, struct sigaction *old, size_t)` |
+|  14 | `rt_sigprocmask` | `(how, *set, *oldset, size_t)` *(stub)*       |
+|  15 | `rt_sigreturn`| `(void)` — called by libc __sigtramp; restores pre-signal context |
 |  62 | `kill`        | `(pid_t pid, int sig)`                            |
 |  72 | `fcntl`       | `(int fd, int cmd, ...)` (F_GETFL/SETFL/DUPFD)    |
 |  79 | `getcwd`      | `(char *buf, size_t n)`                           |
@@ -617,7 +635,7 @@ matarla:
 - **IPC con otros ring-3**: SYS_IPC_SEND/RECV permite escribir
   servers como `consrv` / `kbdsrv` / `shellsrv` desde ring 3.
 
-### Ejemplo: fork(2) + execve(2) classic POSIX
+### Ejemplo: fork(2) + execve(2) + wait(2) classic POSIX
 
 ```c
 #include <errno.h>
@@ -642,18 +660,52 @@ int main(void) {
         fprintf(stderr, "execve failed: errno=%d\n", errno);
         _exit(127);
     }
-    /* PARENT: pid is the child's pid. wait() POSIX no existe todavía;
-     * polleá via sys_taskinfo (#265) — ver forktest.c, función
-     * `wait_child`. */
-    printf("forked child pid=%d\n", (int)pid);
+    /* PARENT: wait(2) real espera a que el child entre TASK_ZOMBIE
+     * y devuelve su pid + status encoded. */
+    int status = 0;
+    pid_t reaped = waitpid(pid, &status, 0);
+    if (reaped == pid && WIFEXITED(status)) {
+        printf("child %d exited with code %d\n",
+               (int)pid, WEXITSTATUS(status));
+    }
     return 0;
 }
 ```
 
 Output esperado:
 ```
-forked child pid=N
 hola desde el child
+child N exited with code 0
+```
+
+### Ejemplo: sigaction(2) — Ctrl+C trap
+
+```c
+#include <signal.h>
+#include <stdio.h>
+#include <unistd.h>
+
+static volatile int caught;
+
+static void on_sigint(int sig) {
+    (void)sig;
+    caught = 1;
+    write(1, "got SIGINT!\n", 12);   /* signal-safe */
+}
+
+int main(void) {
+    struct sigaction act = { 0 };
+    act.sa_handler = on_sigint;
+    sigaction(SIGINT, &act, NULL);
+
+    /* Loop hasta que llegue Ctrl+C (o kill -INT $pid). */
+    while (!caught) {
+        sleep(1);   /* nanosleep — EINTR-aware, vuelve cuando llega
+                     * el signal y el handler corrió. */
+    }
+    printf("clean exit after SIGINT\n");
+    return 0;
+}
 ```
 
 ---

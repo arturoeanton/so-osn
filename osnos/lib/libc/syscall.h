@@ -37,7 +37,12 @@
 #define SYS_GETPID    39
 #define SYS_FORK      57
 #define SYS_EXIT      60
+#define SYS_WAIT4     61
 #define SYS_KILL      62
+/* Signal-handling syscalls — Linux x86_64 rt_sig* family. */
+#define SYS_RT_SIGACTION   13
+#define SYS_RT_SIGPROCMASK 14
+#define SYS_RT_SIGRETURN   15
 #define SYS_GETCWD    79
 #define SYS_CHDIR     80
 #define SYS_RENAME    82

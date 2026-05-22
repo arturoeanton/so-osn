@@ -16,7 +16,8 @@ typedef enum {
     TASK_RUNNING,
     TASK_BLOCKED,
     TASK_STOPPED,    /* Ctrl+Z'd; scheduler skips until SIGCONT */
-    TASK_DEAD
+    TASK_ZOMBIE,     /* exited, exit_code preserved until parent waits */
+    TASK_DEAD        /* wait() consumed (or orphan); reaper may collect */
 } task_state_t;
 
 #define OSNOS_TASK_NAME_MAX 32
@@ -37,6 +38,52 @@ typedef struct task {
 
     /* Exit code reported via IPC_PROC_EXITED. */
     int    exit_code;
+
+    /*
+     * Parent-child + wait(2) state (FASE POSIX-final).
+     *
+     * `parent_pid` is set by sys_fork(2) to the forker's pid. Tasks
+     * spawned via task_create (kernel-side, kmain) or proc_execve
+     * (no parent context) get 0 — "orphan", reaper collects without
+     * waiting for any waitpid.
+     *
+     * `waiting_for_pid` is nonzero when this task is blocked in
+     * sys_wait4(2). Encodes the POSIX waitpid semantics:
+     *    0      = not waiting
+     *   -1      = waitpid(-1, ...) → any child
+     *   >0      = waitpid(N,  ...) → specific child
+     * When a child of this task transitions to TASK_ZOMBIE,
+     * proc_exit_current_user checks each task; if it finds a
+     * matching parent blocked here, it un-blocks the parent
+     * (state=READY) and writes the child pid into saved_rax + the
+     * status into *wait_status_ptr (via copy_to_user).
+     */
+    uint64_t parent_pid;
+    int      waiting_for_pid;
+    int      wait_options;
+    int     *wait_status_ptr;     /* user-virtual */
+
+    /*
+     * Signal handling — sa_handler-only POSIX model.
+     *
+     * sa_handler[s-1] holds the user-mode disposition for signal s
+     * (1..31):
+     *   0          = SIG_DFL — default disposition
+     *   1          = SIG_IGN — discard silently
+     *   any other  = function pointer (user virtual address)
+     *
+     * sa_restorer[s-1] is the libc-provided trampoline epilogue that
+     * runs SYS_RT_SIGRETURN after the handler returns. Each task
+     * registers it (typically &__sigtramp) via sys_rt_sigaction.
+     *
+     * sig_pending is a bitmap of signals delivered but not yet
+     * handled. Set by sys_kill / tty_signal / etc. Checked by
+     * user_task_resume right before iretq; blocking syscalls also
+     * peek it to return -EINTR.
+     */
+    uint64_t sa_handler [32];
+    uint64_t sa_restorer[32];
+    uint32_t sig_pending;
 
     /*
      * Ring-3 task fields:
