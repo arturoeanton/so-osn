@@ -20,6 +20,7 @@
 /* Options. */
 #define WNOHANG     1
 #define WUNTRACED   2
+#define WCONTINUED  8
 
 /* Status-decoding macros. */
 #define WIFEXITED(s)    (((s) & 0x7f) == 0)
@@ -28,6 +29,7 @@
 #define WTERMSIG(s)     ((s) & 0x7f)
 #define WIFSTOPPED(s)   (((s) & 0xff) == 0x7f)
 #define WSTOPSIG(s)     (((s) >> 8) & 0xff)
+#define WIFCONTINUED(s) ((s) == 0xffff)
 
 pid_t wait(int *wstatus);
 pid_t waitpid(pid_t pid, int *wstatus, int options);

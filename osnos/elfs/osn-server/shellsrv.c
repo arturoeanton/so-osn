@@ -943,62 +943,34 @@ static void stage_parse(char *raw, stage_t *st) {
  *        without harvesting; `fg pid` / `bg pid` later resumes it.
  */
 /* Capture variant: returns the exit_code of the dead task. If
- * `stopped_out` is non-NULL, gets set to 1 when the wait ends in
- * TASK_STOPPED (Ctrl+Z) instead of TASK_DEAD.
+ * `stopped_out` is non-NULL, gets set to 1 when the child is stopped
+ * (Ctrl+Z / SIGSTOP) instead of exited.
  *
- * Race avoidance: the reaper transitions TASK_DEAD → UNUSED very
- * quickly (every scheduler tick). If our 20ms poll lands AFTER the
- * reaper has recycled the slot, sys_taskinfo no longer reports our
- * pid and we'd lose the exit_code. We keep a running "last seen
- * value" so when the slot disappears, we still return what we knew
- * at last poll. */
+ * Migrated from sys_taskinfo polling to POSIX waitpid(2) with
+ * WUNTRACED. The kernel now wakes shellsrv as soon as the child
+ * transitions to ZOMBIE / STOPPED / CONTINUED — no busy poll, no
+ * race against the reaper, exit_code preserved by TASK_ZOMBIE
+ * state until consumed. */
 static int wait_pid_capture(long pid, int *stopped_out) {
     if (stopped_out) *stopped_out = 0;
-    int last_ec = 0;          /* exit_code from most recent successful poll */
-    int saw_it  = 0;          /* have we EVER seen this pid? */
+    int status = 0;
     for (;;) {
-        int found = 0;
-        uint8_t state = 0;
-        for (size_t i = 0; i < 16; i++) {
-            osnos_taskinfo_t info;
-            long r = osnos_syscall2(265, (long)i, (long)&info);
-            if (r < 0) continue;
-            if ((long)info.pid != pid) continue;
-            found = 1;
-            saw_it = 1;
-            state = info.state;
-            last_ec = info.exit_code;
-            break;
-        }
-        /* Slot gone (reaper got there first) — assume task finished
-         * normally with the exit_code we saw last. Without `saw_it`
-         * we'd block forever on a pid that never existed; treat
-         * never-seen as success (the spawner already returned the
-         * pid successfully, so the task did at least start). */
-        if (!found) return last_ec;
-        if (state == OSNOS_TASK_DEAD) return last_ec;
-        if (state == OSNOS_TASK_ZOMBIE) {
-            /* Child entered ZOMBIE state (kernel ABI added in the
-             * wait4 fase: any child whose parent is alive lingers
-             * here with exit_code preserved until waitpid consumes
-             * it). Since shellsrv is the parent now (FASE 10.6
-             * parent_pid linkage), we must explicitly reap, or
-             * zombies pile up and exhaust task slots. waitpid
-             * transitions ZOMBIE → DEAD; reaper recycles the slot
-             * on the next scheduler tick. */
-            int status = 0;
-            waitpid((pid_t)pid, &status, 0);
-            if (WIFEXITED(status))   last_ec = WEXITSTATUS(status);
-            else if (WIFSIGNALED(status)) last_ec = 128 + WTERMSIG(status);
-            return last_ec;
-        }
-        if (state == OSNOS_TASK_STOPPED) {
-            if (stopped_out) *stopped_out = 1;
+        pid_t r = waitpid((pid_t)pid, &status, WUNTRACED);
+        if (r == (pid_t)pid) {
+            if (WIFSTOPPED(status)) {
+                if (stopped_out) *stopped_out = 1;
+                return 0;
+            }
+            if (WIFEXITED(status))   return WEXITSTATUS(status);
+            if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
             return 0;
         }
-        (void)saw_it;
-        struct timespec ts = { 0, 20 * 1000000 };
-        nanosleep(&ts, 0);
+        if (r == -1) {
+            if (errno == EINTR) continue;       /* signal during wait */
+            return 0;                            /* ECHILD or other → done */
+        }
+        /* r == 0 shouldn't happen without WNOHANG; treat as done. */
+        return 0;
     }
 }
 

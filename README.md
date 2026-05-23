@@ -37,12 +37,13 @@ mini-libc propia para programas de usuario en ring 3.
    shellsrv:/$ ovi .oshrc           # editor modal vim-style
    # i = insert, Esc = normal, hjkl = move,
    # x = del char, dd = del línea, :w = save, :q = quit
-   shellsrv:/$ alltest              # 12/12 tests PASS
+   shellsrv:/$ alltest              # 13/13 tests PASS
    ALLTEST SUMMARY
      PASS  kerntest    forktest    waittest    sigtest
      PASS  sigchldtest pgrouptest  spawntest   exectest
-     PASS  ofdtest     ptytest     fdedgetest  libctest
-   RESULT: 12/12 passed
+     PASS  ofdtest     ptytest     fdedgetest  jobtest
+     PASS  libctest
+   RESULT: 13/13 passed
 ```
 
 > **TL;DR para reentrar al proyecto después de meses:** instalar Limine
@@ -317,7 +318,8 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | **Open File Description (OFD) refactor** — `ofd_pool[128]`, dup/dup2/fork share offset POSIX-strict | ✅ |
 | **FD_CLOEXEC** (per-fd, no shared via dup; execve cierra solo CLOEXEC) | ✅ |
 | **PTY pairs** (`/dev/ptmx` + `/dev/pts/N`, pool de 8, canon/raw, ECHO, EOF/EPIPE, ioctls TIOCGPTN/TCGETS/TCSETS) + libc `posix_openpt`/`ptsname`/`grantpt`/`unlockpt` | ✅ |
-| **12/12 tests automatizados** via `/bin/alltest` (kerntest, forktest, waittest, sigtest, sigchldtest, pgrouptest, spawntest, exectest, ofdtest, ptytest, fdedgetest, libctest) | ✅ |
+| **WUNTRACED / WCONTINUED** en `wait4(2)` + SIGSTOP/SIGCONT delivery + fan-out de Ctrl+C/Z a TODA la foreground process group + shellsrv migrado a `waitpid()` real (sin polling) | ✅ |
+| **13/13 tests automatizados** via `/bin/alltest` (kerntest, forktest, waittest, sigtest, sigchldtest, pgrouptest, spawntest, exectest, ofdtest, ptytest, fdedgetest, jobtest, libctest) | ✅ |
 | **init-respawn watchdog** — consrv/kbdsrv/shellsrv auto-restart on death | ✅ |
 | Driver ATA PIO + FAT16 read/write + dir-chain extension + NT case-bits + persistencia | ✅ |
 | **/bin disk-resident** — sd.img poblado al build via mtools, kernel binary 1.1 MB (era 7.6 MB) | ✅ |
@@ -595,9 +597,22 @@ Cerrado recientemente:
     ECHO + VERASE; EOF cuando master cierra; EPIPE cuando slave
     escribe sin master. ioctls TIOCGPTN/TCGETS/TCSETS per-pair.
     libc `posix_openpt`/`ptsname_r`/`grantpt`/`unlockpt`.
+  - **Sesión 4** (WUNTRACED + WCONTINUED + fan-out + shellsrv
+    migrate): `task_t.wait_change` enum trackea state transitions;
+    `find_waitable_child` detecta ZOMBIE/STOPPED/CONTINUED.
+    Nuevo `notify_parent_stop_continue` despierta parents en
+    wait4 cuando child cambia state. user_task_resume SIG_DFL
+    para SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU → TASK_STOPPED.
+    sys_kill SIGCONT a STOPPED → resume + WAIT_CONTINUED.
+    **Fan-out de Ctrl+C/Z a fg pgid** completo (tty_signal +
+    tty_stop_signal walk task table broadcasting). shellsrv
+    `wait_pid_capture` migrado de polling sys_taskinfo + nanosleep
+    a `waitpid(pid, &status, WUNTRACED)` real — no más race vs
+    reaper. libc `<sys/wait.h>` gains `WCONTINUED` flag +
+    `WIFCONTINUED(s)` macro.
   - Tests nuevos: `/bin/sigchldtest`, `/bin/pgrouptest`,
     `/bin/ofdtest`, `/bin/ptytest`, `/bin/fdedgetest`,
-    `/bin/alltest`. **12/12 PASS** end-to-end.
+    `/bin/jobtest`, `/bin/alltest`. **13/13 PASS** end-to-end.
 - **init-respawn watchdog**: kernel task que checkea cada ~100ms
   si consrv/kbdsrv/shellsrv siguen vivos; si murieron (e.g. exec
   /bin/top + Ctrl+C), los respawnea + re-registra SERVER_*.

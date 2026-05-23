@@ -7,6 +7,7 @@
 #include "../micro/fd.h"
 #include "../micro/fpu.h"
 #include "../micro/gdt.h"
+#include "../micro/syscall.h"
 #include "../micro/ipc.h"
 #include "elf.h"
 #include "../micro/kmalloc.h"
@@ -144,13 +145,33 @@ static void user_task_resume(task_t *t) {
             continue;
         }
 
-        /* SIG_DFL — default disposition. SIGINT/SIGTERM/SIGKILL/etc
-         * kill the task; SIGCHLD/SIGURG/SIGWINCH default to ignore. */
+        /* SIG_DFL — default disposition. */
         if (handler == 0) {
             t->sig_pending &= ~(1u << (sig - 1));
+            /* Ignore by default: SIGCHLD, SIGURG, SIGWINCH. */
             if (sig == 17 /* SIGCHLD */ ||
                 sig == 23 /* SIGURG  */ ||
                 sig == 28 /* SIGWINCH */) {
+                continue;
+            }
+            /* Stop by default: SIGSTOP / SIGTSTP / SIGTTIN / SIGTTOU.
+             * POSIX job control — task transitions to TASK_STOPPED,
+             * wait_change set so the parent's waitpid(WUNTRACED)
+             * picks it up. We sched_resume_jump (no iretq) so the
+             * task doesn't reach ring 3 until SIGCONT / sys_resume
+             * un-stops it. */
+            if (sig == 19 /* SIGSTOP */ || sig == 20 /* SIGTSTP */ ||
+                sig == 21 /* SIGTTIN */ || sig == 22 /* SIGTTOU */) {
+                t->state       = TASK_STOPPED;
+                t->wait_change = 1 /* WAIT_STOPPED */;
+                notify_parent_stop_continue(t);
+                sched_resume_jump();
+                __builtin_unreachable();
+            }
+            /* SIGCONT default: just clear; the un-stop happens when
+             * sys_kill sees SIGCONT on a STOPPED task (see sys_kill).
+             * If we got here, the task was already running — no-op. */
+            if (sig == 18 /* SIGCONT */) {
                 continue;
             }
             /* fall-through: terminate. Restore the kernel pml4 first
@@ -272,6 +293,8 @@ static void user_task_trampoline(void) {
     if (t->stop_pending) {
         t->stop_pending = 0;
         t->state        = TASK_STOPPED;
+        t->wait_change  = 1 /* WAIT_STOPPED */;
+        notify_parent_stop_continue(t);
         sched_resume_jump();
         __builtin_unreachable();
     }

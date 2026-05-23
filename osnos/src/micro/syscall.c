@@ -720,7 +720,15 @@ static int kill_one_task(task_t *t, int sig) {
         t->wakeup_at_ms = 0;
         t->state        = TASK_READY;
     } else if (t->state == TASK_STOPPED) {
-        t->state = TASK_READY;
+        /* SIGCONT specifically un-stops the task. SIGKILL also
+         * force-wakes (POSIX uncatchable — can't be ignored even
+         * while stopped). Other signals queue on sig_pending and
+         * land when the task next dispatches (e.g. after SIGCONT). */
+        if (sig == 18 /* SIGCONT */ || sig == 9 /* SIGKILL */) {
+            t->state       = TASK_READY;
+            t->wait_change = 2 /* WAIT_CONTINUED */;
+            notify_parent_stop_continue(t);
+        }
     }
     return 1;
 }
@@ -1512,7 +1520,9 @@ int64_t sys_resume(uint64_t pid) {
     task_t *t = task_by_pid(pid);
     if (!t || !t->pml4) return err(OSNOS_ESRCH);
     if (t->state == TASK_STOPPED) {
-        t->state = TASK_READY;
+        t->state       = TASK_READY;
+        t->wait_change = 2 /* WAIT_CONTINUED */;
+        notify_parent_stop_continue(t);
     }
     return 0;
 }
@@ -1691,17 +1701,23 @@ int64_t sys_fork(void) {
 /* until one of its children transitions to TASK_ZOMBIE, then reaps. */
 /* ------------------------------------------------------------------ */
 
-#define WNOHANG    1
-#define WUNTRACED  2
+#define WNOHANG     1
+#define WUNTRACED   2
+#define WCONTINUED  8
+
+/* task_t.wait_change values. Keep in sync with comment in task.h. */
+#define WAIT_NONE      0
+#define WAIT_STOPPED   1
+#define WAIT_CONTINUED 2
 
 /* Encode an exit code into POSIX wait status word.
  *  - Normal exit:   (code & 0xff) << 8     WIFEXITED == 1
  *  - Signal kill:   sig & 0x7f             WIFSIGNALED == 1 (low 7 bits)
+ *  - Stopped child: (sig << 8) | 0x7f      WIFSTOPPED == 1
+ *  - Continued:     0xffff                 WIFCONTINUED == 1
  * exit_code conventions in osnos:
  *   < 128       — normal exit code from sys_exit (clamped to 0..255)
  *   128 + sig   — signal-terminated (e.g. 130 = SIGINT, 137 = SIGKILL).
- * We translate the latter back to "signal status" so wait()
- * callers' WIFSIGNALED works.
  */
 static int encode_wait_status(int exit_code) {
     if (exit_code >= 128 && exit_code <= 128 + 31) {
@@ -1711,29 +1727,102 @@ static int encode_wait_status(int exit_code) {
     return (exit_code & 0xff) << 8;           /* WIFEXITED + WEXITSTATUS */
 }
 
-/* Look through the task table for a child of `parent` whose state
- * is TASK_ZOMBIE and whose pid matches the waitpid filter (pid > 0
- * → exact match; pid == -1 → any). Returns the slot or NULL.
+/* WIFSTOPPED status: low 8 bits = 0x7f, bits 8..15 = stop signal.
+ * SIGSTOP=19 / SIGTSTP=20 / SIGTTIN=21 / SIGTTOU=22 are the typical
+ * stoppers. osnos's Ctrl+Z path uses SIGSTOP semantically. */
+static int encode_stopped_status(int sig) {
+    return ((sig & 0xff) << 8) | 0x7f;
+}
+
+/* WIFCONTINUED status: Linux uses the magic 0xffff. */
+#define WCONTINUED_STATUS 0xffff
+
+/*
+ * Walk the task table looking for a child of `parent` whose state
+ * transitioned recently and is wait-reportable:
  *
- * Also tracks whether the parent has ANY children at all (zombie or
- * not) so wait() can return -ECHILD when there's nothing to wait
- * for. */
-static task_t *find_zombie_child(uint64_t parent_pid, int64_t want_pid,
-                                  int *out_have_any_child) {
+ *   - TASK_ZOMBIE                      → always reportable (exit/signal)
+ *   - TASK_STOPPED + WAIT_STOPPED      → reportable iff WUNTRACED
+ *   - any state + WAIT_CONTINUED       → reportable iff WCONTINUED
+ *
+ * `out_have_any_child` tracks whether the parent has ANY waitable
+ * descendant at all (used to return -ECHILD). DEAD / UNUSED slots
+ * are skipped since they're already-consumed.
+ *
+ * Returns the matching task or NULL. Caller is responsible for
+ * encoding status, transitioning the slot (ZOMBIE→DEAD for normal
+ * reap; STOPPED stays STOPPED; clear wait_change after report).
+ */
+static task_t *find_waitable_child(uint64_t parent_pid,
+                                    int64_t want_pid,
+                                    int options,
+                                    int *out_have_any_child) {
     *out_have_any_child = 0;
     for (size_t i = 0; i < MAX_TASKS; i++) {
         task_t *c = (task_t *)task_slot(i);
         if (!c) continue;
-        /* Skip already-reaped slots — POSIX wait4 returns ECHILD when
-         * no MORE children remain to wait on. TASK_DEAD = wait already
-         * consumed; reaper will recycle the slot. */
         if (c->state == TASK_UNUSED || c->state == TASK_DEAD) continue;
         if (c->parent_pid != parent_pid) continue;
         if (want_pid > 0 && (int64_t)c->pid != want_pid) continue;
         *out_have_any_child = 1;
+
+        /* ZOMBIE: always wait-reportable. */
         if (c->state == TASK_ZOMBIE) return c;
+        /* Stop transition not yet reported, parent asked for WUNTRACED. */
+        if ((options & WUNTRACED) && c->wait_change == WAIT_STOPPED &&
+            c->state == TASK_STOPPED) return c;
+        /* Continue transition not yet reported. */
+        if ((options & WCONTINUED) && c->wait_change == WAIT_CONTINUED)
+            return c;
     }
     return 0;
+}
+
+/* Wake the parent (if any) currently blocked in wait4 with options
+ * compatible with the kind of state change `t` just had. Used at
+ * STOPPED / CONTINUED transitions to mirror what
+ * proc_exit_current_user already does for ZOMBIE.
+ *
+ * Writes the encoded status into the parent's user *status pointer
+ * (via vmm_lookup on the parent's pml4), populates saved_rax with
+ * the child pid, flips parent state → READY. Does NOT clear
+ * t->wait_change — caller decides when (a successful waitpid sweep
+ * clears it; otherwise the change stays pending). */
+void notify_parent_stop_continue(task_t *t) {
+    if (!t || t->parent_pid == 0) return;
+    task_t *parent = task_by_pid(t->parent_pid);
+    if (!parent || !parent->pml4 || parent->state != TASK_BLOCKED) return;
+    if (parent->waiting_for_pid != -1 &&
+        parent->waiting_for_pid != (int)t->pid) return;
+
+    /* Only wake if parent asked for the kind of change we have. */
+    int opts = parent->wait_options;
+    int change = t->wait_change;
+    if (change == WAIT_STOPPED   && !(opts & WUNTRACED))  return;
+    if (change == WAIT_CONTINUED && !(opts & WCONTINUED)) return;
+
+    int status = (change == WAIT_STOPPED)
+        ? encode_stopped_status(19 /* SIGSTOP */)
+        : WCONTINUED_STATUS;
+
+    if (parent->wait_status_ptr) {
+        uint64_t va = (uint64_t)parent->wait_status_ptr;
+        uint64_t phys = vmm_lookup(parent->pml4, va & ~0xFFFULL);
+        if (phys) {
+            int *kva = (int *)((phys & 0xFFFFFFFFFFFFF000ULL) +
+                                (va & 0xFFFu) +
+                                pmm_hhdm_offset());
+            *kva = status;
+        }
+    }
+    parent->saved_rax       = t->pid;
+    parent->waiting_for_pid = 0;
+    parent->wait_options    = 0;
+    parent->wait_status_ptr = 0;
+    parent->state           = TASK_READY;
+    /* The change is now reported — clear it so a re-wait doesn't
+     * double-report the same transition. */
+    t->wait_change = WAIT_NONE;
 }
 
 int64_t sys_wait4(int64_t pid, int *u_status, int options, void *u_rusage) {
@@ -1742,27 +1831,43 @@ int64_t sys_wait4(int64_t pid, int *u_status, int options, void *u_rusage) {
     task_t *t = task_current();
     if (!t || !t->pml4) return err(OSNOS_ESRCH);
 
-    /* First sweep — synchronous reap if a zombie is already ready. */
+    /* First sweep — synchronous reap if a waitable child is ready
+     * (ZOMBIE, or STOPPED-transitioned with WUNTRACED, or CONTINUED
+     * with WCONTINUED). */
     int have_any;
-    task_t *child = find_zombie_child(t->pid, pid, &have_any);
+    task_t *child = find_waitable_child(t->pid, pid, options, &have_any);
     if (!have_any) return err(OSNOS_ECHILD);
 
     if (child) {
-        /* Reap it: write status to user, transition ZOMBIE → DEAD,
-         * return its pid. The reaper will recycle the slot next
-         * scheduler tick. */
-        int status = encode_wait_status(child->exit_code);
+        int status;
+        uint64_t reaped_pid = child->pid;
+        if (child->state == TASK_ZOMBIE) {
+            /* Normal reap path: exit / signal-kill. Encode and
+             * transition ZOMBIE → DEAD so reaper recycles slot. */
+            status = encode_wait_status(child->exit_code);
+            child->state = TASK_DEAD;
+        } else if (child->wait_change == WAIT_STOPPED) {
+            /* WUNTRACED report: child stays in TASK_STOPPED. Clear
+             * the pending-change flag so a re-wait doesn't report
+             * the same transition again (POSIX: report each stop
+             * exactly once). */
+            status = encode_stopped_status(19 /* SIGSTOP */);
+            child->wait_change = WAIT_NONE;
+        } else {
+            /* WAIT_CONTINUED: child is back in READY (or already
+             * RUNNING). Just clear the flag and report. */
+            status = WCONTINUED_STATUS;
+            child->wait_change = WAIT_NONE;
+        }
         if (u_status) {
             if (copy_to_user(u_status, &status, sizeof(status)) != OSNOS_OK) {
                 return err(OSNOS_EFAULT);
             }
         }
-        uint64_t reaped_pid = child->pid;
-        child->state = TASK_DEAD;
         return (int64_t)reaped_pid;
     }
 
-    /* No zombie ready. WNOHANG → poll-style return-0. */
+    /* No waitable child ready. WNOHANG → poll-style return-0. */
     if (options & WNOHANG) return 0;
 
     /*

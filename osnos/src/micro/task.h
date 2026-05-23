@@ -64,6 +64,21 @@ typedef struct task {
     int     *wait_status_ptr;     /* user-virtual */
 
     /*
+     * State-change tracking for WUNTRACED / WCONTINUED. POSIX
+     * requires waitpid to report state TRANSITIONS, not steady
+     * states: if a child stays STOPPED across multiple waitpid
+     * calls, only the FIRST should return its WIFSTOPPED status.
+     * This enum holds the pending change; cleared after the
+     * parent collects it (or never set if no transition occurred).
+     *
+     *   0 = WAIT_NONE      — no pending state-change report
+     *   1 = WAIT_STOPPED   — task just transitioned to STOPPED
+     *   2 = WAIT_CONTINUED — task just transitioned back to READY
+     *                       (from STOPPED via SIGCONT or sys_resume)
+     */
+    int      wait_change;
+
+    /*
      * Process group + session — POSIX job-control primitives (FASE
      * 10.6). Default after task_create: `pgid = pid; sid = pid;` so
      * a task that never calls setpgid/setsid is its own session

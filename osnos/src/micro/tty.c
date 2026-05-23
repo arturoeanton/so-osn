@@ -1,6 +1,7 @@
 #include "tty.h"
 
 #include "../drivers/framebuffer.h"
+#include "syscall.h"
 #include "task.h"
 
 /* ----- Module state ----- */
@@ -60,28 +61,51 @@ static void tty_echo_erase(void) {
  * kills the shell — only its running child. */
 extern uint64_t kernel_fg_pid;
 
-static void tty_signal(int sig) {
-    uint64_t pid = kernel_fg_pid;
-    if (pid == 0) return;
-    task_t *t = task_by_pid(pid);
+/* Deliver `sig` to one task. Helper used by tty_signal and
+ * tty_stop_signal so the broadcast loops below stay simple. */
+static void tty_deliver_one(task_t *t, int sig) {
     if (!t || !t->pml4) return;
-    if (sig < 1 || sig > 31) return;
-    /* Set bit in sig_pending; user_task_resume handles delivery
-     * (default = terminate; user handler if installed). Also flip
-     * kill_pending so the existing trampoline fast-path catches
-     * SIGINT/SIGTERM even before the next user_task_resume runs. */
     t->sig_pending |= 1u << (sig - 1);
     if (sig == 2 /* SIGINT */ || sig == 15 /* SIGTERM */) {
         t->kill_pending = 1;
     }
-    /* If the fg task is BLOCKED in a syscall, force-wake with EINTR
-     * so the syscall returns -1 + errno=EINTR (POSIX). */
     if (t->state == TASK_BLOCKED) {
         if (t->saved_valid) {
             t->saved_rax = (uint64_t)(int64_t)-(int64_t)4 /* OSNOS_EINTR */;
         }
         t->wakeup_at_ms = 0;
         t->state        = TASK_READY;
+    }
+}
+
+static void tty_signal(int sig) {
+    uint64_t fg_pid = kernel_fg_pid;
+    if (fg_pid == 0) return;
+    task_t *fg = task_by_pid(fg_pid);
+    if (!fg || !fg->pml4) return;
+    if (sig < 1 || sig > 31) return;
+
+    /* POSIX: Ctrl+C / Ctrl+\ / etc go to the ENTIRE foreground
+     * process group, not just the lead pid. Walk the task table
+     * and deliver to every task whose pgid matches the fg pid's
+     * pgid. If no setpgid has happened, pgid == pid trivially and
+     * only the one fg task is hit. With shellsrv setting up a
+     * pipeline, all members of the pgid die together (true
+     * job-control semantics). */
+    uint64_t fg_pgid = fg->pgid;
+    int delivered = 0;
+    for (size_t i = 0; i < MAX_TASKS; i++) {
+        task_t *u = (task_t *)task_slot(i);
+        if (!u) continue;
+        if (u->state == TASK_UNUSED || !u->pml4) continue;
+        if (u->pgid != fg_pgid) continue;
+        tty_deliver_one(u, sig);
+        delivered++;
+    }
+    if (delivered == 0) {
+        /* Fallback to single-pid delivery if pgid lookup yielded
+         * nothing (defensive — shouldn't normally happen). */
+        tty_deliver_one(fg, sig);
     }
     stat_signals++;
 }
@@ -101,24 +125,41 @@ static void tty_signal(int sig) {
  * returns immediately — the sleep effectively gets interrupted
  * with a normal-looking 0 return, which matches user intuition
  * after a Ctrl+Z. */
-static void tty_stop_signal(void) {
-    uint64_t pid = kernel_fg_pid;
-    if (pid == 0) return;
-    task_t *t = task_by_pid(pid);
+/* Stop one task — helper for the fan-out below. */
+static void tty_stop_one(task_t *t) {
     if (!t || !t->pml4) return;
     if (t->state == TASK_BLOCKED) {
-        /* Apply the stop transition directly. The trampoline (which
-         * normally consumes stop_pending and sets state=STOPPED) will
-         * not run until something resumes us, so we have to do the
-         * bookkeeping here. Leave stop_pending = 0 so the very first
-         * dispatch after fg/bg resumes cleanly instead of immediately
-         * re-stopping. */
-        t->state = TASK_STOPPED;
-    } else {
-        /* Running/ready/etc. Leave the flag set; the trampoline picks
-         * it up on the next dispatch and applies the transition + clear. */
+        t->state       = TASK_STOPPED;
+        t->wait_change = 1 /* WAIT_STOPPED */;
+        notify_parent_stop_continue(t);
+    } else if (t->state == TASK_READY || t->state == TASK_RUNNING) {
         t->stop_pending = 1;
     }
+    /* Already STOPPED / ZOMBIE / DEAD: nothing to do. */
+}
+
+static void tty_stop_signal(void) {
+    uint64_t fg_pid = kernel_fg_pid;
+    if (fg_pid == 0) return;
+    task_t *fg = task_by_pid(fg_pid);
+    if (!fg || !fg->pml4) return;
+
+    /* Broadcast Ctrl+Z to every task in the foreground process
+     * group (same logic as tty_signal for Ctrl+C). With a single
+     * fg task, pgid == pid so only it is stopped. With a pipeline
+     * in the same pgid, all stages stop together — POSIX-correct
+     * job control. */
+    uint64_t fg_pgid = fg->pgid;
+    int stopped = 0;
+    for (size_t i = 0; i < MAX_TASKS; i++) {
+        task_t *u = (task_t *)task_slot(i);
+        if (!u) continue;
+        if (u->state == TASK_UNUSED || !u->pml4) continue;
+        if (u->pgid != fg_pgid) continue;
+        tty_stop_one(u);
+        stopped++;
+    }
+    if (stopped == 0) tty_stop_one(fg);   /* defensive fallback */
     stat_signals++;
 
     ipc_msg_t msg;
@@ -126,7 +167,7 @@ static void tty_stop_signal(void) {
     msg.to      = SERVER_SHELL;
     msg.type    = IPC_PROC_STOPPED;
     msg.arg0    = 0;
-    msg.arg1    = pid;
+    msg.arg1    = fg_pid;
     msg.data[0] = 0;
     ipc_send(&msg);
 }

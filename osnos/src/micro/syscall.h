@@ -6,6 +6,9 @@
 #include "../include/osnos_ipc_abi.h"
 #include "../include/osnos_stat.h"
 
+struct task;
+typedef struct task task_t;
+
 /*
  * Linux x86_64 syscall numbers. Values match exactly. Numbers MUST NOT
  * be renumbered; new syscalls go at the next free Linux slot or above
@@ -224,6 +227,22 @@ int64_t sys_setsid (void);
  * signal arrived while blocked.
  */
 int64_t sys_wait4(int64_t pid, int *u_status, int options, void *u_rusage);
+
+/*
+ * Notify the parent (if any) that the given task just changed state
+ * (TASK_STOPPED or back to READY/RUNNING via SIGCONT-style resume).
+ *
+ * If the parent is BLOCKED in wait4 with appropriate options
+ * (WUNTRACED for STOPPED, WCONTINUED for CONTINUED), wake it,
+ * write the encoded status into its user *status pointer, set its
+ * saved_rax to the changed child's pid, and clear t->wait_change.
+ *
+ * Called from STOPPED-transition sites (tty_stop_signal + user_
+ * task_trampoline.stop_pending path) and from sys_resume / SIGCONT
+ * handling in sys_kill so wait4 with WUNTRACED/WCONTINUED Just Works
+ * across the shellsrv job-control flow.
+ */
+void notify_parent_stop_continue(task_t *t);
 
 /*
  * sys_rt_sigaction (#13) — Linux rt_sigaction.
