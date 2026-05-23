@@ -216,7 +216,7 @@ roadmap), mover los servidores debería ser mecánico.
 │   int 0x80 + syscall (LSTAR) → syscall_dispatch(frame)      │
 ├─────────────────────────────────────────────────────────────┤
 │ VFS: ramfs (/) │ sysfs (/sys) │ devfs (/dev: null/zero/fb0/ │
-│                │                  input0)                   │
+│                │                  input0/ptmx + pts/N)      │
 │      aliasfs (/home → /sd/home, /bin → /sd/bin)             │
 │      binfs (/bin fallback diskless) │ fat16 (/sd, sd.img)   │
 ├─────────────────────────────────────────────────────────────┤
