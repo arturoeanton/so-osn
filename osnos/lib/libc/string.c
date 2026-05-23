@@ -9,11 +9,21 @@ size_t strlen(const char *s) {
 }
 
 int strcmp(const char *a, const char *b) {
+    /* BSD-style NULL tolerance: NULL sorts before any non-NULL string.
+     * Strict POSIX says NULL is UB; we choose to be lenient because
+     * ported software (e.g. TinyCC) sometimes passes NULL from its
+     * argv parsing fall-throughs. */
+    if (a == b) return 0;
+    if (!a) return -1;
+    if (!b) return  1;
     while (*a && *a == *b) { a++; b++; }
     return (unsigned char)*a - (unsigned char)*b;
 }
 
 int strncmp(const char *a, const char *b, size_t n) {
+    if (a == b || n == 0) return 0;
+    if (!a) return -1;
+    if (!b) return  1;
     while (n-- > 0) {
         unsigned char ca = (unsigned char)*a++;
         unsigned char cb = (unsigned char)*b++;

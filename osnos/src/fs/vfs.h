@@ -109,7 +109,21 @@ typedef struct {
     osnos_status_t (*readdir)(void *priv, const char *path, size_t cursor,
                               vfs_dirent_t *out, size_t *next_cursor);
 
+    /*
+     * Read up to buf_size bytes starting at file offset `off` into
+     * `buf`. Backends that don't track real offsets (char devices,
+     * sysfs) ignore off and always return their current stream
+     * batch — sys_read handles those via the `is_chr` slot flag.
+     *
+     * Originally this took no offset and the caller (sys_read)
+     * read the whole file into a heap scratch and sliced. That
+     * was unusable for files > a few KB; FASE 11.0 (TCC) finally
+     * needed offset-native reads so callers can request arbitrary
+     * 8 KB chunks without copying 50 KB through the heap every
+     * time.
+     */
     osnos_status_t (*read)   (void *priv, const char *path,
+                              size_t off,
                               char *buf, size_t buf_size,
                               size_t *out_size);
 
@@ -172,6 +186,14 @@ osnos_status_t vfs_readdir(const char *path,
 osnos_status_t vfs_read(const char *path,
                         char *buf, size_t buf_size,
                         size_t *out_size);
+
+/* Offset-native read. Backend-direct path used by sys_read so we
+ * don't have to slurp the whole file every time. Char devices
+ * ignore `off`. */
+osnos_status_t vfs_read_at(const char *path,
+                           size_t off,
+                           char *buf, size_t buf_size,
+                           size_t *out_size);
 
 osnos_status_t vfs_write(const char *path,
                          const char *buf, size_t buf_size);

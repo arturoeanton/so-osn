@@ -2,6 +2,7 @@
 
 #include "../drivers/block_ata.h"
 #include "../lib/string.h"
+#include "../micro/kmalloc.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -1383,12 +1384,15 @@ int fat_write_path(const char *path, const char *buf, uint32_t len) {
 /* Append: cheap implementation. Read existing → tack on → rewrite.
  * Bounded by the 8 KiB scratch buffer; bigger appends fail. Enough
  * for `echo … >>` use-cases. */
-#define FAT_APPEND_SCRATCH 8192
+/* Heap-allocated append scratch: previously a static 8 KiB buffer
+ * which silently capped any file at 8 KiB total — broke TCC writing
+ * its ~50 KiB output ELF in 8 KiB chunks (second chunk returned
+ * ENOSPC, TCC ignored it, the disk ELF was truncated mid-header).
+ * Caller is sys_write which already bounds total at 4 MiB. */
+#define FAT_APPEND_LIMIT (4 * 1024 * 1024)
 
 int fat_append_path(const char *path, const char *buf, uint32_t len) {
     if (!fs_ready) return FAT_EIO;
-
-    static char scratch[FAT_APPEND_SCRATCH];
 
     fat_dirent_t de;
     int looked_up = fat_lookup(path, &de);
@@ -1397,17 +1401,26 @@ int fat_append_path(const char *path, const char *buf, uint32_t len) {
     if (looked_up == 0) {
         if (de.is_dir) return FAT_EISDIR;
         existing_size = de.size;
-        if (existing_size > FAT_APPEND_SCRATCH) return FAT_ENOSPC;
-        if (existing_size > 0) {
-            int n = fat_read_file(&de, 0, scratch, existing_size);
-            if (n < 0 || (uint32_t)n != existing_size) return FAT_EIO;
+    }
+    uint64_t total = (uint64_t)existing_size + (uint64_t)len;
+    if (total > FAT_APPEND_LIMIT) return FAT_ENOSPC;
+
+    char *scratch = (char *)kmalloc(total > 0 ? (size_t)total : 1);
+    if (!scratch) return FAT_EIO;
+
+    if (existing_size > 0) {
+        int n = fat_read_file(&de, 0, scratch, existing_size);
+        if (n < 0 || (uint32_t)n != existing_size) {
+            kfree(scratch);
+            return FAT_EIO;
         }
     }
-    if (existing_size + len > FAT_APPEND_SCRATCH) return FAT_ENOSPC;
     for (uint32_t i = 0; i < len; i++) {
         scratch[existing_size + i] = buf[i];
     }
-    return fat_write_path(path, scratch, existing_size + len);
+    int rc = fat_write_path(path, scratch, (uint32_t)total);
+    kfree(scratch);
+    return rc;
 }
 
 /* mkdir: create empty subdir cluster with "." and ".." entries. */

@@ -52,6 +52,9 @@ mini-libc propia para programas de usuario en ring 3.
    mini$ exit
    bye
    term: child exited with code 0
+   shellsrv:/$ tcc /home/hello.c -o /home/hello   # ¡SELF-HOSTING! 🎉
+   shellsrv:/$ /home/hello
+   hello from tcc on osnos!
 ```
 
 > **TL;DR para reentrar al proyecto después de meses:** instalar Limine
@@ -352,6 +355,8 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | **`/bin/less`** pager con `/pattern` + `n`/`N` highlight (pipe-mode: `cat foo \| less` drena stdin + `dup2(/dev/tty, 0)` para keyboard) | ✅ |
 | **`reboot(2)`** (#169 Linux ABI) + `/bin/poweroff` + `/bin/reboot` — ACPI S5 (port 0xB004) + 8042 keyboard reset; QEMU cierra limpio, propagable a CI | ✅ |
 | **`tail -f`** en `/bin/tail` — poll loop 200ms con EAGAIN/EINTR safe, Ctrl+C exit | ✅ |
+| **`/bin/readelf -a`** — ELF header + program headers inspector (LOAD/INTERP/DYNAMIC/...), debug ELFs desde dentro del guest | ✅ |
+| **🎉 FASE 11.0 — TinyCC self-hosting** (`/bin/tcc` 0.9.27 portado): compila programas C nativos desde dentro de osnos contra `/lib/libc.a` + `/usr/include/`. Produce ELFs estáticos runnable. `tcc hello.c -o hello && ./hello` funciona end-to-end. Patch crítico en TCC para que static-link convierta PLT32 → PC32 direct (sin GOT). VFS reads offset-native + heap-scratch FAT writes (rompieron caps de 1KB/8KB que silenciosamente truncaban files). | ✅ |
 | **15/15 tests automatizados** via `/bin/alltest` (kerntest, forktest, waittest, sigtest, sigchldtest, pgrouptest, spawntest, exectest, ofdtest, ptytest, fdedgetest, jobtest, termtest, serialtest, libctest) | ✅ |
 | **init-respawn watchdog** — consrv/kbdsrv/shellsrv auto-restart on death | ✅ |
 | Driver ATA PIO + FAT16 read/write + dir-chain extension + NT case-bits + persistencia | ✅ |
@@ -555,6 +560,24 @@ lejano y muy difícil de debuggear. Están repetidas en
 ## Roadmap
 
 Cerrado recientemente:
+
+- **FASE 11.0 — TinyCC port + self-hosting** (cerrada): `/bin/tcc`
+  (TinyCC 0.9.27 vendored a `vendor/tinycc/`) compila programas C
+  desde dentro de osnos. Stack completo: TCC source ~30K LOC
+  cross-compilado con USER_CFLAGS, libc gap-fill (`ldexp`, `strtod`,
+  `struct tm`, `fdopen`, `mprotect` no-op, `sscanf`, `gettimeofday`),
+  TCC headers osnos-trimmed (stdarg.h sin anon-union, stdint.h sin
+  builtins clang-only), aliasfs mounts `/lib + /usr → /sd/`, sysroot
+  con `crt1/crti/crtn/libc.a/libtcc1.a` en disco. **2 bugs críticos
+  de VFS encontrados**: `sys_read` truncaba files >1KB (stack scratch
+  1024B) → reescrito offset-native con `vfs_read_at(off)` API +
+  backend offset support en ramfs/fat/devfs/sysfs/binfs/aliasfs;
+  `fat_append_path` truncaba writes >8KB (static scratch) → reescrito
+  kmalloc 4MB cap. **Patch crítico en TCC**: static-link convierte
+  `R_X86_64_PLT32 → R_X86_64_PC32` direct cuando símbolo resuelto,
+  evita PLT/GOT vacíos que jumpaban a RIP=garbage sin dynamic loader.
+  Output: ELF EXEC limpio con solo LOAD segments. `tcc hello.c -o
+  hello && ./hello` end-to-end funcional. **osnos es self-hosting**.
 
 - **FASE 10 — Servers a ring 3** (cerrada completa): console + keyboard
   + shell viven como ELFs en `elfs/osn-server/`. kmain solo bootea

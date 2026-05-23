@@ -119,7 +119,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/tools/less.c \
     elfs/tools/poweroff.c \
     elfs/tools/reboot.c \
-    elfs/tools/tcc.c \
+    elfs/tools/readelf.c \
     elfs/tools/head.c \
     elfs/tools/env.c \
     elfs/tools/wc.c \
@@ -179,7 +179,8 @@ USER_ELF_LIBC_SRCS := \
     elfs/osn-server/shellsrv.c
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
-                 $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS))
+                 $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS)) \
+                 $(BUILD)/elfs/tools/tcc.elf
 
 # ---------------------------------------------------------------------------
 # Fase 2 disk-resident: split the embedded set into ROM (small, kept inside
@@ -246,7 +247,7 @@ SD_LONG_TXT   = hola con nombre largo
 # changes (so the disk always reflects the freshly compiled binaries).
 # Filenames inside ::/bin drop the .elf extension so they match the
 # exec lookup path (proc_execve("/bin/cat") → /sd/bin/cat via aliasfs).
-$(SD_IMG): $(USER_ELF_LIST) GNUmakefile
+$(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBTCC1_A) $(CRTI_O) $(CRTN_O) GNUmakefile
 	@command -v mformat >/dev/null 2>&1 || { echo "error: mtools (mformat/mcopy) not found. Install: brew install mtools / sudo apt install mtools" >&2; exit 1; }
 	@command -v mcopy   >/dev/null 2>&1 || { echo "error: mtools (mformat/mcopy) not found. Install: brew install mtools / sudo apt install mtools" >&2; exit 1; }
 	@command -v mmd     >/dev/null 2>&1 || { echo "error: mtools mmd not found." >&2; exit 1; }
@@ -255,12 +256,23 @@ $(SD_IMG): $(USER_ELF_LIST) GNUmakefile
 	mformat -i $@ ::
 	mmd -i $@ ::/bin
 	mmd -i $@ ::/home
+	mmd -i $@ ::/lib
+	mmd -i $@ ::/lib/tcc
+	mmd -i $@ ::/lib/tcc/include
+	mmd -i $@ ::/usr
+	mmd -i $@ ::/usr/include
+	mmd -i $@ ::/usr/include/sys
+	mmd -i $@ ::/usr/include/arpa
+	mmd -i $@ ::/usr/include/netinet
 	mkdir -p $(SD_TMP)
 	printf '%s\n' '$(SD_README_TXT)' > $(SD_TMP)/README.TXT
 	printf '%s\n' '$(SD_HELLO_TXT)'  > $(SD_TMP)/HELLO.TXT
 	printf '%s\n' '$(SD_LONG_TXT)'   > $(SD_TMP)/long.txt
 	printf '<!doctype html>\n<html><head><meta charset="utf-8"><title>osnos</title>\n<style>body{font-family:system-ui,sans-serif;max-width:40em;margin:3em auto;padding:1em;color:#222}h1{color:#0a0}code{background:#eee;padding:.2em .4em}</style></head>\n<body>\n<h1>Hola desde osnos</h1>\n<p>Esto es un servidor HTTP/1.0 corriendo como ELF ring-3 en osnos, sirviendo este archivo desde FAT16 en <code>/sd/index.html</code>.</p>\n<p>El path completo:</p>\n<ul>\n<li>Mac envia un GET via slirp NAT a guest:80</li>\n<li>RTL8139 driver entrega el frame</li>\n<li>eth -&gt; ip -&gt; tcp accept -&gt; recv en ring 3</li>\n<li>open + read del FAT16</li>\n<li>send con HTTP/1.0 200 OK y el HTML</li>\n</ul>\n</body></html>\n' > $(SD_TMP)/index.html
 	printf '# osnos shell startup — runs at every shellsrv boot.\n# Edit to add your own commands / env vars.\nbanner\nexport PATH=/bin\nexport HOME=/home\nexport SHELL=/bin/shellsrv\nexport OSNAME=osnos\n' > $(SD_TMP)/.oshrc
+	@# Seed a hello.c for TCC smoke testing — first thing you can do
+	@# after `tcc -v` is `tcc -o /home/hello /home/hello.c && hello`.
+	printf '#include <stdio.h>\n\nint main(void) {\n    printf("hello from tcc on osnos!\\n");\n    return 0;\n}\n' > $(SD_TMP)/hello.c
 	mcopy -i $@ $(SD_TMP)/README.TXT  ::/README.TXT
 	mcopy -i $@ $(SD_TMP)/HELLO.TXT   ::/HELLO.TXT
 	mcopy -i $@ $(SD_TMP)/long.txt    "::/My Long Filename.txt"
@@ -268,12 +280,36 @@ $(SD_IMG): $(USER_ELF_LIST) GNUmakefile
 	mcopy -i $@ $(SD_TMP)/README.TXT  ::/home/README.TXT
 	mcopy -i $@ $(SD_TMP)/HELLO.TXT   ::/home/HELLO.TXT
 	mcopy -i $@ $(SD_TMP)/.oshrc      ::/home/.oshrc
+	mcopy -i $@ $(SD_TMP)/hello.c     ::/home/hello.c
 	@# Copy every built ELF into /bin/, stripping the .elf extension so
 	@# shellsrv's PATH lookup finds /bin/cat (not /bin/cat.elf).
 	@for elf in $(USER_ELF_LIST); do \
 	    name=$$(basename $$elf .elf); \
 	    mcopy -i $@ -o $$elf ::/bin/$$name || exit 1; \
 	done
+	@# /lib — TCC sysroot: crt scaffolding + libc.a + libtcc1.a so
+	@# `tcc foo.c -o foo` finds them in the default search path.
+	mcopy -i $@ -o $(LIBC_CRT0)  ::/lib/crt1.o
+	mcopy -i $@ -o $(CRTI_O)     ::/lib/crti.o
+	mcopy -i $@ -o $(CRTN_O)     ::/lib/crtn.o
+	mcopy -i $@ -o $(LIBC_A)     ::/lib/libc.a
+	mcopy -i $@ -o $(LIBTCC1_A)  ::/lib/tcc/libtcc1.a
+	@# TCC's own builtin headers (stdarg.h, stddef.h, stdbool.h, ...)
+	@# — preferred over /usr/include/* because they use TCC-native
+	@# va_list, not clang's __builtin_va_list.
+	@for h in $(TCC_DIR)/include/*.h;     do mcopy -i $@ -o $$h ::/lib/tcc/include/ || exit 1; done
+	@# /usr/include — full osnos libc headers so `#include <stdio.h>`
+	@# resolves without -I. Copied flat per dir (mtools doesn't
+	@# recurse). Adding a new subdir requires an extra mmd above.
+	@for h in $(LIBC_INC)/*.h;            do mcopy -i $@ -o $$h ::/usr/include/         || exit 1; done
+	@for h in $(LIBC_INC)/sys/*.h;        do mcopy -i $@ -o $$h ::/usr/include/sys/     || exit 1; done
+	@for h in $(LIBC_INC)/arpa/*.h;       do mcopy -i $@ -o $$h ::/usr/include/arpa/    || exit 1; done
+	@for h in $(LIBC_INC)/netinet/*.h;    do mcopy -i $@ -o $$h ::/usr/include/netinet/ || exit 1; done
+	@# Compiler-provided freestanding headers (stdarg.h, stddef.h,
+	@# stdint.h, ...). The host clang puts them in cc-runtime / its
+	@# own resource dir; on osnos we ship them through the same VFS
+	@# so user programs compiled by TCC can `#include <stdarg.h>`.
+	@for h in $(FREESTD_INC)/*.h;         do mcopy -i $@ -o $$h ::/usr/include/         || exit 1; done
 	@echo "  GEN     $@ done — $$(ls $(USER_ELF_LIST) | wc -l | tr -d ' ') ELFs in /bin"
 	rm -rf $(SD_TMP)
 
@@ -353,6 +389,62 @@ $(BUILD)/elfs/%.elf: elfs/%.c elfs/libc.lds $(LIBC_A) $(LIBC_CRT0)
 	$(LD) $(USER_LDFLAGS) -T elfs/libc.lds \
 	    $(LIBC_CRT0) $@.tmp.o $(LIBC_A) -o $@
 	rm $@.tmp.o
+
+# --------------------------------------------------------------------------
+# TinyCC port — FASE 11.0. Vendor tree at vendor/tinycc/ (release 0.9.27).
+# Two compilation units: libtcc.c is the unity build (#includes tccpp.c,
+# tccgen.c, tccelf.c, x86_64-gen.c, x86_64-link.c, i386-asm.c, tccasm.c,
+# tccrun.c) and tcc.c is the CLI driver. -DONE_SOURCE in libtcc.c, =0 in
+# tcc.c so the unity-build symbols don't double-define when linking.
+#
+# Warning flags: -w because TCC's old (2017) source has many sign-
+# compare / format / unused warnings that -Werror would trip. Cleaner
+# to silence them all than to patch the upstream tree.
+# --------------------------------------------------------------------------
+TCC_DIR       := vendor/tinycc
+TCC_CPPFLAGS  := -I $(TCC_DIR) -DTCC_TARGET_X86_64 \
+                 -DCONFIG_TCC_STATIC=1 -DCONFIG_TCCBOOT=1
+
+$(BUILD)/$(TCC_DIR)/libtcc.c.o: $(TCC_DIR)/libtcc.c
+	mkdir -p "$(dir $@)"
+	$(CC) $(USER_CFLAGS) -w -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include $(TCC_CPPFLAGS) -DONE_SOURCE -c $< -o $@
+
+$(BUILD)/$(TCC_DIR)/tcc.c.o: $(TCC_DIR)/tcc.c
+	mkdir -p "$(dir $@)"
+	$(CC) $(USER_CFLAGS) -w -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include $(TCC_CPPFLAGS) -DONE_SOURCE=0 -c $< -o $@
+
+$(BUILD)/elfs/tools/tcc.elf: $(BUILD)/$(TCC_DIR)/tcc.c.o $(BUILD)/$(TCC_DIR)/libtcc.c.o elfs/libc.lds $(LIBC_A) $(LIBC_CRT0)
+	mkdir -p "$(dir $@)"
+	$(LD) $(USER_LDFLAGS) -T elfs/libc.lds \
+	    $(LIBC_CRT0) $(BUILD)/$(TCC_DIR)/tcc.c.o $(BUILD)/$(TCC_DIR)/libtcc.c.o $(LIBC_A) -o $@
+
+# libtcc1.a — TCC's runtime support library. Holds 64-bit divmod
+# helpers, soft-float conversion, alloca, etc. Compiled with the
+# same USER_CFLAGS as user ELFs so it's link-compatible. Lives in
+# /lib/tcc/libtcc1.a inside osnos at runtime.
+LIBTCC1_OBJS := $(BUILD)/$(TCC_DIR)/lib/libtcc1.c.o
+LIBTCC1_A    := $(BUILD)/$(TCC_DIR)/lib/libtcc1.a
+
+$(BUILD)/$(TCC_DIR)/lib/libtcc1.c.o: $(TCC_DIR)/lib/libtcc1.c
+	mkdir -p "$(dir $@)"
+	$(CC) $(USER_CFLAGS) -w -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include -c $< -o $@
+
+$(LIBTCC1_A): $(LIBTCC1_OBJS)
+	ar rcs $@ $^
+
+# crti.o / crtn.o stubs — empty .init / .fini sections so TCC's link
+# step finds the expected glibc-style scaffolding files. crt0.S
+# provides _start (acts as crt1.o).
+CRTI_O := $(BUILD)/lib/sysroot/crti.o
+CRTN_O := $(BUILD)/lib/sysroot/crtn.o
+
+$(CRTI_O): lib/sysroot/crti.S
+	mkdir -p "$(dir $@)"
+	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -c $< -o $@
+
+$(CRTN_O): lib/sysroot/crtn.S
+	mkdir -p "$(dir $@)"
+	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -c $< -o $@
 
 # Wrap each ELF blob in a relocatable .o. objcopy `cd`s into the build
 # directory so the resulting symbol is _binary_<basename>_elf_start,

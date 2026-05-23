@@ -17,6 +17,12 @@ long               strtol  (const char *s, char **endptr, int base);
 long long          strtoll (const char *s, char **endptr, int base);
 unsigned long      strtoul (const char *s, char **endptr, int base);
 unsigned long long strtoull(const char *s, char **endptr, int base);
+/* Floating point parsers. Used by TCC for FP literal constant
+ * folding; precision is "good enough for source-level constants",
+ * not bit-perfect IEEE round-to-nearest. */
+double             strtod  (const char *s, char **endptr);
+float              strtof  (const char *s, char **endptr);
+double             atof    (const char *s);
 
 int      abs  (int  n);
 long     labs (long n);

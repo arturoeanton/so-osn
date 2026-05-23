@@ -33,11 +33,13 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 |   shellsrv — line editor + history + pipes/redirects + jobs   |
 |              (registra SERVER_SHELL, ES EL shell del OS)       |
 +----------------------------------------------------------------+
-| ring-3 user tasks ~60 ELFs en /bin (coreutils + net + tests)   |
+| ring-3 user tasks ~80 ELFs en /bin (coreutils + net + tests)   |
 |   ls cat cp mv rm mkdir touch echo head tail wc grep sort      |
 |   uniq cut tr seq yes tee env pwd which printf date uname      |
 |   basename dirname clear tree banner calc top kill sleep ovi   |
-|   hello hello_libc tcc — httpd selectserver echotcp tcpclient  |
+|   less readelf poweroff reboot hello hello_libc — httpd        |
+|   selectserver echotcp tcpclient — term minishell (PTY demo)   |
+|   tcc (TinyCC 0.9.27 port — self-hosting tier, FASE 11.0)     |
 +----------------------------------------------------------------+
 |                 lib/libc — osnos mini-libc                      |
 |   stdio (FILE*, printf, fopen, fread/fwrite, fgets, snprintf), |
@@ -707,6 +709,72 @@ nuevo y lo encadena al dir cuando find_free_dir_slots_run pega
 ENOSPC. Permite subdirs grandes (los 64 ELFs viven en `/sd/bin/`
 sin problema).
 
+## TinyCC self-hosting (FASE 11.0)
+
+osnos ships a vendored TinyCC 0.9.27 at `vendor/tinycc/` cross-
+compiled into `/bin/tcc` (~1 MB ELF). A program written inside the
+guest can be edited with `ovi`, compiled with `tcc`, and run —
+no host involvement after the initial build of the osnos image.
+
+```
+[ring 3]  user types: tcc /home/foo.c -o /home/foo
+   ↓
+[ring 3]  shellsrv → osn_spawn("/bin/tcc", "/home/foo.c -o /home/foo")
+   ↓
+[ring 3]  tcc.elf (TinyCC, 0.9.27 with osnos patches) starts
+   |
+   |  1. parse argv, default_static_link=1 (CONFIG_TCCBOOT path)
+   |  2. open /home/foo.c via libc → sys_open → fat_vfs → FAT16
+   |  3. preprocess: chase #include <stdio.h>
+   |      |  search path: /lib/tcc/include (TCC's own headers) then
+   |      |               /usr/include (osnos libc + freestnd-c-hdrs)
+   |      |  → /lib/tcc/include/stdarg.h (TCC-friendly va_list)
+   |      |  → /usr/include/stdio.h (osnos libc)
+   |      |  → /lib/tcc/include/stdint.h (LP64 explicit types)
+   |  4. parse + codegen: tccgen.c builds in-memory ELF sections
+   |      | .text per-function (.text.printf, .text.fopen, ...)
+   |      | .rela.text relocations for cross-section calls
+   |  5. link: pull /lib/libc.a, /lib/tcc/libtcc1.a, /lib/crt[1in].o
+   |      | resolve undefined refs against libc archive members
+   |      | OSnOS PATCH: when static_link && output_type==EXE,
+   |      |   rewrite R_X86_64_PLT32 → R_X86_64_PC32 direct (no PLT)
+   |  6. emit ELF: tcc_output_file writes ELF header + 2 LOAD
+   |      | program headers (text RE + data RW) — NO .dynamic,
+   |      | NO .interp, NO .plt. Entry = _start (crt1.o = osnos
+   |      | crt0.S.o).
+   |  7. fopen("/home/foo", "w") → sys_write → fat_vfs_append
+   |      | (FASE 11.0 kmalloc heap scratch, was static 8KB cap)
+   ↓
+[ring 3]  user runs: /home/foo
+[ring 0]  sys_execve → proc_execve_replace → elf_load(blob, ...)
+   |  validates ehdr (ET_EXEC, X86_64), walks PT_LOAD entries,
+   |  allocates pages, copies file content + zero-fills BSS,
+   |  maps user stack at USER_STACK_TOP, returns entry+stack.
+   ↓
+[ring 3]  /home/foo starts at its _start, prints "hello from tcc!"
+```
+
+**Two VFS bugs the TCC port flushed out** (fixed in same FASE):
+- **sys_read** had `char tmp[1024]` stack scratch + reads whole
+  file → files >1 KiB silently truncated. New `vfs_read_at(off)`
+  API + per-backend offset support drops slurp-then-slice and reads
+  exactly `count` bytes from `off`. ~10× faster for incremental
+  reads (TCC reads headers in 8 KiB chunks).
+- **fat_append_path** had `static char scratch[8192]` → files
+  capped at 8 KiB on disk. TCC's 50 KB ELF output got truncated
+  mid-header. New: `kmalloc(existing+len)` heap scratch with 4 MiB
+  cap.
+
+**Two TCC behaviours that needed patches**:
+- TCC's PLT/GOT emission persists in static-link mode (no dynamic
+  loader can resolve them) → `R_X86_64_PLT32` rewritten to direct
+  `R_X86_64_PC32` when `static_link && output_type==EXE && symbol
+  resolved`. Eliminates `.plt`+`.got` entirely from output ELFs.
+- TCC's stock `stdarg.h` uses anonymous unions that its own
+  preprocessor mis-parses (yields "missing #endif" cascades).
+  Trimmed to a flat struct + no line-continuations in
+  `vendor/tinycc/include/stdarg.h`.
+
 ## Shutdown / reboot (FASE 10.7 polish)
 
 `sys_reboot` (#169 Linux ABI) en `src/micro/syscall.c` da control de
@@ -1118,3 +1186,12 @@ vfs_stat("/bin/hello")
 Aliasfs es trivial (rewrite + delegate); fat es el único backend
 con state real (BPB, FAT, ATA reads). Sysfs/devfs/binfs son
 synthetic — generan respuestas on-demand sin storage.
+
+**Offset-native reads (FASE 11.0)**: `vfs_ops_t.read` recibe un
+`off` parameter; cada backend honra el offset (`fat_read_file` lo
+propaga al cluster walk, ramfs/sysfs/binfs slicean en buffer-local,
+devfs lo ignora porque sus streams no tienen offset). Hay también
+`vfs_read_at()` API pública para callers que necesitan random
+access. Esto reemplazó al esquema viejo de "leer file entero a
+scratch + slicear" que tenía un cap silencioso de 1 KiB en sys_read
+— eso fue lo que TCC's port destapó como el primer big bug.

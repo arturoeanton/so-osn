@@ -44,6 +44,7 @@ extern FILE *const stderr;
 
 /* fopen / freopen / fclose ----------------------------------------- */
 FILE *fopen  (const char *path, const char *mode);
+FILE *fdopen (int fd, const char *mode);
 FILE *freopen(const char *path, const char *mode, FILE *f);
 int   fclose (FILE *f);
 
@@ -102,6 +103,8 @@ int  vfprintf(FILE *f, const char *fmt, va_list ap);
 int  snprintf (char *buf, size_t size, const char *fmt, ...)
      __attribute__((format(printf, 3, 4)));
 int  vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
+
+int  sscanf   (const char *str, const char *fmt, ...);
 
 int  sprintf  (char *buf, const char *fmt, ...)
      __attribute__((format(printf, 2, 3)));

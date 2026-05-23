@@ -26,3 +26,8 @@
 void *mmap (void *addr, size_t length, int prot, int flags,
             int fd, off_t offset);
 int   munmap(void *addr, size_t length);
+
+/* mprotect — no-op on osnos. We don't enforce W^X (every user page is
+ * effectively RWX once mapped), so callers that want to mark JIT'd
+ * pages executable get a successful no-op. Returns 0. */
+int   mprotect(void *addr, size_t length, int prot);

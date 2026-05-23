@@ -78,6 +78,7 @@ static osnos_status_t fat_vfs_readdir(void *priv, const char *path,
 }
 
 static osnos_status_t fat_vfs_read(void *priv, const char *path,
+                                    size_t off,
                                     char *buf, size_t buf_size,
                                     size_t *out_size) {
     (void)priv;
@@ -88,8 +89,12 @@ static osnos_status_t fat_vfs_read(void *priv, const char *path,
     if (fat_lookup(rel, &de) != 0) return OSNOS_ENOENT;
     if (de.is_dir) return OSNOS_EISDIR;
 
-    uint32_t len = (buf_size > 0xFFFFFFFFu) ? 0xFFFFFFFFu : (uint32_t)buf_size;
-    int n = fat_read_file(&de, 0, buf, len);
+    /* Past EOF → 0 bytes (no error). */
+    if (off >= de.size) { *out_size = 0; return OSNOS_OK; }
+    uint32_t avail = (uint32_t)(de.size - off);
+    uint32_t len   = (buf_size > avail) ? avail : (uint32_t)buf_size;
+
+    int n = fat_read_file(&de, (uint32_t)off, buf, len);
     if (n < 0) return OSNOS_EIO;
     *out_size = (size_t)n;
     return OSNOS_OK;

@@ -24,10 +24,13 @@ static void seed_if_absent(const char *path, const char *content) {
     seed_file(path, content);
 }
 
-/* Storage for the /home → /sd/home and /bin → /sd/bin bind mounts.
- * Lives in BSS — the VFS layer keeps pointers into here. */
+/* Storage for the /home → /sd/home, /bin → /sd/bin, /lib → /sd/lib,
+ * /usr → /sd/usr bind mounts. Lives in BSS — the VFS layer keeps
+ * pointers into here. */
 static aliasfs_t home_alias_slot;
 static aliasfs_t bin_alias_slot;
+static aliasfs_t lib_alias_slot;
+static aliasfs_t usr_alias_slot;
 
 /* Walk the embedded ELF registry and write each blob into /sd/bin/<name>
  * if the file isn't already there. With FASE2-1's dir-chain extension
@@ -133,6 +136,18 @@ void bootstrap_fs(void) {
         seed_disk_bin();
         if (aliasfs_init(&bin_alias_slot, "/bin", "/sd/bin")) {
             vfs_mount("/bin", &aliasfs_ops, &bin_alias_slot);
+        }
+        /* /lib + /usr aliasfs mounts: FASE 11.0 ships the TCC
+         * sysroot (crt1/crti/crtn/libc.a/libtcc1.a + libc headers)
+         * pre-populated at /sd/lib and /sd/usr by the build script
+         * (GNUmakefile target sd.img). TCC's hardcoded search
+         * paths (`/lib`, `/usr/include` from vendor/tinycc/config.h)
+         * resolve here. */
+        if (aliasfs_init(&lib_alias_slot, "/lib", "/sd/lib")) {
+            vfs_mount("/lib", &aliasfs_ops, &lib_alias_slot);
+        }
+        if (aliasfs_init(&usr_alias_slot, "/usr", "/sd/usr")) {
+            vfs_mount("/usr", &aliasfs_ops, &usr_alias_slot);
         }
     } else {
         vfs_mount("/bin", &binfs_vfs_ops, 0);

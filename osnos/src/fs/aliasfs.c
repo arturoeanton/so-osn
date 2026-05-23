@@ -76,12 +76,12 @@ static osnos_status_t alias_readdir(void *priv, const char *path,
 }
 
 static osnos_status_t alias_read(void *priv, const char *path,
+                                   size_t off,
                                    char *buf, size_t buf_size,
                                    size_t *out_size) {
     char xlat[OSNOS_PATH_MAX];
     if (!translate(priv, path, xlat, sizeof(xlat))) return OSNOS_ENOENT;
-    osnos_status_t s = vfs_read(xlat, buf, buf_size, out_size);
-    return s;
+    return vfs_read_at(xlat, off, buf, buf_size, out_size);
 }
 
 static osnos_status_t alias_write(void *priv, const char *path,

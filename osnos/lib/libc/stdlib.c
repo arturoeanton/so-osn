@@ -104,6 +104,64 @@ unsigned long long strtoull(const char *s, char **endptr, int base) {
     return neg ? -v : v;
 }
 
+/* strtod — parses a decimal floating-point literal, optionally with
+ * a fractional part and a [eE]±digits exponent. Not IEEE-perfect
+ * (no Grisu/Ryu); good enough for TCC's constant folding and shell
+ * arithmetic. Hex floats (0x1.fp10) are NOT supported. */
+double strtod(const char *s, char **endptr) {
+    if (!s) { if (endptr) *endptr = (char *)s; return 0.0; }
+    while (*s == ' ' || *s == '\t') s++;
+    int neg = 0;
+    if (*s == '+') s++;
+    else if (*s == '-') { neg = 1; s++; }
+
+    double v = 0.0;
+    int any = 0;
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10.0 + (double)(*s - '0');
+        s++; any = 1;
+    }
+    if (*s == '.') {
+        s++;
+        double scale = 0.1;
+        while (*s >= '0' && *s <= '9') {
+            v += (double)(*s - '0') * scale;
+            scale *= 0.1;
+            s++; any = 1;
+        }
+    }
+    if (any && (*s == 'e' || *s == 'E')) {
+        s++;
+        int esign = 1;
+        if (*s == '+') s++;
+        else if (*s == '-') { esign = -1; s++; }
+        int exp_v = 0;
+        while (*s >= '0' && *s <= '9') {
+            exp_v = exp_v * 10 + (*s - '0');
+            s++;
+        }
+        /* v *= 10^(esign*exp_v) via repeated mul — fine up to ~1e308. */
+        double p = 1.0;
+        for (int i = 0; i < exp_v; i++) p *= 10.0;
+        if (esign < 0) v /= p; else v *= p;
+    }
+    if (endptr) *endptr = (char *)s;
+    return neg ? -v : v;
+}
+
+float strtof(const char *s, char **endptr) {
+    return (float)strtod(s, endptr);
+}
+
+/* osnos doesn't have a distinct `long double` precision (clang lowers
+ * `long double` to `double` on x86_64-elf without 80-bit FP), so
+ * strtold is just strtod. */
+long double strtold(const char *s, char **endptr) {
+    return (long double)strtod(s, endptr);
+}
+
+double atof(const char *s) { return strtod(s, 0); }
+
 int       abs  (int       n) { return n < 0 ? -n : n; }
 long      labs (long      n) { return n < 0 ? -n : n; }
 long long llabs(long long n) { return n < 0 ? -n : n; }

@@ -199,7 +199,25 @@ osnos_status_t vfs_read(
     if (!m) return OSNOS_ENOENT;
     if (!m->ops->read) return OSNOS_EINVAL;
 
-    return m->ops->read(m->priv, path, buf, buf_size, out_size);
+    return m->ops->read(m->priv, path, 0, buf, buf_size, out_size);
+}
+
+osnos_status_t vfs_read_at(
+    const char *path,
+    size_t off,
+    char *buf,
+    size_t buf_size,
+    size_t *out_size
+) {
+    osnos_status_t s = check_path(path);
+    if (s != OSNOS_OK) return s;
+    if (!buf || !out_size) return OSNOS_EINVAL;
+
+    const vfs_mount_t *m = find_mount(path);
+    if (!m) return OSNOS_ENOENT;
+    if (!m->ops->read) return OSNOS_EINVAL;
+
+    return m->ops->read(m->priv, path, off, buf, buf_size, out_size);
 }
 
 osnos_status_t vfs_write(

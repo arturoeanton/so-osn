@@ -426,35 +426,32 @@ int64_t sys_read(int fd, void *buf, size_t count) {
     if (access == O_WRONLY) return err(OSNOS_EBADF);
 
     /*
-     * Read entire file via VFS into a stack scratch buffer, then copy
-     * the requested slice from offset. Inefficient but correct; will
-     * become offset-native when backends grow read_at(offset).
+     * Char device: each backend call returns a fresh batch (one
+     * keyboard event, the current FB span, etc.). Bypass the
+     * offset-based slicing — a small stack scratch is enough since
+     * char-device payloads are by design small per call.
      */
-    char tmp[1024];
-    size_t got = 0;
-    osnos_status_t s = vfs_read(f->path, tmp, sizeof(tmp), &got);
-    if (s != OSNOS_OK) return err(s);
-
-    /* Character devices are streams — each backend call produces a
-     * fresh batch of bytes (one keyboard event, the current FB span,
-     * etc.). Bypass the offset-based slicing so the second read
-     * doesn't see "offset >= got" and report a spurious EOF. */
     if (f->is_chr) {
+        char tmp[1024];
+        size_t got = 0;
+        osnos_status_t s = vfs_read(f->path, tmp, sizeof(tmp), &got);
+        if (s != OSNOS_OK) return err(s);
         size_t n = (count < got) ? count : got;
         char *out = (char *)buf;
         for (size_t i = 0; i < n; i++) out[i] = tmp[i];
         return (int64_t)n;
     }
 
-    if (f->offset >= got) return 0;
-
-    size_t remaining = got - f->offset;
-    size_t n = (count < remaining) ? count : remaining;
-
-    char *out = (char *)buf;
-    for (size_t i = 0; i < n; i++) out[i] = tmp[f->offset + i];
-    f->offset += n;
-    return (int64_t)n;
+    /* Regular file: offset-native read straight into the user
+     * buffer via the backend. No more "slurp whole file into a
+     * heap scratch and slice" — that was O(file_size) per read
+     * call and broke TCC's 50 KB header reads. Now O(count). */
+    size_t got = 0;
+    osnos_status_t s = vfs_read_at(f->path, f->offset,
+                                    (char *)buf, count, &got);
+    if (s != OSNOS_OK) return err(s);
+    f->offset += got;
+    return (int64_t)got;
 }
 
 /* ------------------------------------------------------------------ */

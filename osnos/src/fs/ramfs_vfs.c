@@ -64,6 +64,7 @@ static osnos_status_t ramfs_vfs_readdir(
 static osnos_status_t ramfs_vfs_read(
     void *priv,
     const char *path,
+    size_t off,
     char *buf,
     size_t buf_size,
     size_t *out_size
@@ -74,11 +75,12 @@ static osnos_status_t ramfs_vfs_read(
     if (!f) return OSNOS_ENOENT;
     if (f->is_dir) return OSNOS_EISDIR;
 
-    size_t n = f->size;
-    if (n > buf_size) n = buf_size;
+    if (off >= f->size) { *out_size = 0; return OSNOS_OK; }
+    size_t avail = f->size - off;
+    size_t n = avail < buf_size ? avail : buf_size;
 
     for (size_t i = 0; i < n; i++) {
-        buf[i] = f->data[i];
+        buf[i] = f->data[off + i];
     }
 
     *out_size = n;

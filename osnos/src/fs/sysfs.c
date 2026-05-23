@@ -569,6 +569,7 @@ static osnos_status_t sysfs_readdir(
 
 static osnos_status_t sysfs_read(
     void *priv, const char *path,
+    size_t off,
     char *buf, size_t buf_size, size_t *out_size
 ) {
     (void)priv;
@@ -584,8 +585,10 @@ static osnos_status_t sysfs_read(
     e->gen(tmp, sizeof(tmp));
 
     size_t len = os_strlen(tmp);
-    size_t n = (len > buf_size) ? buf_size : len;
-    for (size_t i = 0; i < n; i++) buf[i] = tmp[i];
+    if (off >= len) { *out_size = 0; return OSNOS_OK; }
+    size_t avail = len - off;
+    size_t n = (avail > buf_size) ? buf_size : avail;
+    for (size_t i = 0; i < n; i++) buf[i] = tmp[off + i];
     *out_size = n;
     return OSNOS_OK;
 }

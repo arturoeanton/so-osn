@@ -68,6 +68,7 @@ static osnos_status_t binfs_readdir(
 
 static osnos_status_t binfs_read(
     void *priv, const char *path,
+    size_t off,
     char *buf, size_t buf_size, size_t *out_size
 ) {
     (void)priv;
@@ -82,8 +83,10 @@ static osnos_status_t binfs_read(
         char tmp[128];
         make_description(b, tmp, sizeof(tmp));
         size_t len = os_strlen(tmp);
-        size_t n = (len > buf_size) ? buf_size : len;
-        for (size_t k = 0; k < n; k++) buf[k] = tmp[k];
+        if (off >= len) { *out_size = 0; return OSNOS_OK; }
+        size_t avail = len - off;
+        size_t n = (avail > buf_size) ? buf_size : avail;
+        for (size_t k = 0; k < n; k++) buf[k] = tmp[off + k];
         *out_size = n;
         return OSNOS_OK;
     }

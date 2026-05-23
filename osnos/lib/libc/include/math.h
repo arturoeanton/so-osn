@@ -44,6 +44,11 @@ double exp  (double x);
 double log  (double x);
 double log2 (double x);
 double log10(double x);
+/* ldexp: x * 2^n. Used by TCC's preprocessor when constant-folding
+ * decimal FP literals like 1.5e10 — frequently in a row, so worth
+ * having even though it's trivial. */
+double ldexp(double x, int n);
+float  ldexpf(float x, int n);
 
 double sin  (double x);
 double cos  (double x);

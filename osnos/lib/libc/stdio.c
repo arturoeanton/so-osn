@@ -214,6 +214,16 @@ FILE *fopen(const char *path, const char *mode) {
     return f;
 }
 
+/* fdopen — wrap an existing fd as a FILE*. Mode string is parsed
+ * the same as fopen but only as a sanity check; the kernel's fd
+ * already has the actual open mode locked in. The returned FILE*
+ * fcloses the underlying fd on `fclose(f)` (same as fopen). */
+FILE *fdopen(int fd, const char *mode) {
+    if (fd < 0) { errno = EBADF; return NULL; }
+    if (parse_mode(mode) < 0) { errno = EINVAL; return NULL; }
+    return wrap_fd(fd);
+}
+
 FILE *tmpfile(void) {
     /* mkstemp creates /tmp/tmpf-XXXXXX with O_RDWR | O_CREAT |
      * O_EXCL. The file is NOT auto-deleted on fclose (see header
@@ -788,4 +798,107 @@ int sprintf(char *buf, const char *fmt, ...) {
     int n = vsprintf(buf, fmt, ap);
     va_end(ap);
     return n;
+}
+
+/* Minimal sscanf — supports the subset osnos callers (TCC, libctest)
+ * actually use today: `%d`, `%u`, `%x`, `%s`, `%c`, plus optional
+ * width prefix (`%32s`). Whitespace in `fmt` skips runs of whitespace
+ * in input. No %f, no %n, no length modifiers. Returns the number of
+ * successful conversions (POSIX). */
+int sscanf(const char *str, const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    int matched = 0;
+    const char *s = str, *f = fmt;
+    while (*f) {
+        if (*f == ' ' || *f == '\t' || *f == '\n') {
+            while (*s == ' ' || *s == '\t' || *s == '\n') s++;
+            f++; continue;
+        }
+        if (*f != '%') {
+            if (*s != *f) goto done;
+            s++; f++; continue;
+        }
+        f++;
+        int width = 0;
+        while (*f >= '0' && *f <= '9') { width = width * 10 + (*f - '0'); f++; }
+        if (width == 0) width = -1;
+        char conv = *f++;
+        switch (conv) {
+        case 'd': case 'i': {
+            while (*s == ' ' || *s == '\t') s++;
+            int *out = va_arg(ap, int *);
+            int neg = 0;
+            if (*s == '-') { neg = 1; s++; }
+            else if (*s == '+') { s++; }
+            if (*s < '0' || *s > '9') goto done;
+            int v = 0;
+            while (*s >= '0' && *s <= '9' && width--) {
+                v = v * 10 + (*s - '0'); s++;
+            }
+            *out = neg ? -v : v;
+            matched++;
+            break;
+        }
+        case 'u': {
+            while (*s == ' ' || *s == '\t') s++;
+            unsigned *out = va_arg(ap, unsigned *);
+            if (*s < '0' || *s > '9') goto done;
+            unsigned v = 0;
+            while (*s >= '0' && *s <= '9' && width--) {
+                v = v * 10 + (unsigned)(*s - '0'); s++;
+            }
+            *out = v;
+            matched++;
+            break;
+        }
+        case 'x': case 'X': {
+            while (*s == ' ' || *s == '\t') s++;
+            unsigned *out = va_arg(ap, unsigned *);
+            if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+            unsigned v = 0;
+            int any = 0;
+            while (width--) {
+                char c = *s;
+                unsigned d;
+                if (c >= '0' && c <= '9')      d = (unsigned)(c - '0');
+                else if (c >= 'a' && c <= 'f') d = (unsigned)(c - 'a' + 10);
+                else if (c >= 'A' && c <= 'F') d = (unsigned)(c - 'A' + 10);
+                else break;
+                v = (v << 4) | d; s++; any = 1;
+            }
+            if (!any) goto done;
+            *out = v;
+            matched++;
+            break;
+        }
+        case 's': {
+            while (*s == ' ' || *s == '\t') s++;
+            char *out = va_arg(ap, char *);
+            if (!*s) goto done;
+            int n = 0;
+            while (*s && *s != ' ' && *s != '\t' && *s != '\n' && width--) {
+                out[n++] = *s++;
+            }
+            out[n] = 0;
+            matched++;
+            break;
+        }
+        case 'c': {
+            char *out = va_arg(ap, char *);
+            if (width < 0) width = 1;
+            for (int i = 0; i < width && *s; i++) out[i] = *s++;
+            matched++;
+            break;
+        }
+        case '%':
+            if (*s != '%') goto done;
+            s++;
+            break;
+        default:
+            goto done;
+        }
+    }
+done:
+    va_end(ap);
+    return matched;
 }

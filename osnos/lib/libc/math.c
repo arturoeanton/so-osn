@@ -129,6 +129,23 @@ double log(double x) {
 double log2 (double x) { return log(x) / M_LN2;  }
 double log10(double x) { return log(x) / M_LN10; }
 
+/* ldexp: multiply by a power of two by adjusting the IEEE 754 exponent
+ * field directly when possible. Falls back to repeated mul/div when n
+ * is out of the normal range so the result is still numerically OK. */
+double ldexp(double x, int n) {
+    if (x == 0.0 || n == 0) return x;
+    /* Saturate huge n into a series of bounded shifts to avoid
+     * trying to construct a sub-/super-normal exponent in one step. */
+    while (n >  1023) { x *= 2.0; n -= 1; }
+    while (n < -1022) { x *= 0.5; n += 1; }
+    /* Build 2^n with bias 1023, then multiply. */
+    union { double d; unsigned long long u; } pow2;
+    pow2.u = ((unsigned long long)(n + 1023)) << 52;
+    return x * pow2.d;
+}
+
+float ldexpf(float x, int n) { return (float)ldexp((double)x, n); }
+
 double pow(double base, double exp_) {
     if (base == 0) return exp_ == 0 ? 1.0 : 0.0;
     /* For non-positive bases skip log path; integer exponents only. */

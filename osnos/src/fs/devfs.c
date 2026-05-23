@@ -257,9 +257,14 @@ static osnos_status_t devfs_readdir(
 
 static osnos_status_t devfs_read(
     void *priv, const char *path,
+    size_t off,
     char *buf, size_t buf_size, size_t *out_size
 ) {
     (void)priv;
+    /* Char devices are streams — `off` is meaningless; we ignore
+     * it. sys_read flags the fd with is_chr=true so it doesn't
+     * advance an offset for these either. */
+    (void)off;
 
     const char *name = entry_name(path);
     if (!name) return OSNOS_ENOENT;
