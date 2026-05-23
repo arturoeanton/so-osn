@@ -162,6 +162,16 @@ long double strtold(const char *s, char **endptr) {
 
 double atof(const char *s) { return strtod(s, 0); }
 
+/* system: osnos has no shell-exec for ring-3. Apps that want a
+ * subprocess go via fork+execve directly. Returning -1 for any
+ * non-NULL command and 0 for the "is a command processor
+ * available?" probe (cmd==NULL) lets ISO C callers proceed
+ * gracefully. */
+int system(const char *cmd) {
+    if (!cmd) return 0;
+    return -1;
+}
+
 int       abs  (int       n) { return n < 0 ? -n : n; }
 long      labs (long      n) { return n < 0 ? -n : n; }
 long long llabs(long long n) { return n < 0 ? -n : n; }

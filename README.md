@@ -52,9 +52,16 @@ mini-libc propia para programas de usuario en ring 3.
    mini$ exit
    bye
    term: child exited with code 0
-   shellsrv:/$ tcc /home/hello.c -o /home/hello   # ¡SELF-HOSTING! 🎉
+   shellsrv:/$ tcc /home/hello.c -o /home/hello   # ¡SELF-HOSTING C! 🎉
    shellsrv:/$ /home/hello
    hello from tcc on osnos!
+   shellsrv:/$ lua                                # ¡Lua 5.4 REPL!
+   Lua 5.4.7  Copyright (C) 1994-2024 Lua.org, PUC-Rio
+   > print("hello from lua on osnos")
+   hello from lua on osnos
+   > = math.sqrt(2)
+   1.4142135623731
+   > os.exit()
 ```
 
 > **TL;DR para reentrar al proyecto después de meses:** instalar Limine
@@ -356,8 +363,10 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | **`reboot(2)`** (#169 Linux ABI) + `/bin/poweroff` + `/bin/reboot` — ACPI S5 (port 0xB004) + 8042 keyboard reset; QEMU cierra limpio, propagable a CI | ✅ |
 | **`tail -f`** en `/bin/tail` — poll loop 200ms con EAGAIN/EINTR safe, Ctrl+C exit | ✅ |
 | **`/bin/readelf -a`** — ELF header + program headers inspector (LOAD/INTERP/DYNAMIC/...), debug ELFs desde dentro del guest | ✅ |
-| **🎉 FASE 11.0 — TinyCC self-hosting** (`/bin/tcc` 0.9.27 portado): compila programas C nativos desde dentro de osnos contra `/lib/libc.a` + `/usr/include/`. Produce ELFs estáticos runnable. `tcc hello.c -o hello && ./hello` funciona end-to-end. Patch crítico en TCC para que static-link convierta PLT32 → PC32 direct (sin GOT). VFS reads offset-native + heap-scratch FAT writes (rompieron caps de 1KB/8KB que silenciosamente truncaban files). | ✅ |
-| **15/15 tests automatizados** via `/bin/alltest` (kerntest, forktest, waittest, sigtest, sigchldtest, pgrouptest, spawntest, exectest, ofdtest, ptytest, fdedgetest, jobtest, termtest, serialtest, libctest) | ✅ |
+| **🎉 FASE 11.0 — TinyCC self-hosting** (`/bin/tcc` 0.9.27 portado): compila programas C nativos desde dentro de osnos contra `/lib/libc.a` + `/usr/include/`. Produce ELFs estáticos runnable. `tcc hello.c -o hello && ./hello` funciona end-to-end. Patch crítico en TCC para que static-link convierta PLT32 → PC32 direct (sin GOT). | ✅ |
+| **FASE 11.1 polish — FAT true append + offset-native VFS + caching**: O(N) RMW reemplazado con cluster-chain extend O(len); FAT-sector cache en fat_get_entry; BUFSIZ 512→4096. TCC compile time pasó de "tarda mucho" a **instantáneo**. `/bin/readelf -S` para sección headers. | ✅ |
+| **🎉 FASE 11.2 — Lua 5.4 self-host** (`/bin/lua` Lua 5.4.7 portado): segundo lenguaje en osnos. REPL interactivo + ejecución de scripts. `ovi script.lua && lua script.lua` end-to-end. Libc gap-fill: `locale.h`, `frexp`/`modf`/`asin`/`acos`/`sinh`/`cosh`/`tanh`, `clock`/`mktime`/`strftime`/`difftime`, `system` stub. | ✅ |
+| **17/17 tests automatizados** via `/bin/alltest` (kerntest, forktest, waittest, sigtest, sigchldtest, pgrouptest, spawntest, exectest, ofdtest, ptytest, fdedgetest, jobtest, termtest, serialtest, tcctest, luatest, libctest) | ✅ |
 | **init-respawn watchdog** — consrv/kbdsrv/shellsrv auto-restart on death | ✅ |
 | Driver ATA PIO + FAT16 read/write + dir-chain extension + NT case-bits + persistencia | ✅ |
 | **/bin disk-resident** — sd.img poblado al build via mtools, kernel binary 1.1 MB (era 7.6 MB) | ✅ |
@@ -560,6 +569,25 @@ lejano y muy difícil de debuggear. Están repetidas en
 ## Roadmap
 
 Cerrado recientemente:
+
+- **FASE 11.2 — Lua 5.4 port** (cerrada): `/bin/lua` (Lua 5.4.7
+  vendored a `vendor/lua/`) — REPL interactivo + script runner.
+  Segundo lenguaje self-host (después de C/TCC). Compilado con
+  `LUA_USE_C89` path (ISO C only) — no signal handlers, no readline,
+  no popen, no os.execute. Libc gap-fill: `locale.h/c` (C-locale
+  stub), math.h gana `asin/acos/sinh/cosh/tanh/frexp/modf`,
+  time.h gana `clock/mktime/difftime/strftime`, stdlib gana
+  `system` stub, stdio gana `tmpnam/remove/L_tmpnam`. `/bin/luatest`
+  smoke automatizado. Hito: osnos ahora ejecuta scripts Lua
+  interactivamente sin tocar host.
+
+- **FASE 11.1 polish — FAT true append + offset-native VFS** (cerrada):
+  `fat_extend_existing` reemplaza el O(N) RMW-the-whole-file con
+  cluster-chain extend real (O(len) por call). `fat_get_entry`
+  caching del último FAT sector. `BUFSIZ` libc bumped 512 → 4096.
+  Combined: TCC compile time pasó de "tarda mucho" a instantáneo.
+  `/bin/readelf -S` ahora muestra section headers (debugging
+  output de TCC, etc.). `/bin/tcctest` smoke automatizado. 16/16.
 
 - **FASE 11.0 — TinyCC port + self-hosting** (cerrada): `/bin/tcc`
   (TinyCC 0.9.27 vendored a `vendor/tinycc/`) compila programas C

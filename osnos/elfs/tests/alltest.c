@@ -50,6 +50,7 @@ static char *jobtest_argv    [] = {"jobtest",     0};
 static char *termtest_argv   [] = {"termtest",    0};
 static char *serialtest_argv [] = {"serialtest",  0};
 static char *tcctest_argv    [] = {"tcctest",     0};
+static char *luatest_argv    [] = {"luatest",     0};
 static char *libctest_argv   [] = {"libctest",    0};
 
 static test_t tests[] = {
@@ -71,6 +72,7 @@ static test_t tests[] = {
     {"termtest",    "/bin/termtest",    termtest_argv   },
     {"serialtest",  "/bin/serialtest",  serialtest_argv },
     {"tcctest",     "/bin/tcctest",     tcctest_argv    },
+    {"luatest",     "/bin/luatest",     luatest_argv    },
     {"libctest",    "/bin/libctest",    libctest_argv   },
 };
 

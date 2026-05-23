@@ -21,6 +21,10 @@ unsigned long long strtoull(const char *s, char **endptr, int base);
  * folding; precision is "good enough for source-level constants",
  * not bit-perfect IEEE round-to-nearest. */
 double             strtod  (const char *s, char **endptr);
+/* system(): osnos has no shell-exec interface for ring-3 — returns
+ * -1 for any command. Apps that want subprocess control use fork()
+ * + execve() directly. */
+int                system  (const char *cmd);
 float              strtof  (const char *s, char **endptr);
 double             atof    (const char *s);
 

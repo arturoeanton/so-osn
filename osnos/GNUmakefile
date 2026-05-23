@@ -173,6 +173,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/tests/termtest.c \
     elfs/tests/serialtest.c \
     elfs/tests/tcctest.c \
+    elfs/tests/luatest.c \
     elfs/tools/minishell.c \
     elfs/tools/term.c \
     elfs/osn-server/consrv.c \
@@ -181,7 +182,8 @@ USER_ELF_LIBC_SRCS := \
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS)) \
-                 $(BUILD)/elfs/tools/tcc.elf
+                 $(BUILD)/elfs/tools/tcc.elf \
+                 $(BUILD)/elfs/tools/lua.elf
 
 # ---------------------------------------------------------------------------
 # Fase 2 disk-resident: split the embedded set into ROM (small, kept inside
@@ -418,6 +420,38 @@ $(BUILD)/elfs/tools/tcc.elf: $(BUILD)/$(TCC_DIR)/tcc.c.o $(BUILD)/$(TCC_DIR)/lib
 	mkdir -p "$(dir $@)"
 	$(LD) $(USER_LDFLAGS) -T elfs/libc.lds \
 	    $(LIBC_CRT0) $(BUILD)/$(TCC_DIR)/tcc.c.o $(BUILD)/$(TCC_DIR)/libtcc.c.o $(LIBC_A) -o $@
+
+# --------------------------------------------------------------------------
+# Lua 5.4 port — FASE 11.2. Vendor tree at vendor/lua/ (release 5.4.7).
+# All .c files in vendor/lua/src/ compile cleanly with USER_CFLAGS and
+# link against osnos libc. We compile with NEITHER LUA_USE_POSIX nor
+# LUA_USE_WINDOWS — falls through to ISO C path: no signal handlers,
+# no readline, no popen, no os.execute. `os.tmpname`, `os.execute`,
+# `io.popen` return errors at runtime but everything else works.
+#
+# CORE_O + LIB_O + lua.c (CLI driver) → /bin/lua. No luac yet — bytecode
+# compiler is a separate target; add when needed.
+# --------------------------------------------------------------------------
+LUA_DIR       := vendor/lua/src
+LUA_CPPFLAGS  := -I $(LUA_DIR)
+LUA_CORE_SRCS := \
+    lapi.c lcode.c lctype.c ldebug.c ldo.c ldump.c lfunc.c lgc.c \
+    llex.c lmem.c lobject.c lopcodes.c lparser.c lstate.c lstring.c \
+    ltable.c ltm.c lundump.c lvm.c lzio.c
+LUA_LIB_SRCS  := \
+    lauxlib.c lbaselib.c lcorolib.c ldblib.c liolib.c lmathlib.c \
+    loadlib.c loslib.c lstrlib.c ltablib.c lutf8lib.c linit.c
+LUA_SRCS      := $(LUA_CORE_SRCS) $(LUA_LIB_SRCS) lua.c
+LUA_OBJS      := $(patsubst %.c,$(BUILD)/$(LUA_DIR)/%.c.o,$(LUA_SRCS))
+
+$(BUILD)/$(LUA_DIR)/%.c.o: $(LUA_DIR)/%.c
+	mkdir -p "$(dir $@)"
+	$(CC) $(USER_CFLAGS) -w -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include $(LUA_CPPFLAGS) -c $< -o $@
+
+$(BUILD)/elfs/tools/lua.elf: $(LUA_OBJS) elfs/libc.lds $(LIBC_A) $(LIBC_CRT0)
+	mkdir -p "$(dir $@)"
+	$(LD) $(USER_LDFLAGS) -T elfs/libc.lds \
+	    $(LIBC_CRT0) $(LUA_OBJS) $(LIBC_A) -o $@
 
 # libtcc1.a — TCC's runtime support library. Holds 64-bit divmod
 # helpers, soft-float conversion, alloca, etc. Compiled with the

@@ -39,7 +39,8 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 |   basename dirname clear tree banner calc top kill sleep ovi   |
 |   less readelf poweroff reboot hello hello_libc — httpd        |
 |   selectserver echotcp tcpclient — term minishell (PTY demo)   |
-|   tcc (TinyCC 0.9.27 port — self-hosting tier, FASE 11.0)     |
+|   tcc (TinyCC 0.9.27 port — self-hosting C, FASE 11.0)        |
+|   lua (Lua 5.4.7 port    — segundo lenguaje self-host, 11.2)  |
 +----------------------------------------------------------------+
 |                 lib/libc — osnos mini-libc                      |
 |   stdio (FILE*, printf, fopen, fread/fwrite, fgets, snprintf), |
@@ -774,6 +775,55 @@ no host involvement after the initial build of the osnos image.
   preprocessor mis-parses (yields "missing #endif" cascades).
   Trimmed to a flat struct + no line-continuations in
   `vendor/tinycc/include/stdarg.h`.
+
+## Lua self-hosting (FASE 11.2)
+
+osnos ships Lua 5.4.7 at `vendor/lua/` cross-compiled into
+`/bin/lua` (~1.2 MB ELF). Programs and interactive REPL both
+work — `ovi script.lua` → `lua script.lua` is the canonical
+flow inside the guest.
+
+```
+[ring 3]  user types: lua /home/script.lua
+   ↓
+[ring 3]  shellsrv → osn_spawn("/bin/lua", "/home/script.lua")
+   ↓
+[ring 3]  lua.elf (Lua 5.4.7 with neither LUA_USE_POSIX nor
+          LUA_USE_WINDOWS defined → ISO C path)
+   |
+   |  1. luaL_newstate + standard libraries
+   |  2. open script via fopen → sys_open → fat
+   |  3. parse + bytecode-compile via lex/parse passes
+   |  4. lua_pcall execute the chunk
+   |  5. each print() → fputs to stdout → write_to_console
+   ↓
+[ring 3]  user sees output, lua exits, shellsrv resumes
+```
+
+REPL mode (no script arg) loops:
+- `fputs("> ", stdout); fflush(stdout)` — prompt
+- `fgets(buf, MAX, stdin)` — read line (shellsrv pre-spawn
+  did `leave_raw()` so the kernel TTY is canonical+ECHO; user
+  sees what they type)
+- `loadbuffer + lua_pcall` — compile + run
+- Loop until fgets returns NULL (EOF via Ctrl+D or `os.exit()`)
+
+**No POSIX integration**: no signal handlers (SIGINT inside Lua
+falls to default = task killed, suffices for hobby use), no
+readline (line editing relies on shellsrv's, not Lua's), no
+`os.execute` (returns -1), no `io.popen` (errors), no `require
+"native_pkg"` for C extensions (loadlib needs dlopen). Lua-only
+modules via `require "pure_lua_pkg"` work fine since they just
+parse/exec Lua source.
+
+**libc gap-fill needed for Lua build** (`vendor/lua/src/`'s
+includes drove these): `<locale.h>` (setlocale stub +
+struct lconv), `sig_atomic_t` in signal.h, math.h with
+`asin/acos/sinh/cosh/tanh/frexp/modf` (real impls via Taylor +
+IEEE-754 pun), time.h with `clock()` + `mktime()` + `strftime()`
++ `difftime()` (subset Y/m/d/H/M/S/etc that `os.date()` uses),
+stdlib `system()` no-op stub, stdio `tmpnam()` + `remove()`,
+string `strcoll/strxfrm` (delegate to strcmp in C-locale).
 
 ## Shutdown / reboot (FASE 10.7 polish)
 

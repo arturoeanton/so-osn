@@ -2,6 +2,12 @@
 
 #include <sys/types.h>
 
+/* ISO C requires sig_atomic_t — an integer type that can be read
+ * and written atomically wrt async signal delivery. On x86_64
+ * native `int` qualifies. Lua's lstate.h uses this even when no
+ * real signal handlers are wired up. */
+typedef volatile int sig_atomic_t;
+
 /*
  * Minimal signal.h — TCC and most simple C programs include this
  * for SIGINT / SIGTERM constants even if they never install a

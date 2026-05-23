@@ -111,6 +111,16 @@ int  vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
 
 int  sscanf   (const char *str, const char *fmt, ...);
 
+/* ISO C: also exposed from stdio.h in addition to unistd.h. */
+int   rename(const char *oldpath, const char *newpath);
+int   remove(const char *path);
+
+/* Lua and other ported code expect L_tmpnam + tmpnam(). osnos
+ * just gives back "/tmp/tmpfXXXXXX"-style names via mkstemp logic;
+ * call mkstemp directly if you actually want the file opened. */
+#define L_tmpnam 32
+char  *tmpnam(char *buf);
+
 int  sprintf  (char *buf, const char *fmt, ...)
      __attribute__((format(printf, 2, 3)));
 int  vsprintf (char *buf, const char *fmt, va_list ap);

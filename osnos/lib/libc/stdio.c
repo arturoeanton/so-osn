@@ -224,6 +224,34 @@ FILE *fdopen(int fd, const char *mode) {
     return wrap_fd(fd);
 }
 
+/* tmpnam: return a unique-ish path string. Not opened; caller is
+ * expected to pass it to fopen. POSIX deprecates this in favour of
+ * mkstemp (which we have and use for tmpfile()). For Lua's
+ * os.tmpname() this is sufficient. Counter is per-process. */
+char *tmpnam(char *buf) {
+    static char internal[L_tmpnam];
+    static int counter = 0;
+    char *out = buf ? buf : internal;
+    /* "/tmp/tmpf-NNNNN\0" — 17 chars max. */
+    const char *prefix = "/tmp/tmpf-";
+    int i = 0;
+    while (prefix[i]) { out[i] = prefix[i]; i++; }
+    int n = ++counter;
+    char digits[10]; int d = 0;
+    if (n == 0) digits[d++] = '0';
+    else while (n > 0) { digits[d++] = '0' + (n % 10); n /= 10; }
+    while (d-- > 0) out[i++] = digits[d];
+    out[i] = 0;
+    return out;
+}
+
+/* remove: POSIX unlink() for files; unaware of dir vs file so we
+ * try unlink and fall back to rmdir on EISDIR. */
+int remove(const char *path) {
+    if (unlink(path) == 0) return 0;
+    return rmdir(path);
+}
+
 FILE *tmpfile(void) {
     /* mkstemp creates /tmp/tmpf-XXXXXX with O_RDWR | O_CREAT |
      * O_EXCL. The file is NOT auto-deleted on fclose (see header
@@ -484,10 +512,6 @@ void perror(const char *prefix) {
     do { buf[i++] = (char)('0' + e % 10); e /= 10; } while (e);
     while (i--) fputc(buf[i], stderr);
     fputc('\n', stderr);
-}
-
-int remove(const char *path) {
-    return unlink(path);
 }
 
 /* ---------------------------------------------------------------- */

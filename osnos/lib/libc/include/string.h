@@ -22,6 +22,11 @@ void  *memrchr(const void *s, int c, size_t n);
 size_t strnlen(const char *s, size_t maxlen);
 char  *strdup (const char *s);
 char  *strndup(const char *s, size_t n);
+
+/* strcoll: locale-aware compare. osnos is C-locale, so it just
+ * defers to strcmp. Same for strxfrm. */
+int    strcoll(const char *a, const char *b);
+size_t strxfrm(char *dst, const char *src, size_t n);
 char  *strstr (const char *hay, const char *needle);
 char  *strpbrk(const char *s, const char *accept);
 size_t strspn (const char *s, const char *accept);

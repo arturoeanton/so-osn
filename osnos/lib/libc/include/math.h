@@ -55,6 +55,16 @@ double cos  (double x);
 double tan  (double x);
 double atan (double x);
 double atan2(double y, double x);
+double asin (double x);
+double acos (double x);
+double sinh (double x);
+double cosh (double x);
+double tanh (double x);
+
+/* frexp: x = m * 2^*e with 0.5 <= |m| < 1 (or m == 0).
+ * modf:  return integer part in *iptr, fractional in return. */
+double frexp(double x, int *e);
+double modf (double x, double *iptr);
 
 float  fabsf (float x);
 float  sqrtf (float x);

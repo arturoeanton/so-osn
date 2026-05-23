@@ -20,6 +20,23 @@ int strcmp(const char *a, const char *b) {
     return (unsigned char)*a - (unsigned char)*b;
 }
 
+/* strcoll = strcmp in C-locale (osnos is always C-locale).
+ * strxfrm: write `src` to `dst` truncated to n-1 chars + NUL, return
+ *   the FULL length (so caller can detect truncation). */
+int strcoll(const char *a, const char *b) {
+    return strcmp(a, b);
+}
+
+size_t strxfrm(char *dst, const char *src, size_t n) {
+    size_t len = strlen(src);
+    if (n > 0) {
+        size_t copy = (len < n - 1) ? len : n - 1;
+        for (size_t i = 0; i < copy; i++) dst[i] = src[i];
+        dst[copy] = 0;
+    }
+    return len;
+}
+
 int strncmp(const char *a, const char *b, size_t n) {
     if (a == b || n == 0) return 0;
     if (!a) return -1;

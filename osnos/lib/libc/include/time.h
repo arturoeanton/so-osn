@@ -49,3 +49,21 @@ struct tm {
 struct tm *localtime  (const time_t *t);
 struct tm *localtime_r(const time_t *t, struct tm *out);
 struct tm *gmtime     (const time_t *t);
+
+/* ISO C clock(). osnos has no per-process CPU time; we report
+ * monotonic ticks since boot in clock_gettime. clock() returns
+ * the same in CLOCKS_PER_SEC units (we pick 1_000_000 so the
+ * result is microseconds, matching what most libc impls give). */
+typedef long clock_t;
+#define CLOCKS_PER_SEC 1000000L
+clock_t clock(void);
+
+/* mktime: struct tm → time_t. Inverse of localtime. */
+time_t mktime(struct tm *t);
+
+/* difftime: simple double diff. */
+double difftime(time_t b, time_t a);
+
+/* strftime: %Y %m %d %H %M %S %p %a %A %b %B %c %x %X %% subset. */
+size_t strftime(char *buf, size_t buf_size, const char *fmt,
+                const struct tm *t);

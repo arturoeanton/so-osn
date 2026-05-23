@@ -215,3 +215,61 @@ double atan2(double y, double x) {
     }
     return (y >= 0) ? M_PI_2 : -M_PI_2;
 }
+
+/* asin via the identity asin(x) = atan(x / sqrt(1 - x^2)) for
+ * |x| < 1; endpoints saturated to ±π/2. */
+double asin(double x) {
+    if (x >= 1.0)  return  M_PI_2;
+    if (x <= -1.0) return -M_PI_2;
+    return atan(x / sqrt(1.0 - x * x));
+}
+
+double acos(double x) {
+    return M_PI_2 - asin(x);
+}
+
+/* sinh = (e^x - e^-x) / 2, cosh = (e^x + e^-x) / 2.
+ * Not great for large |x| (loss of precision) but fine for the
+ * range Lua scripts realistically pass in. */
+double sinh(double x) {
+    double e = exp(x);
+    return (e - 1.0 / e) * 0.5;
+}
+
+double cosh(double x) {
+    double e = exp(x);
+    return (e + 1.0 / e) * 0.5;
+}
+
+double tanh(double x) {
+    /* Avoid overflow for large |x|. */
+    if (x >  20.0) return  1.0;
+    if (x < -20.0) return -1.0;
+    double ex = exp(x), eix = 1.0 / ex;
+    return (ex - eix) / (ex + eix);
+}
+
+/* frexp: pull the IEEE 754 exponent out by punning the double,
+ * normalize the mantissa back into [0.5, 1.0). Caller gets the
+ * unbiased exponent in *e. Mirrors how glibc does it on x86_64. */
+double frexp(double x, int *e) {
+    if (x == 0.0) { *e = 0; return 0.0; }
+    union { double d; unsigned long long u; } pun;
+    pun.d = x;
+    int raw = (int)((pun.u >> 52) & 0x7FF);
+    if (raw == 0x7FF) { *e = 0; return x; }   /* inf / NaN — pass-through */
+    *e = raw - 1022;
+    /* Reset exponent field to bias-1 (= 0x3FE) so mantissa
+     * lands in [0.5, 1.0). */
+    pun.u = (pun.u & 0x800FFFFFFFFFFFFFULL) | ((unsigned long long)0x3FE << 52);
+    return pun.d;
+}
+
+/* modf: split into integer (in *iptr) and fractional parts (return). */
+double modf(double x, double *iptr) {
+    double i = (double)(long long)x;
+    /* For negative x with no fractional part, (long long)x truncates
+     * toward zero; that's already correct for modf. */
+    if (iptr) *iptr = i;
+    return x - i;
+}
