@@ -679,21 +679,23 @@ void proc_exit_current_user(int exit_code) {
      */
     /* Sweep fd 0..MAX so pipe ends attached to stdin/stdout (via
      * proc_execve_pipeline) also get released, not just regular
-     * fds 3+. is_special slots that were never overwritten with a
-     * pipe / socket are no-ops. */
+     * fds 3+. Under OFD, fd_free does the backend cleanup
+     * automatically when the refcount hits 0 — no need to call
+     * pipe_close_* / sock_close manually here. */
     for (int fd = 0; fd < OSNOS_MAX_FDS; fd++) {
-        osnos_fd_t *f = &t->fds[fd];
-        if (!f->used) continue;
-        if (f->is_socket && f->sock_idx >= 0) {
-            sock_close(f->sock_idx);
+        if (!t->fds[fd].used) continue;
+        if (fd >= 3) {
+            fd_free(t, fd);
+        } else {
+            /* stdin/stdout/stderr: release their OFD too so the
+             * is_special default (or pipe/file the shell wired in)
+             * doesn't leak. */
+            int idx = t->fds[fd].ofd_idx;
+            t->fds[fd].used     = false;
+            t->fds[fd].ofd_idx  = -1;
+            t->fds[fd].fd_flags = 0;
+            if (idx >= 0) ofd_unref(idx);
         }
-        if (f->is_pipe && f->pipe_ref) {
-            if (f->pipe_side == 0) pipe_close_reader(f->pipe_ref);
-            else                   pipe_close_writer(f->pipe_ref);
-            f->pipe_ref = 0;
-            f->is_pipe  = false;
-        }
-        if (fd >= 3) fd_free(t, fd);
     }
 
     /* mmap regions ride on the user pml4 we destroy below, so the
@@ -1061,6 +1063,19 @@ int64_t proc_execve_replace(const char *path, const char *args,
     t->stdin_redir_off   = 0;
     t->stdout_redir_off  = 0;
 
+    /* FD_CLOEXEC: POSIX execve(2) closes any fd whose slot has
+     * FD_CLOEXEC set. fd_free decrements the OFD's refcount, which
+     * triggers backend cleanup (pipe_close / sock_close) if the OFD
+     * has no other references. Sweep starts at 3 — stdin/stdout/
+     * stderr can't be marked CLOEXEC in the usual sense (some libcs
+     * forbid it; we just skip them for safety). */
+    for (int fd = 3; fd < OSNOS_MAX_FDS; fd++) {
+        if (!t->fds[fd].used) continue;
+        if (t->fds[fd].fd_flags & OSNOS_FD_CLOEXEC) {
+            fd_free(t, fd);
+        }
+    }
+
     /* Refresh task name from the new image's basename. */
     size_t bn = 0;
     while (base[bn] && bn + 1 < OSNOS_TASK_NAME_MAX) {
@@ -1144,13 +1159,23 @@ int64_t proc_execve_pipeline(const char *const paths[],
              * stages so their exit cleanup doesn't try to close pipes
              * that we're about to close ourselves, then mark them
              * to die and drain every pipe slot back to the pool. */
+            /* Cleanup: release each already-spawned stage's stdin/
+             * stdout slots (these point at pipe OFDs we're tearing
+             * down). Under OFD model, freeing the slot decrements
+             * the OFD refcount which triggers pipe_close once both
+             * ends are released; here we explicitly close the pipe
+             * objects too because they were never wired into any
+             * stage that runs to completion. */
             for (int j = 0; j < i; j++) {
                 task_t *st = task_by_pid((uint64_t)pids[j]);
                 if (st) {
-                    osnos_fd_t *fin  = &st->fds[OSNOS_FD_STDIN];
-                    osnos_fd_t *fout = &st->fds[OSNOS_FD_STDOUT];
-                    fin->is_pipe   = false; fin->pipe_ref  = 0;
-                    fout->is_pipe  = false; fout->pipe_ref = 0;
+                    /* Drop the stdin/stdout slots we'd just attached
+                     * to pipe OFDs. fd_free safely handles unused
+                     * slots and idempotent unref. */
+                    if (j > 0)
+                        fd_free(st, OSNOS_FD_STDIN);
+                    if (j < n_stages - 1)
+                        fd_free(st, OSNOS_FD_STDOUT);
                     st->kill_pending = 1;
                 }
             }
@@ -1162,23 +1187,43 @@ int64_t proc_execve_pipeline(const char *const paths[],
         }
         task_t *t = task_by_pid((uint64_t)pids[i]);
         if (t) {
+            /* Wire the pipe endpoints into the new stage's std slots
+             * via fresh OFDs (allocated from the pool). Replace any
+             * existing OFD on that slot (the is_special default that
+             * task_create_user_elf seeded). */
             if (i > 0) {
-                osnos_fd_t *f = &t->fds[OSNOS_FD_STDIN];
-                f->used       = true;
-                f->is_special = false;
-                f->is_pipe    = true;
-                f->pipe_ref   = pipes[i - 1];
-                f->pipe_side  = 0;          /* read end */
-                f->flags      = O_RDONLY;
+                /* Stage i reads from pipes[i-1] (read-end). */
+                if (t->fds[OSNOS_FD_STDIN].used) {
+                    int old = t->fds[OSNOS_FD_STDIN].ofd_idx;
+                    if (old >= 0) ofd_unref(old);
+                }
+                int idx = ofd_alloc();
+                if (idx >= 0) {
+                    osnos_ofd_t *o = ofd_get(idx);
+                    o->is_pipe   = true;
+                    o->pipe_ref  = pipes[i - 1];
+                    o->pipe_side = 0;
+                    o->flags     = O_RDONLY;
+                    t->fds[OSNOS_FD_STDIN].used    = true;
+                    t->fds[OSNOS_FD_STDIN].ofd_idx = idx;
+                }
             }
             if (i < n_stages - 1) {
-                osnos_fd_t *f = &t->fds[OSNOS_FD_STDOUT];
-                f->used       = true;
-                f->is_special = false;
-                f->is_pipe    = true;
-                f->pipe_ref   = pipes[i];
-                f->pipe_side  = 1;          /* write end */
-                f->flags      = O_WRONLY;
+                /* Stage i writes to pipes[i] (write-end). */
+                if (t->fds[OSNOS_FD_STDOUT].used) {
+                    int old = t->fds[OSNOS_FD_STDOUT].ofd_idx;
+                    if (old >= 0) ofd_unref(old);
+                }
+                int idx = ofd_alloc();
+                if (idx >= 0) {
+                    osnos_ofd_t *o = ofd_get(idx);
+                    o->is_pipe   = true;
+                    o->pipe_ref  = pipes[i];
+                    o->pipe_side = 1;
+                    o->flags     = O_WRONLY;
+                    t->fds[OSNOS_FD_STDOUT].used    = true;
+                    t->fds[OSNOS_FD_STDOUT].ofd_idx = idx;
+                }
             }
         }
     }

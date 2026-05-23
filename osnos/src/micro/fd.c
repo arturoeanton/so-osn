@@ -1,103 +1,168 @@
 #include "fd.h"
 
 #include "../include/osnos_fcntl.h"
+#include "../net/socket.h"
+#include "pipe.h"
 #include "task.h"
 #include "tty.h"
 
 /*
- * Per-task fd table operations. Each task carries `osnos_fd_t fds[16]`
- * inline in task_t; these helpers act on a given task's slice. There
- * is no longer a kernel-global table — the old `fd_init` is gone,
- * replaced by `fd_init_for_task` invoked by `task_create`.
+ * Per-task fd table + global OFD pool.
  *
- * Most callers pass `task_current()` as the task pointer; only the
- * exit cleanup path (proc_exit_current_user) and a couple of shell
- * introspection sites work against a specific other task.
+ * task_t.fds[] holds per-task slots (osnos_fd_slot_t — thin, just
+ * `{used, ofd_idx, fd_flags}`). The OFD backing each slot lives in
+ * the global pool below.
+ *
+ * Pool sizing: OSNOS_MAX_OFDS = 128. Each live task burns 3 OFDs for
+ * its default stdin/stdout/stderr; with 16 tasks that's 48 baseline,
+ * leaving 80 for actual file/pipe/socket opens. Comfortable headroom.
  */
+static osnos_ofd_t ofd_pool[OSNOS_MAX_OFDS];
 
-static inline void fd_clear_slot(osnos_fd_t *f) {
-    f->used       = false;
-    f->is_special = false;
-    f->is_dir     = false;
-    f->is_socket  = false;
-    f->is_pipe    = false;
-    f->is_chr     = false;
-    f->sock_idx   = -1;
-    f->pipe_ref   = 0;
-    f->pipe_side  = 0;
-    f->flags      = 0;
-    f->offset     = 0;
-    f->path[0]    = 0;
+/* Clear an OFD slot back to UNUSED. Doesn't touch refcount (caller
+ * has already verified it's 0). */
+static void ofd_clear(osnos_ofd_t *o) {
+    o->used       = false;
+    o->refcount   = 0;
+    o->is_special = false;
+    o->is_dir     = false;
+    o->is_socket  = false;
+    o->is_pipe    = false;
+    o->is_chr     = false;
+    o->sock_idx   = -1;
+    o->pipe_ref   = 0;
+    o->pipe_side  = 0;
+    o->flags      = 0;
+    o->offset     = 0;
+    o->path[0]    = 0;
 }
 
-void fd_init_for_task(task_t *t) {
-    if (!t) return;
-    for (size_t i = 0; i < OSNOS_MAX_FDS; i++) {
-        fd_clear_slot(&t->fds[i]);
-    }
-
-    /* stdin */
-    t->fds[OSNOS_FD_STDIN].used       = true;
-    t->fds[OSNOS_FD_STDIN].is_special = true;
-    t->fds[OSNOS_FD_STDIN].flags      = O_RDONLY;
-
-    /* stdout */
-    t->fds[OSNOS_FD_STDOUT].used       = true;
-    t->fds[OSNOS_FD_STDOUT].is_special = true;
-    t->fds[OSNOS_FD_STDOUT].flags      = O_WRONLY;
-
-    /* stderr */
-    t->fds[OSNOS_FD_STDERR].used       = true;
-    t->fds[OSNOS_FD_STDERR].is_special = true;
-    t->fds[OSNOS_FD_STDERR].flags      = O_WRONLY;
+osnos_ofd_t *ofd_get(int idx) {
+    if (idx < 0 || idx >= OSNOS_MAX_OFDS) return 0;
+    if (!ofd_pool[idx].used) return 0;
+    return &ofd_pool[idx];
 }
 
-int fd_alloc(task_t *t) {
-    if (!t) return -1;
-    for (int i = 3; i < OSNOS_MAX_FDS; i++) {
-        if (!t->fds[i].used) {
-            fd_clear_slot(&t->fds[i]);
-            t->fds[i].used = true;
+int ofd_alloc(void) {
+    for (int i = 0; i < OSNOS_MAX_OFDS; i++) {
+        if (!ofd_pool[i].used) {
+            ofd_clear(&ofd_pool[i]);
+            ofd_pool[i].used     = true;
+            ofd_pool[i].refcount = 1;
+            ofd_pool[i].sock_idx = -1;
             return i;
         }
     }
     return -1;
 }
 
+void ofd_ref(int idx) {
+    if (idx < 0 || idx >= OSNOS_MAX_OFDS) return;
+    if (!ofd_pool[idx].used) return;
+    ofd_pool[idx].refcount++;
+}
+
+void ofd_unref(int idx) {
+    if (idx < 0 || idx >= OSNOS_MAX_OFDS) return;
+    osnos_ofd_t *o = &ofd_pool[idx];
+    if (!o->used) return;
+    if (o->refcount > 0) o->refcount--;
+    if (o->refcount > 0) return;
+
+    /* Last reference dropped — release backend resources. Each
+     * backend has its own teardown idempotent enough that a double-
+     * close is harmless, but order matters: socket close may use
+     * the path string for logging, so do it before clearing. */
+    if (o->is_pipe && o->pipe_ref) {
+        if (o->pipe_side == 0) pipe_close_reader(o->pipe_ref);
+        else                    pipe_close_writer(o->pipe_ref);
+    }
+    if (o->is_socket && o->sock_idx >= 0) {
+        sock_close(o->sock_idx);
+    }
+    ofd_clear(o);
+}
+
+/* --- Per-task slot operations --- */
+
+static inline void slot_clear(osnos_fd_slot_t *s) {
+    s->used     = false;
+    s->ofd_idx  = -1;
+    s->fd_flags = 0;
+}
+
+void fd_init_for_task(task_t *t) {
+    if (!t) return;
+    for (size_t i = 0; i < OSNOS_MAX_FDS; i++) {
+        slot_clear(&t->fds[i]);
+    }
+    /* Allocate one OFD each for stdin / stdout / stderr — marks them
+     * is_special so sys_read/write route to TTY/console. Per-task
+     * allocation (not shared across tasks) so a future close-and-
+     * reopen on stdout of one task doesn't affect another. */
+    for (int fd = 0; fd < 3; fd++) {
+        int idx = ofd_alloc();
+        if (idx < 0) {
+            /* Boot-time failure — leave slot unused. The cmd_test
+             * paths that exercise fd-without-task tolerate this. */
+            continue;
+        }
+        osnos_ofd_t *o = &ofd_pool[idx];
+        o->is_special = true;
+        o->flags      = (fd == 0) ? O_RDONLY : O_WRONLY;
+        t->fds[fd].used    = true;
+        t->fds[fd].ofd_idx = idx;
+    }
+}
+
+int fd_alloc(task_t *t) {
+    if (!t) return -1;
+    /* Find a free slot first; only then alloc the OFD so we don't
+     * leak an OFD when the slot table is full. */
+    int fd = -1;
+    for (int i = 3; i < OSNOS_MAX_FDS; i++) {
+        if (!t->fds[i].used) { fd = i; break; }
+    }
+    if (fd < 0) return -1;
+
+    int idx = ofd_alloc();
+    if (idx < 0) return -1;
+
+    t->fds[fd].used     = true;
+    t->fds[fd].ofd_idx  = idx;
+    t->fds[fd].fd_flags = 0;
+    return fd;
+}
+
 void fd_free(task_t *t, int fd) {
     if (!t) return;
-    if (fd < 3 || fd >= OSNOS_MAX_FDS) return;
+    if (fd < 0 || fd >= OSNOS_MAX_FDS) return;
     if (!t->fds[fd].used) return;
-    fd_clear_slot(&t->fds[fd]);
+    int idx = t->fds[fd].ofd_idx;
+    slot_clear(&t->fds[fd]);
+    if (idx >= 0) ofd_unref(idx);
 }
 
 osnos_fd_t *fd_get(task_t *t, int fd) {
     if (!t) return 0;
     if (fd < 0 || fd >= OSNOS_MAX_FDS) return 0;
     if (!t->fds[fd].used) return 0;
-    return &t->fds[fd];
+    return ofd_get(t->fds[fd].ofd_idx);
 }
 
-/*
- * Internal copy helper. Replicates `src` into `dst` (which must point
- * at an UNUSED slot — caller decides whether to free first). The
- * copy is shallow: path string and flags are duplicated, but there's
- * no shared "open file description" so offsets diverge from here on.
- */
-static void fd_copy_struct(osnos_fd_t *dst, const osnos_fd_t *src) {
-    dst->used       = true;
-    dst->is_special = src->is_special;
-    dst->is_dir     = src->is_dir;
-    dst->is_socket  = src->is_socket;
-    dst->is_pipe    = src->is_pipe;
-    dst->is_chr     = src->is_chr;
-    dst->sock_idx   = src->sock_idx;
-    dst->pipe_ref   = src->pipe_ref;
-    dst->pipe_side  = src->pipe_side;
-    dst->flags      = src->flags;
-    dst->offset     = src->offset;
-    for (int i = 0; i < OSNOS_PATH_MAX; i++) dst->path[i] = src->path[i];
+int fd_get_flags(task_t *t, int fd) {
+    if (!t || fd < 0 || fd >= OSNOS_MAX_FDS) return 0;
+    if (!t->fds[fd].used) return 0;
+    return t->fds[fd].fd_flags;
 }
+
+void fd_set_flags(task_t *t, int fd, int flags) {
+    if (!t || fd < 0 || fd >= OSNOS_MAX_FDS) return;
+    if (!t->fds[fd].used) return;
+    t->fds[fd].fd_flags = flags;
+}
+
+/* --- dup family --- */
 
 int fd_dup(task_t *t, int src) {
     return fd_dup_min(t, src, 3);
@@ -105,15 +170,17 @@ int fd_dup(task_t *t, int src) {
 
 int fd_dup_min(task_t *t, int src, int min_fd) {
     if (!t) return -1;
-    osnos_fd_t *s = fd_get(t, src);
-    if (!s) return -1;
-    if (min_fd < 0) min_fd = 0;
-    /* Special fds 0/1/2 are always live and can't be reused as a
-     * dup target — start the scan at max(3, min_fd). */
+    if (src < 0 || src >= OSNOS_MAX_FDS || !t->fds[src].used) return -1;
+    int src_idx = t->fds[src].ofd_idx;
+    if (src_idx < 0) return -1;
+
     if (min_fd < 3) min_fd = 3;
     for (int i = min_fd; i < OSNOS_MAX_FDS; i++) {
         if (!t->fds[i].used) {
-            fd_copy_struct(&t->fds[i], s);
+            t->fds[i].used     = true;
+            t->fds[i].ofd_idx  = src_idx;
+            t->fds[i].fd_flags = 0;       /* POSIX: dup clears FD_CLOEXEC */
+            ofd_ref(src_idx);
             return i;
         }
     }
@@ -122,30 +189,27 @@ int fd_dup_min(task_t *t, int src, int min_fd) {
 
 int fd_dup2(task_t *t, int src, int target) {
     if (!t) return -1;
-    osnos_fd_t *s = fd_get(t, src);
-    if (!s) return -1;
+    if (src    < 0 || src    >= OSNOS_MAX_FDS || !t->fds[src].used) return -1;
     if (target < 0 || target >= OSNOS_MAX_FDS) return -1;
     if (target == src) return target;
-    /* dup2 silently closes target if it was already open. The
-     * special fds 0/1/2 stay (they reset to their default open). */
-    if (target >= 3 && t->fds[target].used) {
-        fd_free(t, target);
-    } else if (target < 3) {
-        /* Replacing stdin/stdout/stderr — clobber the slot. The
-         * shell never does this today but POSIX allows it. */
-        t->fds[target].used = false;
+    int src_idx = t->fds[src].ofd_idx;
+    if (src_idx < 0) return -1;
+
+    /* Close target if open (silent — POSIX). */
+    if (t->fds[target].used) {
+        int old_idx = t->fds[target].ofd_idx;
+        slot_clear(&t->fds[target]);
+        if (old_idx >= 0) ofd_unref(old_idx);
     }
-    fd_copy_struct(&t->fds[target], s);
+
+    t->fds[target].used     = true;
+    t->fds[target].ofd_idx  = src_idx;
+    t->fds[target].fd_flags = 0;
+    ofd_ref(src_idx);
     return target;
 }
 
-/* ---- stdin shims over the TTY line discipline ----
- *
- * These wrappers keep the old fd.h API alive for callers that don't
- * care about termios. New code (sys_select, sys_ioctl) talks to the
- * TTY layer directly via tty.h.
- */
-
+/* --- stdin shims over the TTY line discipline --- */
 void stdin_push(char c)               { tty_input(c); }
 size_t stdin_pop(char *out, size_t m) { return tty_read(out, m); }
 bool   stdin_readable(void)           { return tty_readable(); }

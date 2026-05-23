@@ -262,7 +262,7 @@ typedef struct task {
      * shell can exercise the fd API against its own task without
      * special-casing.
      */
-    osnos_fd_t fds[OSNOS_MAX_FDS];
+    osnos_fd_slot_t fds[OSNOS_MAX_FDS];
 } task_t;
 
 void task_init(void);

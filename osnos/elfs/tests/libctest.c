@@ -281,11 +281,22 @@ int main(int argc, char **argv) {
         int dfd = dup(fd);
         check("dup-fresh-fd",   dfd >= 3 && dfd != fd);
 
-        /* Both fds can read; dup'd one starts from offset 0. */
+        /* POSIX-correct (post-OFD refactor): dup shares the open
+         * file description, so fd + dfd share the offset. Reading
+         * 3 bytes via fd advances the shared cursor; reading via
+         * dfd starts from there (EOF for our 3-byte file). */
         char a[4] = {0}, b[4] = {0};
         check("dup-read-base",  read(fd, a, 3) == 3);
-        check("dup-read-clone", read(dfd, b, 3) == 3);
-        check("dup-same-bytes", a[0]=='a' && b[0]=='a');
+        check("dup-shared-offset",
+              read(dfd, b, 3) == 0);   /* EOF — shared offset advanced */
+        check("dup-base-bytes", a[0]=='a' && a[1]=='b' && a[2]=='c');
+
+        /* Rewind via dfd; both should see offset 0 again. */
+        check("dup-shared-lseek",
+              lseek(dfd, 0, SEEK_SET) == 0);
+        char c[4] = {0};
+        check("dup-reread-after-rewind",
+              read(fd, c, 3) == 3 && c[0]=='a');
 
         int target = 15;
         check("dup2-to-target", dup2(fd, target) == target);

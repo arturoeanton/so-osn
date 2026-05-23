@@ -7,89 +7,132 @@
 #include "../include/osnos_limits.h"
 
 /*
- * Per-task file descriptor table. Each task owns its OSNOS_MAX_FDS
- * entries inside task_t.fds[]; this header exposes the per-slot
- * struct + the operations that act on a given task's table.
+ * Per-task file descriptor table + global "open file description"
+ * (OFD) pool.
  *
- * Layout per task:
- *   fd 0 = stdin
- *   fd 1 = stdout
- *   fd 2 = stderr
- *   fd 3+ = regular files, allocated by sys_open
+ * Two layers, mirroring Linux:
  *
- * Kernel-resident "tasks" (servers) get the same layout — their
- * stdin/stdout/stderr slots are wired to the TTY/console even though
- * they normally don't issue read/write syscalls.
+ *   osnos_fd_slot_t  — the per-task slot. Lives inside task_t.fds[].
+ *                      Just `{used, ofd_idx, fd_flags}`. fd_flags holds
+ *                      FD_CLOEXEC (per-fd, not shared with dup'd copies).
+ *
+ *   osnos_ofd_t      — the shared "open file description". Lives in a
+ *                      global pool (ofd_pool[]). Holds the actual file
+ *                      state: backend (pipe/socket/file), offset,
+ *                      flags, path. Refcounted so dup/dup2/fork all
+ *                      share state correctly.
+ *
+ * POSIX dup(2)/dup2(2)/fork(2) semantics:
+ *   - dup makes a NEW fd slot pointing at the SAME OFD. Both fds share
+ *     offset, flags, position.
+ *   - fork inherits: child's fd table copies parent's slot indices,
+ *     refcounts on the OFDs bump. Child sees same offset as parent.
+ *   - close decrements the OFD refcount; when it hits 0, the OFD's
+ *     backend resources are released (pipe_close, sock_close, etc.).
+ *
+ * For backwards compatibility with code that already does
+ *   `osnos_fd_t *f = fd_get(t, fd);  // ... f->offset / f->path ...`,
+ * `osnos_fd_t` is a typedef alias for `osnos_ofd_t`. fd_get returns
+ * the underlying OFD pointer; callers continue to read the same
+ * fields. Only the per-task slot's `used / ofd_idx / fd_flags` lives
+ * separately.
  */
 #define OSNOS_MAX_FDS    16
+#define OSNOS_MAX_OFDS   128
 
 #define OSNOS_FD_STDIN   0
 #define OSNOS_FD_STDOUT  1
 #define OSNOS_FD_STDERR  2
 
+/* fd_flags bits — per-fd (not shared via OFD). */
+#define OSNOS_FD_CLOEXEC 0x1
+
 struct pipe;
 
-typedef struct {
-    bool     used;
-    bool     is_special;             /* stdin/stdout/stderr */
-    bool     is_dir;                 /* opened a directory (for getdents) */
-    bool     is_socket;              /* opened via sys_socket */
-    bool     is_pipe;                /* opened via sys_pipe / inherited from shell */
-    bool     is_chr;                 /* character device (/dev/fb0, /dev/input0, ...) */
-    int      sock_idx;               /* index into net/socket table, when is_socket */
-    struct pipe *pipe_ref;           /* shared pipe object, when is_pipe */
-    int      pipe_side;              /* 0 = read end, 1 = write end (when is_pipe) */
-    int      flags;                  /* O_RDONLY etc. */
-    uint64_t offset;                 /* file position OR readdir cursor */
-    char     path[OSNOS_PATH_MAX];
-} osnos_fd_t;
+/* The shared open file description. Refcounted. */
+typedef struct osnos_ofd {
+    bool         used;
+    int          refcount;            /* # of slots referencing this OFD */
 
-/* Forward decl — fd.c only ever dereferences task_t through task->fds. */
+    bool         is_special;          /* stdin/stdout/stderr default */
+    bool         is_dir;              /* opened a directory (getdents) */
+    bool         is_socket;           /* opened via sys_socket */
+    bool         is_pipe;             /* opened via sys_pipe / inherited */
+    bool         is_chr;              /* character device */
+
+    int          sock_idx;            /* index into net/socket table */
+    struct pipe *pipe_ref;            /* shared pipe object */
+    int          pipe_side;           /* 0 = read end, 1 = write end */
+    int          flags;               /* O_RDONLY etc. */
+    uint64_t     offset;              /* file position OR readdir cursor */
+    char         path[OSNOS_PATH_MAX];
+} osnos_ofd_t;
+
+/* Per-task slot. Thin. */
+typedef struct osnos_fd_slot {
+    bool used;
+    int  ofd_idx;                     /* index into ofd_pool, -1 if !used */
+    int  fd_flags;                    /* FD_CLOEXEC etc */
+} osnos_fd_slot_t;
+
+/* Backwards compat: legacy `osnos_fd_t` is the OFD struct. Callers
+ * doing `osnos_fd_t *f = fd_get(t, fd); f->offset` keep working. */
+typedef osnos_ofd_t osnos_fd_t;
+
 struct task;
 typedef struct task task_t;
 
-/*
- * Reset `t->fds` to a freshly-initialised state with stdin/stdout/
- * stderr pre-wired. Called by task_create for every new task slot.
- */
+/* --- Per-task fd-slot API --- */
+
 void fd_init_for_task(task_t *t);
 
-/* Allocate a fresh fd >= 3 in task `t`. Returns -1 if the table is full. */
+/* Allocate a fresh fd >= 3 with a freshly-allocated OFD (refcount=1).
+ * Returns the fd, or -1 if either pool is full. */
 int  fd_alloc(task_t *t);
 
+/* Release the slot AND decrement the OFD refcount (which may trigger
+ * pipe_close / sock_close if it hits 0). */
 void fd_free(task_t *t, int fd);
 
-/* Look up an fd in task `t`. Returns NULL for invalid / unused fds.
- * Includes the special fds 0/1/2 (which always exist). */
+/* Return the OFD backing this fd (NULL for invalid / unused). */
 osnos_fd_t *fd_get(task_t *t, int fd);
 
+/* Per-fd flags (FD_CLOEXEC). NOT shared via OFD. */
+int  fd_get_flags(task_t *t, int fd);
+void fd_set_flags(task_t *t, int fd, int flags);
+
 /*
- * Duplicate an existing fd into a fresh slot within the SAME task.
- * Cross-task dup is not exposed — every dup variant operates on `t`.
+ * dup family — all share the underlying OFD. Bumps OFD refcount.
  *
- *   fd_dup(t, src)           — find any free fd >= 3.
- *   fd_dup_min(t, src, min)  — find the lowest free fd >= min (F_DUPFD).
- *   fd_dup2(t, src, target)  — copy into specific target; closes target
- *                              first if it was open. src==target is a
- *                              no-op (POSIX).
+ *   fd_dup(t, src)           — find any free fd >= 3 (F_DUPFD with min 3)
+ *   fd_dup_min(t, src, min)  — find the lowest free fd >= min
+ *   fd_dup2(t, src, target)  — copy to specific target; closes target if
+ *                              already open. src==target is a no-op.
  *
- * All three return the new fd on success, -1 on failure.
+ * Per POSIX, FD_CLOEXEC is NOT inherited by dup/dup2 (cleared on the
+ * new fd). F_DUPFD_CLOEXEC variants can be added later.
  */
 int fd_dup     (task_t *t, int src);
 int fd_dup_min (task_t *t, int src, int min_fd);
 int fd_dup2    (task_t *t, int src, int target);
 
-/*
- * stdin ring buffer. keyboard_server pushes printable chars and '\n';
- * sys_read(0, ...) pops. Bounded — overflow drops oldest. Non-blocking.
- */
+/* --- OFD pool API (mostly internal; sys_fork / sys_spawn use these) --- */
+
+osnos_ofd_t *ofd_get(int idx);
+
+/* Allocate a fresh OFD slot, refcount=1, fields zeroed. Returns the
+ * pool index, or -1 if the pool is full. */
+int  ofd_alloc(void);
+
+/* Increment refcount (used when dup'ing or forking). */
+void ofd_ref(int idx);
+
+/* Decrement refcount. If it hits 0, release the OFD's backend
+ * resources (pipe / socket close) and recycle the pool slot. */
+void ofd_unref(int idx);
+
+/* --- stdin shims over the TTY line discipline --- */
 void   stdin_push(char c);
 size_t stdin_pop (char *out, size_t max);
-
-/* True when stdin has bytes buffered ready for sys_read to drain. */
 bool   stdin_readable(void);
-
-/* Drop everything queued in the ring buffer. Called on exec so a child
- * task starts with a clean stdin instead of inheriting the keystrokes
- * that typed its own command line. */
 void   stdin_clear(void);

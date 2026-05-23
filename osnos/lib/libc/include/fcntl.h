@@ -22,15 +22,22 @@ int open(const char *path, int flags, ...);
 /*
  * fcntl(2) — minimal cmd set:
  *   F_DUPFD (0) — like dup, but min fd is taken from `arg`.
- *   F_GETFD (1) — close-on-exec flag (always 0; no CLOEXEC support).
- *   F_SETFD (2) — accepted; CLOEXEC has no effect.
+ *   F_GETFD (1) — get per-fd flags (FD_CLOEXEC).
+ *   F_SETFD (2) — set per-fd flags. Only FD_CLOEXEC is honoured.
  *   F_GETFL (3) — returns the fd's open flags.
  *   F_SETFL (4) — updates O_APPEND / O_NONBLOCK only.
+ *
+ * FD_CLOEXEC: when set on an fd, that fd is closed automatically
+ * on execve(2). Crucial for inheritable file descriptors: a parent
+ * can mark "do not pass to my children" before exec.
  */
 #define F_DUPFD 0
 #define F_GETFD 1
 #define F_SETFD 2
 #define F_GETFL 3
 #define F_SETFL 4
+
+/* Per-fd flags (F_GETFD / F_SETFD). */
+#define FD_CLOEXEC 1
 
 int fcntl(int fd, int cmd, ...);

@@ -1499,20 +1499,37 @@ int64_t sys_fork(void) {
     }
     child->sig_pending = 0;     /* signals not inherited (POSIX) */
 
-    /* 5. Clone fd table. For pipe fds, bump the kernel pipe object's
-     *    refcount so it doesn't close when one of the two tasks
-     *    eventually exits. Sockets are not refcounted in our impl —
-     *    fork-with-open-sockets shares the slot index but a close in
-     *    either task tears it down for both. Acceptable for now;
-     *    real fork-+-exec patterns close inherited sockets in the
-     *    child before doing anything socket-y. */
+    /* 5. Clone fd table — POSIX-strict via OFD layer.
+     *
+     *    task_create_user_elf already ran fd_init_for_task on the
+     *    child, allocating fresh stdin/stdout/stderr OFDs. We're
+     *    about to overwrite those slots with the parent's references,
+     *    so we must release the just-allocated child OFDs first to
+     *    avoid leaking them.
+     *
+     *    After that, for every used slot in the parent: copy the
+     *    slot (used + ofd_idx + fd_flags) AS-IS into the child, then
+     *    bump the OFD's refcount. Parent and child end up pointing at
+     *    the SAME ofd_idx — POSIX-correct: they share file offset,
+     *    file flags, and pipe role. When one closes, ofd_unref
+     *    decrements; when both have closed, the OFD's backend is
+     *    released. No pipe_dup_reader/writer needed — the OFD counts
+     *    as ONE reader/writer of the pipe regardless of how many fd
+     *    slots reference it. */
     for (int fd = 0; fd < OSNOS_MAX_FDS; fd++) {
-        child->fds[fd] = parent->fds[fd];
-        osnos_fd_t *cf = &child->fds[fd];
-        if (!cf->used) continue;
-        if (cf->is_pipe && cf->pipe_ref) {
-            if (cf->pipe_side == 0) pipe_dup_reader(cf->pipe_ref);
-            else                    pipe_dup_writer(cf->pipe_ref);
+        /* Drop whatever the child's task_create wired up. */
+        if (child->fds[fd].used) {
+            int old = child->fds[fd].ofd_idx;
+            child->fds[fd].used     = false;
+            child->fds[fd].ofd_idx  = -1;
+            child->fds[fd].fd_flags = 0;
+            if (old >= 0) ofd_unref(old);
+        }
+        /* Inherit from parent. */
+        if (!parent->fds[fd].used) continue;
+        child->fds[fd] = parent->fds[fd];       /* slot struct copy */
+        if (parent->fds[fd].ofd_idx >= 0) {
+            ofd_ref(parent->fds[fd].ofd_idx);
         }
     }
 
@@ -1960,38 +1977,44 @@ int64_t sys_spawn(const char *path, const char *args,
 
     /* Child was created in READY state but hasn't been dispatched
      * yet, so its fds[] still hold the fd_init_for_task defaults.
-     * Move the requested slots in now: copy the full osnos_fd_t,
-     * clear the caller's slot WITHOUT calling pipe_close_*. The
-     * resource (pipe end, socket, file) is unchanged — ownership
-     * has just transferred from caller to child. */
+     * Move the requested slots in now (MOVE semantics — NOT a dup,
+     * the resource transfers from caller to child).
+     *
+     * OFD layer makes this a transfer of (slot.ofd_idx + fd_flags):
+     *   1. Free child's default OFD on that slot (decrement; the
+     *      default is_special OFD just goes away).
+     *   2. Copy caller's slot into child's.
+     *   3. Clear caller's slot WITHOUT calling ofd_unref — we want
+     *      ownership transferred, not dropped. The OFD's refcount
+     *      stays the same (no net change). */
     task_t *child = task_by_pid((uint64_t)pid);
     if (!child) return pid;   /* defensive, shouldn't trigger */
 
     if (src_in) {
-        child->fds[OSNOS_FD_STDIN] = *src_in;
-        osnos_fd_t *cf = &caller->fds[stdin_fd];
-        cf->used      = false;
-        cf->is_pipe   = false;
-        cf->is_socket = false;
-        cf->is_chr    = false;
-        cf->is_dir    = false;
-        cf->is_special= false;
-        cf->pipe_ref  = 0;
-        cf->sock_idx  = -1;
-        cf->path[0]   = 0;
+        if (child->fds[OSNOS_FD_STDIN].used) {
+            int old = child->fds[OSNOS_FD_STDIN].ofd_idx;
+            child->fds[OSNOS_FD_STDIN].used     = false;
+            child->fds[OSNOS_FD_STDIN].ofd_idx  = -1;
+            child->fds[OSNOS_FD_STDIN].fd_flags = 0;
+            if (old >= 0) ofd_unref(old);
+        }
+        child->fds[OSNOS_FD_STDIN] = caller->fds[stdin_fd];   /* slot copy */
+        caller->fds[stdin_fd].used     = false;
+        caller->fds[stdin_fd].ofd_idx  = -1;
+        caller->fds[stdin_fd].fd_flags = 0;
     }
     if (src_out) {
-        child->fds[OSNOS_FD_STDOUT] = *src_out;
-        osnos_fd_t *cf = &caller->fds[stdout_fd];
-        cf->used      = false;
-        cf->is_pipe   = false;
-        cf->is_socket = false;
-        cf->is_chr    = false;
-        cf->is_dir    = false;
-        cf->is_special= false;
-        cf->pipe_ref  = 0;
-        cf->sock_idx  = -1;
-        cf->path[0]   = 0;
+        if (child->fds[OSNOS_FD_STDOUT].used) {
+            int old = child->fds[OSNOS_FD_STDOUT].ofd_idx;
+            child->fds[OSNOS_FD_STDOUT].used     = false;
+            child->fds[OSNOS_FD_STDOUT].ofd_idx  = -1;
+            child->fds[OSNOS_FD_STDOUT].fd_flags = 0;
+            if (old >= 0) ofd_unref(old);
+        }
+        child->fds[OSNOS_FD_STDOUT] = caller->fds[stdout_fd];
+        caller->fds[stdout_fd].used     = false;
+        caller->fds[stdout_fd].ofd_idx  = -1;
+        caller->fds[stdout_fd].fd_flags = 0;
     }
 
     return pid;
@@ -2106,10 +2129,14 @@ int64_t sys_fcntl(int fd, int cmd, int64_t arg) {
         return r;
     }
     case OSNOS_F_GETFD:
-        /* No FD_CLOEXEC support — always 0. */
-        return 0;
+        /* FD_CLOEXEC lives in the per-slot fd_flags (POSIX: NOT
+         * shared with dup'd copies — that's why it's not in OFD). */
+        return (int64_t)fd_get_flags(task_current(), fd);
     case OSNOS_F_SETFD:
-        /* Accept any value; CLOEXEC has no observable effect. */
+        /* Only FD_CLOEXEC (bit 0) is recognised; ignore other bits
+         * to stay forward-compatible. */
+        fd_set_flags(task_current(), fd,
+                     (int)arg & OSNOS_FD_CLOEXEC);
         return 0;
     case OSNOS_F_GETFL:
         return (int64_t)f->flags;

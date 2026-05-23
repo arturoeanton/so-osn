@@ -163,6 +163,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/tests/sigchldtest.c \
     elfs/tests/pgrouptest.c \
     elfs/tests/alltest.c \
+    elfs/tests/ofdtest.c \
     elfs/osn-server/consrv.c \
     elfs/osn-server/kbdsrv.c \
     elfs/osn-server/shellsrv.c

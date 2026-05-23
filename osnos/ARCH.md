@@ -86,11 +86,14 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 |   DNS resolver + getaddrinfo (slirp 10.0.2.3)                  |
 +----------------------------------------------------------------+
 | micro/ core:                                                    |
-|   task (16 slots; per-task fds[16], FPU state, mmap regions,   |
-|     cwd, kill/stop_pending, stdin/stdout_redir, saved iret,    |
-|     parent_pid + wait_status_ptr (wait4), sa_handler[32] +     |
-|     sig_pending (sigaction), pgid + sid (job-control),         |
-|     TASK_ZOMBIE state)                                          |
+|   task (16 slots; per-task fds[16] thin slots → OFD pool,      |
+|     FPU state, mmap regions, cwd, kill/stop_pending,           |
+|     stdin/stdout_redir, saved iret, parent_pid + wait_status_  |
+|     ptr (wait4), sa_handler[32] + sig_pending (sigaction),     |
+|     pgid + sid (job-control), TASK_ZOMBIE state)                |
+|   fd (per-task slot {used, ofd_idx, fd_flags=CLOEXEC}) +       |
+|     global ofd_pool[128] shared open file descriptions —       |
+|     refcounted; dup/dup2/fork share offset via OFD ref bump    |
 |   scheduler (preempt CPL=3 + cooperative + resume_jump)        |
 |   reaper (kstack free queue + DEAD→UNUSED reaping)             |
 |   ipc, service, fd, pipe, fpu, extable, uaccess (fault-recov)  |

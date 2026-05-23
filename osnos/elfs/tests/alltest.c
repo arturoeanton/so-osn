@@ -43,6 +43,7 @@ static char *spawntest_argv  [] = {"spawntest",   0};
 static char *sigchldtest_argv[] = {"sigchldtest", 0};
 static char *pgrouptest_argv [] = {"pgrouptest",  0};
 static char *exectest_argv   [] = {"exectest",    0};
+static char *ofdtest_argv    [] = {"ofdtest",     0};
 static char *libctest_argv   [] = {"libctest",    0};
 
 static test_t tests[] = {
@@ -57,6 +58,7 @@ static test_t tests[] = {
     {"pgrouptest",  "/bin/pgrouptest",  pgrouptest_argv },
     {"spawntest",   "/bin/spawntest",   spawntest_argv  },
     {"exectest",    "/bin/exectest",    exectest_argv   },
+    {"ofdtest",     "/bin/ofdtest",     ofdtest_argv    },
     {"libctest",    "/bin/libctest",    libctest_argv   },
 };
 
