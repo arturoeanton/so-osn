@@ -37,6 +37,12 @@ mini-libc propia para programas de usuario en ring 3.
    shellsrv:/$ ovi .oshrc           # editor modal vim-style
    # i = insert, Esc = normal, hjkl = move,
    # x = del char, dd = del línea, :w = save, :q = quit
+   shellsrv:/$ alltest              # 12/12 tests PASS
+   ALLTEST SUMMARY
+     PASS  kerntest    forktest    waittest    sigtest
+     PASS  sigchldtest pgrouptest  spawntest   exectest
+     PASS  ofdtest     ptytest     fdedgetest  libctest
+   RESULT: 12/12 passed
 ```
 
 > **TL;DR para reentrar al proyecto después de meses:** instalar Limine
