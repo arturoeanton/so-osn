@@ -57,6 +57,7 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 |   rt_sigaction (#13) rt_sigprocmask (#14) rt_sigreturn (#15)   |
 |   setpgid (#109) getppid (#110) getpgrp (#111) setsid (#112)   |
 |   getpgid (#121) getsid (#124) — job control                   |
+|   reboot (#169) — ACPI S5 + 8042 reset (poweroff/restart)      |
 |                                                                 |
 |   osnos: IPC_SEND (260) IPC_RECV (261) SERVICE_REGISTER (262)  |
 |   SERVICE_LOOKUP (263) TTY_INPUT (264) TASKINFO (265)          |
@@ -68,7 +69,8 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 |                        syscall_dispatch(frame)                  |
 +----------------------------------------------------------------+
 | VFS layer:                                                      |
-|   ramfs (/)  sysfs (/sys)  devfs (/dev: null/zero/fb0/input0)  |
+|   ramfs (/)  sysfs (/sys)  devfs (/dev: null/zero/fb0/input0/  |
+|                                       ttyS0/tty/ptmx + pts/N)  |
 |   aliasfs (/home → /sd/home  AND  /bin → /sd/bin)              |
 |   binfs (/bin fallback diskless)                               |
 |   fat16 (/sd, sd.img — read/write con dir-chain extension)     |
@@ -114,14 +116,22 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 | drivers/:                                                       |
 |   keyboard (PS/2; scancodes + Shift + Ctrl + ext + arrows)     |
 |   framebuffer (linear FB + 8x8 font + VT100 CSI parser:        |
-|     ESC[2J/H/r;cH/K/m/7m + SGR truecolor 38;2;R;G;B)           |
+|     ESC[2J/H/r;cH/K/m/7m + SGR truecolor 38;2;R;G;B; tees       |
+|     every write to serial_puts → dual-console always on)        |
+|   serial (UART 16550 COM1 0x3F8, polling-only, 38400 8N1 +      |
+|     FIFO; serial_putc spin LSR THRE + CRLF expand, try_getc     |
+|     non-blocking RX poll)                                       |
 |   rtl8139 (PCI; PIO+DMA; 4 TX slots, RX ring; IRQ stub)        |
 |   block_ata (ATA PIO over IDE primary master, LBA28)           |
 |   pic / lapic / timer (PIT @ 100 Hz for preempt)                |
 +----------------------------------------------------------------+
-| Kernel-side cooperative tasks (NO servers, dos helpers):       |
+| Kernel-side cooperative tasks (NO servers, tres helpers):      |
 |   keyboard feeder — keyboard_poll → devfs_input_push           |
 |     (no toca políticas TTY — eso vive en ring 3 kbdsrv)         |
+|   serial-in feeder (FASE 10.7) — serial_try_getc loop ×64/tick |
+|     → tty_input(b) directo. \\r → \\n para Enter de host.        |
+|     Resultado: bytes COM1 RX llegan a shellsrv fd 0 como un     |
+|     keystroke PS/2 cualquiera. Habilita headless boot.          |
 |   init-respawn — cada ~100ms verifica que consrv/kbdsrv/       |
 |     shellsrv sigan vivos; respawnea si murieron (cubre el      |
 |     post-exec gap). Sleep via state=BLOCKED + wakeup_at_ms.    |
@@ -696,6 +706,34 @@ matchers case-sensitive (glob, strcmp) funcionan.
 nuevo y lo encadena al dir cuando find_free_dir_slots_run pega
 ENOSPC. Permite subdirs grandes (los 64 ELFs viven en `/sd/bin/`
 sin problema).
+
+## Shutdown / reboot (FASE 10.7 polish)
+
+`sys_reboot` (#169 Linux ABI) en `src/micro/syscall.c` da control de
+plataforma a userland:
+
+```
+[ring 3] poweroff main → reboot(RB_POWER_OFF=0x4321FEDC)
+  → osnos_syscall1(SYS_REBOOT=169, cmd)
+  ↓
+[ring 0] sys_reboot(cmd):
+  RB_POWER_OFF:    outw(0xB004, 0x2000)   ; QEMU -M pc ACPI S5
+                   outw(0x0604, 0x2000)   ; QEMU -M q35 ACPI S5
+                   outw(0x4004, 0x3400)   ; VirtualBox shutdown
+                   outb(0x0501, 0x00)     ; QEMU isa-debug-exit
+                   cli; hlt (forever)     ; bare metal fallback
+
+  RB_AUTOBOOT:     outb(0x64, 0xFE)       ; 8042 kbd reset line
+                                          ; universal (real HW too)
+                   cli; hlt
+
+  RB_HALT_SYSTEM:  cli; hlt
+```
+
+Sin magic1/magic2 cookies de Linux — osnos es trusted, simplifica.
+Habilita CI scripts: `./build_and_run.sh headless <<<"alltest;
+poweroff"` corre el test battery + exit limpio + propaga exit code
+al host.
 
 ## Limitaciones conscientes (post-FASE 10)
 

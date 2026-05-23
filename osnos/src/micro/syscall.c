@@ -73,6 +73,26 @@ static int64_t try_open_pty(const char *path, int flags) {
         os_strlcpy(o->path, path, OSNOS_PATH_MAX);
         return fd;
     }
+    if (os_streq(path, "/dev/tty")) {
+        /* The controlling terminal — open returns a fresh OFD with
+         * is_special=true so the rest of the fd path (sys_read /
+         * sys_write / sys_ioctl) routes to the same kernel TTY layer
+         * that backs the default fd 0/1/2. Used by pipe-mode pagers
+         * (`cat foo | less` does `dup2(open("/dev/tty"), 0)` to get
+         * the keyboard back after stdin was redirected to a pipe).
+         *
+         * Each open allocates its own OFD (NOT shared with the
+         * default stdio OFDs) — they're all routing aliases of the
+         * same singleton kernel TTY ring, so the duplication is just
+         * bookkeeping with no real cost. */
+        int fd = fd_alloc(task_current());
+        if (fd < 0) return err(OSNOS_EMFILE);
+        osnos_fd_t *o = fd_get(task_current(), fd);
+        o->is_special = true;
+        o->flags      = flags;
+        os_strlcpy(o->path, path, OSNOS_PATH_MAX);
+        return fd;
+    }
     if (os_strstarts(path, "/dev/pts/")) {
         /* Parse N. Be conservative: only decimal, no leading zeros
          * past 0, no trailing junk. */
@@ -161,7 +181,11 @@ int64_t sys_open(const char *path, int flags, uint32_t mode) {
 int64_t sys_close(int fd) {
     osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f) return err(OSNOS_EBADF);
-    if (f->is_special) return err(OSNOS_EBADF);
+    /* Refuse to close the default fd 0/1/2 stdio slots. Higher slots
+     * marked is_special (e.g. an OFD obtained via open("/dev/tty")
+     * for pipe-mode pagers) ARE closeable — the protection only
+     * applies to the implicit "every task starts with stdio" slots. */
+    if (f->is_special && fd < 3) return err(OSNOS_EBADF);
     /* Post-OFD refactor: fd_free decrements the OFD refcount.
      * When the refcount hits 0, ofd_unref dispatches the backend
      * cleanup (pipe_close_reader/writer, sock_close, pty_*_unref).
@@ -527,6 +551,60 @@ int64_t sys_exit(int code) {
     /* Kernel-mode builtin: mark DEAD; the trampoline catches it. */
     t->state = TASK_DEAD;
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_reboot — power off / restart via ACPI                           */
+/* ------------------------------------------------------------------ */
+
+/* Linux reboot(2) command codes — we accept the canonical magic but
+ * skip the cookie-magic dance (magic1 / magic2). osnos is hobby; if
+ * userland made it to this syscall it was deliberate. */
+#define OSNOS_RB_POWER_OFF    0x4321FEDC
+#define OSNOS_RB_RESTART      0x01234567
+#define OSNOS_RB_HALT_SYSTEM  0xCDEF0123
+
+static inline void io_outw(uint16_t port, uint16_t v) {
+    __asm__ volatile ("outw %0, %1" :: "a"(v), "Nd"(port));
+}
+
+static inline void io_outb(uint16_t port, uint8_t v) {
+    __asm__ volatile ("outb %0, %1" :: "a"(v), "Nd"(port));
+}
+
+static void halt_forever(void) {
+    for (;;) __asm__ volatile ("cli; hlt");
+}
+
+int64_t sys_reboot(uint32_t cmd) {
+    switch (cmd) {
+    case OSNOS_RB_POWER_OFF:
+        /* Try the QEMU shutdown vectors in order of likelihood:
+         *   - PIIX4 (`-M pc`, our default boot): port 0xB004 + 0x2000
+         *   - ICH9 (`-M q35`): port 0x604 + 0x2000
+         *   - VirtualBox: port 0x4004 + 0x3400
+         *   - Bochs / QEMU `isa-debug-exit`: port 0x501 + 0
+         * Whichever the host responds to fires first; the rest are
+         * harmless writes to unused I/O ports. */
+        io_outw(0xB004, 0x2000);
+        io_outw(0x0604, 0x2000);
+        io_outw(0x4004, 0x3400);
+        io_outb(0x0501, 0x00);
+        halt_forever();          /* never reached on QEMU */
+        break;
+    case OSNOS_RB_RESTART:
+        /* 8042 keyboard controller reset line — universally
+         * supported, works on real HW too. */
+        io_outb(0x64, 0xFE);
+        halt_forever();
+        break;
+    case OSNOS_RB_HALT_SYSTEM:
+        halt_forever();
+        break;
+    default:
+        return err(OSNOS_EINVAL);
+    }
+    return 0;                    /* unreachable */
 }
 
 /* ------------------------------------------------------------------ */
@@ -2672,6 +2750,8 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
             return pack(sys_isatty((int)frame->rdi));
         case SYS_EXIT:
             return pack(sys_exit((int)frame->rdi));
+        case SYS_REBOOT:
+            return pack(sys_reboot((uint32_t)frame->rdi));
         case SYS_BRK:
             return pack(sys_brk((uintptr_t)frame->rdi));
         case SYS_NANOSLEEP:

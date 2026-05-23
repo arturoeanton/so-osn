@@ -39,6 +39,7 @@
 #define SYS_EXIT      60
 #define SYS_WAIT4     61
 #define SYS_KILL      62
+#define SYS_REBOOT   169   /* Linux reboot(2) */
 /* Signal-handling syscalls — Linux x86_64 rt_sig* family. */
 #define SYS_RT_SIGACTION   13
 #define SYS_RT_SIGPROCMASK 14

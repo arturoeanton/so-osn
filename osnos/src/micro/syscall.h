@@ -34,6 +34,7 @@ typedef struct task task_t;
 #define SYS_EXECVE   59
 #define SYS_EXIT     60
 #define SYS_WAIT4    61
+#define SYS_REBOOT  169   /* Linux reboot(2): power-off / restart / halt */
 #define SYS_KILL     62
 /* signal-handling syscalls — Linux x86_64 rt_sig* family. */
 #define SYS_RT_SIGACTION   13
@@ -125,6 +126,7 @@ int64_t sys_lseek (int fd, int64_t offset, int whence);
 int64_t sys_fstat (int fd, osnos_stat_t *out);
 int64_t sys_isatty(int fd);
 int64_t sys_exit  (int code);
+int64_t sys_reboot(uint32_t cmd);
 
 /*
  * Linux brk(2): grow or shrink the heap window of the current task.

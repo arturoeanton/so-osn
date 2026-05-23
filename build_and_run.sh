@@ -3,10 +3,17 @@
 # Works on macOS (Homebrew) and Linux (Fedora/Debian/Arch). Uses
 # whichever Limine is installed on the host — nothing is bundled.
 #
-#   ./build_and_run.sh            # clean + build + run-bios
+#   ./build_and_run.sh            # clean + build + run-bios (graphical)
 #   ./build_and_run.sh build      # just build the ISO
 #   ./build_and_run.sh run        # boot the existing ISO
+#   ./build_and_run.sh headless   # boot WITHOUT a window — host stdio
+#                                  # becomes the osnos serial console.
+#                                  # Useful for CI / `tee log.txt`.
 #   ./build_and_run.sh clean      # wipe build artifacts
+#
+# In graphical mode the serial console is teed to ./serial.log so you
+# can `tail -f serial.log` from another terminal without interrupting
+# the QEMU window.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -59,7 +66,18 @@ case "$(uname -s)" in
     Linux)  DISPLAY_FLAG="-display gtk"   ;;
 esac
 
-QEMUFLAGS="${QEMUFLAGS:--m 2G $DISPLAY_FLAG}"
+# Serial routing:
+#   graphical mode → tee to ./serial.log (file sink, non-interactive)
+#   headless mode  → -nographic with stdio = serial (interactive console)
+# The host's `chardev:file` sink is infinite so writes never block.
+case "$ACTION" in
+    headless)
+        QEMUFLAGS="${QEMUFLAGS:--m 2G -nographic -serial mon:stdio}"
+        ;;
+    *)
+        QEMUFLAGS="${QEMUFLAGS:--m 2G $DISPLAY_FLAG -serial file:serial.log}"
+        ;;
+esac
 
 export LIMINE_DIR
 export QEMUFLAGS
@@ -74,12 +92,15 @@ case "$ACTION" in
     run)
         make -C osnos run-bios
         ;;
+    headless)
+        make -C osnos run-bios
+        ;;
     all)
         make -C osnos clean
         make -C osnos run-bios
         ;;
     *)
-        echo "usage: $0 [all|build|run|clean]" >&2
+        echo "usage: $0 [all|build|run|headless|clean]" >&2
         exit 2
         ;;
 esac

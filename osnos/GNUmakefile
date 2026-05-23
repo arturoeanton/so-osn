@@ -117,6 +117,8 @@ USER_ELF_LIBC_SRCS := \
     elfs/tools/top.c \
     elfs/tools/ovi.c \
     elfs/tools/less.c \
+    elfs/tools/poweroff.c \
+    elfs/tools/reboot.c \
     elfs/tools/tcc.c \
     elfs/tools/head.c \
     elfs/tools/env.c \
@@ -169,6 +171,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/tests/fdedgetest.c \
     elfs/tests/jobtest.c \
     elfs/tests/termtest.c \
+    elfs/tests/serialtest.c \
     elfs/tools/minishell.c \
     elfs/tools/term.c \
     elfs/osn-server/consrv.c \

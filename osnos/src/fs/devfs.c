@@ -2,8 +2,10 @@
 
 #include "../drivers/framebuffer.h"
 #include "../drivers/keyboard.h"
+#include "../drivers/serial.h"
 #include "../include/osnos_status.h"
 #include "../lib/string.h"
+#include "../micro/tty.h"
 #include "vfs.h"
 
 /* ------------------------------------------------------------------ */
@@ -132,11 +134,64 @@ static osnos_status_t input0_write(const char *buf, size_t buf_size) {
     return OSNOS_EROFS;
 }
 
+/*
+ * /dev/ttyS0 — raw access to the UART. write goes straight to
+ * serial_puts (one byte at a time, no termios cooking). read polls
+ * serial_try_getc once per byte requested and returns EAGAIN if the
+ * UART has nothing ready. NOTE: if `serial_input_server` is running
+ * (the default since FASE 10.7), the input feeder is racing for the
+ * same RX bytes — explicit /dev/ttyS0 reads are best-effort.
+ */
+static osnos_status_t ttyS0_read(char *buf, size_t buf_size, size_t *out) {
+    if (!buf || !out) return OSNOS_EFAULT;
+    size_t n = 0;
+    while (n < buf_size) {
+        uint8_t b;
+        if (!serial_try_getc(&b)) break;
+        buf[n++] = (char)b;
+    }
+    *out = n;
+    if (n == 0) return OSNOS_EAGAIN;
+    return OSNOS_OK;
+}
+
+static osnos_status_t ttyS0_write(const char *buf, size_t buf_size) {
+    if (!buf) return OSNOS_EFAULT;
+    serial_puts(buf, buf_size);
+    return OSNOS_OK;
+}
+
+/*
+ * /dev/tty — the controlling terminal. open() on this path is
+ * special-cased in sys_open (src/micro/syscall.c) to return an
+ * is_special OFD that routes through the existing fd 0/1/2 paths
+ * (stdin_pop / write_to_console / ioctl TCGETS-etc). These read/
+ * write fallbacks here are for the rare case where someone reaches
+ * /dev/tty via vfs_read/vfs_write (e.g. stat + read in tools).
+ */
+static osnos_status_t tty_dev_read(char *buf, size_t buf_size, size_t *out) {
+    if (!buf || !out) return OSNOS_EFAULT;
+    size_t n = tty_read(buf, buf_size);
+    *out = n;
+    return (n == 0) ? OSNOS_EAGAIN : OSNOS_OK;
+}
+
+static osnos_status_t tty_dev_write(const char *buf, size_t buf_size) {
+    if (!buf) return OSNOS_EFAULT;
+    /* Same dual-console tee as fd 1 default: framebuffer + serial
+     * (framebuffer_write_bytes already mirrors to serial_puts since
+     * FASE 10.7 Bloque A). */
+    framebuffer_write_bytes(buf, buf_size, 0xffffff);
+    return OSNOS_OK;
+}
+
 static const devfs_dev_t devices[] = {
-    { "null",   null_read,  null_write  },
-    { "zero",   zero_read,  zero_write  },
-    { "fb0",    fb0_read,   fb0_write   },
-    { "input0", input0_read, input0_write }
+    { "null",   null_read,    null_write    },
+    { "zero",   zero_read,    zero_write    },
+    { "fb0",    fb0_read,     fb0_write     },
+    { "input0", input0_read,  input0_write  },
+    { "ttyS0",  ttyS0_read,   ttyS0_write   },
+    { "tty",    tty_dev_read, tty_dev_write }
 };
 
 #define DEVFS_DEV_COUNT (sizeof(devices) / sizeof(devices[0]))

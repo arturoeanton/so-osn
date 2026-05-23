@@ -9,8 +9,10 @@
 #include "../drivers/lapic.h"
 #include "../drivers/pic.h"
 #include "../drivers/rtl8139.h"
+#include "../drivers/serial.h"
 #include "../proc/exec.h"
 #include "../servers/keyboard_server.h"
+#include "../servers/serial_input_server.h"
 #include "../micro/fpu.h"
 #include "../micro/gdt.h"
 #include "../micro/idt.h"
@@ -87,6 +89,10 @@ static void hcf(void) {
 // ======================================================
 
 void kmain(void) {
+    /* UART first — gives panic handlers a serial sink even if the
+     * framebuffer request fails or the FB driver mis-inits. */
+    serial_init(SERIAL_COM1);
+
     if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision)) {
         hcf();
     }
@@ -152,6 +158,13 @@ void kmain(void) {
      */
     int keyboard_pid = task_create("keyboard", keyboard_server_tick);
     (void)keyboard_pid;
+
+    /* Serial input feeder (FASE 10.7): pulls bytes off COM1's RX
+     * register each tick and pushes them through tty_input(), the
+     * same way kbdsrv does for PS/2. Means host-side serial input
+     * (qemu -nographic + stdio) reaches shellsrv fd 0 verbatim. */
+    int serial_in_pid = task_create("serial-in", serial_input_server_tick);
+    (void)serial_in_pid;
 
     /* SERVER_FS / fs_server.c removed in FASE 10.3 — the shell speaks
      * directly to the VFS via syscalls. */

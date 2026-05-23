@@ -97,23 +97,23 @@ static void clr_eol(void) { out("\x1b[K"); }
 
 /* ---- file load ---- */
 
-static int load_file(const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        snprintf(status_msg, sizeof(status_msg),
-                  "less: cannot open %s (errno=%d)", path, errno);
-        nlines = 1; line_len[0] = 0; lines[0][0] = 0;
-        return -1;
-    }
+/* Read whole `fd` until EOF and split into lines[]. Returns total
+ * bytes consumed (>=0) or -1 on read error. EAGAIN loops with a
+ * tiny sleep — used for the pipe-mode drain case where the writer
+ * (e.g. `cat foo |`) may temporarily have no bytes ready. */
+static ssize_t slurp_fd(int fd) {
     static char buf[65536];
     ssize_t total = 0;
     for (;;) {
         ssize_t n = read(fd, buf + total, sizeof(buf) - (size_t)total);
-        if (n <= 0) break;
+        if (n == 0) break;                  /* EOF */
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EINTR) continue;
+            return -1;
+        }
         total += n;
         if ((size_t)total >= sizeof(buf)) break;
     }
-    close(fd);
 
     nlines = 0;
     int col = 0;
@@ -132,8 +132,56 @@ static int load_file(const char *path) {
         line_len[nlines] = col;
         nlines++;
     }
+    return total;
+}
+
+static int load_file(const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        snprintf(status_msg, sizeof(status_msg),
+                  "less: cannot open %s (errno=%d)", path, errno);
+        nlines = 1; line_len[0] = 0; lines[0][0] = 0;
+        return -1;
+    }
+    ssize_t total = slurp_fd(fd);
+    close(fd);
+    if (total < 0) {
+        snprintf(status_msg, sizeof(status_msg),
+                  "less: read %s failed errno=%d", path, errno);
+        return -1;
+    }
     snprintf(status_msg, sizeof(status_msg),
               "%s — %zd bytes, %d lines", path, total, nlines);
+    return 0;
+}
+
+/* Pipe-mode: stdin is the file content. Drain it, then attach the
+ * real keyboard via /dev/tty so the interactive loop has somewhere
+ * to read from. */
+static int load_from_stdin(void) {
+    ssize_t total = slurp_fd(0);
+    if (total < 0) {
+        snprintf(status_msg, sizeof(status_msg),
+                  "less: stdin read failed errno=%d", errno);
+        return -1;
+    }
+    int tty = open("/dev/tty", O_RDWR);
+    if (tty < 0) {
+        /* Can't be interactive without a terminal — bail. */
+        printf("less: no /dev/tty available (errno=%d)\n", errno);
+        return -1;
+    }
+    /* Replace fd 0 (which is the now-drained pipe) with the TTY so
+     * the rest of less's input loop reads keystrokes from there. */
+    if (dup2(tty, 0) < 0) {
+        printf("less: dup2(/dev/tty, 0) failed errno=%d\n", errno);
+        return -1;
+    }
+    /* tty (the original /dev/tty fd) leaks but the program is short
+     * lived; sys_close refuses to close is_special fds <3 anyway. */
+    snprintf(status_msg, sizeof(status_msg),
+              "(stdin) — %zd bytes, %d lines", total, nlines);
+    strcpy(filename, "(stdin)");
     return 0;
 }
 
@@ -290,13 +338,19 @@ static void finish_search(void) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        printf("usage: less FILE\n");
-        return 1;
-    }
-    strcpy(filename, argv[1]);
-    if (load_file(filename) != 0) {
-        printf("%s\n", status_msg);
-        return 1;
+        /* No file argument → pipe-mode: stdin = data, /dev/tty = keys.
+         * Works under `cat foo | less` provided shellsrv pipes us
+         * correctly and /dev/tty is available. */
+        if (load_from_stdin() != 0) {
+            printf("%s\n", status_msg);
+            return 1;
+        }
+    } else {
+        strcpy(filename, argv[1]);
+        if (load_file(filename) != 0) {
+            printf("%s\n", status_msg);
+            return 1;
+        }
     }
 
     if (tcgetattr(0, &saved_termios) != 0) {

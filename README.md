@@ -86,15 +86,35 @@ mini-libc propia para programas de usuario en ring 3.
 ```
 
 Esto: limpia, compila el kernel, arma un ISO booteable y lo arranca en
-QEMU (SeaBIOS, no UEFI, porque arranca más rápido).
+QEMU (SeaBIOS, no UEFI, porque arranca más rápido). En modo gráfico
+default la consola serial se persiste a `./serial.log` — útil para
+debug + grep sin tocar la ventana de QEMU.
 
 Subcomandos:
 
 ```sh
-./build_and_run.sh build   # solo compilar y armar el ISO
-./build_and_run.sh run     # bootear un ISO ya existente
-./build_and_run.sh clean   # borrar artefactos de build
+./build_and_run.sh build      # solo compilar y armar el ISO
+./build_and_run.sh run        # bootear un ISO ya existente
+./build_and_run.sh headless   # boot WITHOUT QEMU window — stdio host
+                              # = consola osnos. Ideal para CI / tee.
+./build_and_run.sh clean      # borrar artefactos de build
 ```
+
+**Headless / CI**: `./build_and_run.sh headless` lanza QEMU con
+`-nographic -serial mon:stdio`. El stdio del host pasa a ser la
+consola serial de la VM — tipear `alltest` + Enter desde la
+terminal del host produce el log completo de los 15 tests por
+stdout, ideal para capturar con `tee log.txt` o pipe a grep.
+
+**Auto-poweroff para CI**:
+
+```sh
+./build_and_run.sh headless <<<'alltest; poweroff' | tee run.log
+echo "exit code: $?"
+```
+
+`poweroff` dispara ACPI S5 (port 0xB004 + 0x2000) → QEMU cierra y
+el script vuelve a la shell del host con su exit code real.
 
 El script detecta macOS vs Linux automáticamente, busca Limine en
 `/opt/homebrew/share/limine`, `/usr/local/share/limine` o
@@ -328,7 +348,11 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | **PTY pairs** (`/dev/ptmx` + `/dev/pts/N`, pool de 8, canon/raw, ECHO, EOF/EPIPE, ioctls TIOCGPTN/TCGETS/TCSETS) + libc `posix_openpt`/`ptsname`/`grantpt`/`unlockpt` | ✅ |
 | **WUNTRACED / WCONTINUED** en `wait4(2)` + SIGSTOP/SIGCONT delivery + fan-out de Ctrl+C/Z a TODA la foreground process group + shellsrv migrado a `waitpid()` real (sin polling) | ✅ |
 | **Mini terminal emulator** (`/bin/term` spawn `/bin/minishell` en PTY) — sub-shell interactivo, showcase del stack POSIX completo | ✅ |
-| **14/14 tests automatizados** via `/bin/alltest` (kerntest, forktest, waittest, sigtest, sigchldtest, pgrouptest, spawntest, exectest, ofdtest, ptytest, fdedgetest, jobtest, termtest, libctest) | ✅ |
+| **Serial console + `/dev/tty`** — UART 16550 COM1 dual-console (fb + serial siempre on); `./build_and_run.sh headless` bootea sin ventana con stdio del host = consola; panic backtrace persiste en `serial.log` aunque el FB se rompa; `/dev/tty` habilita pipe-mode pagers (`cat foo \| less`) | ✅ |
+| **`/bin/less`** pager con `/pattern` + `n`/`N` highlight (pipe-mode: `cat foo \| less` drena stdin + `dup2(/dev/tty, 0)` para keyboard) | ✅ |
+| **`reboot(2)`** (#169 Linux ABI) + `/bin/poweroff` + `/bin/reboot` — ACPI S5 (port 0xB004) + 8042 keyboard reset; QEMU cierra limpio, propagable a CI | ✅ |
+| **`tail -f`** en `/bin/tail` — poll loop 200ms con EAGAIN/EINTR safe, Ctrl+C exit | ✅ |
+| **15/15 tests automatizados** via `/bin/alltest` (kerntest, forktest, waittest, sigtest, sigchldtest, pgrouptest, spawntest, exectest, ofdtest, ptytest, fdedgetest, jobtest, termtest, serialtest, libctest) | ✅ |
 | **init-respawn watchdog** — consrv/kbdsrv/shellsrv auto-restart on death | ✅ |
 | Driver ATA PIO + FAT16 read/write + dir-chain extension + NT case-bits + persistencia | ✅ |
 | **/bin disk-resident** — sd.img poblado al build via mtools, kernel binary 1.1 MB (era 7.6 MB) | ✅ |

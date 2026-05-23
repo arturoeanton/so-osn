@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "../drivers/framebuffer.h"
+#include "../drivers/serial.h"
 #include "../lib/string.h"
 #include "../proc/exec.h"
 #include "extable.h"
@@ -76,6 +77,10 @@ static void install(int vec, void *handler) {
 
 static void put_str(const char *s, uint32_t color) {
     framebuffer_draw_string(s, color);
+    /* Panic / exception output also goes to serial so a host
+     * capturing `-serial file:serial.log` sees the backtrace even
+     * when the framebuffer is corrupt or invisible. */
+    if (s) serial_puts(s, os_strlen(s));
 }
 
 static void put_hex(uint64_t value, uint32_t color) {

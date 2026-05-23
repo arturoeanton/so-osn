@@ -308,11 +308,22 @@ void framebuffer_draw_string(
     }
 }
 
+/* Forward decl — serial tee. Included here to avoid pulling
+ * serial.h into framebuffer.h (and into every consumer of the FB
+ * driver). Keeps the tee a one-line opt-in here. */
+extern void serial_puts(const char *s, size_t n);
+
 void framebuffer_write_bytes(
     const char *buf,
     size_t n,
     uint32_t color
 ) {
+    /* Dual-console tee: every byte that hits the framebuffer also
+     * goes to the serial port. Color/SGR sequences flow through
+     * verbatim — host terminals interpret them, log scrapers strip
+     * with `tr -d '\033'`. */
+    if (buf && n > 0) serial_puts(buf, n);
+
     /* draw_string is NUL-terminated and parses ESC[...] sequences in
      * order. We copy into a NUL-terminated chunk and dispatch. The
      * chunk MUST NOT split an ESC sequence — if the trailing bytes

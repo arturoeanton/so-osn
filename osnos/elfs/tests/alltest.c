@@ -48,6 +48,7 @@ static char *ptytest_argv    [] = {"ptytest",     0};
 static char *fdedgetest_argv [] = {"fdedgetest",  0};
 static char *jobtest_argv    [] = {"jobtest",     0};
 static char *termtest_argv   [] = {"termtest",    0};
+static char *serialtest_argv [] = {"serialtest",  0};
 static char *libctest_argv   [] = {"libctest",    0};
 
 static test_t tests[] = {
@@ -67,6 +68,7 @@ static test_t tests[] = {
     {"fdedgetest",  "/bin/fdedgetest",  fdedgetest_argv },
     {"jobtest",     "/bin/jobtest",     jobtest_argv    },
     {"termtest",    "/bin/termtest",    termtest_argv   },
+    {"serialtest",  "/bin/serialtest",  serialtest_argv },
     {"libctest",    "/bin/libctest",    libctest_argv   },
 };
 
