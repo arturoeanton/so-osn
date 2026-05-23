@@ -116,6 +116,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/tools/kill.c \
     elfs/tools/top.c \
     elfs/tools/ovi.c \
+    elfs/tools/less.c \
     elfs/tools/tcc.c \
     elfs/tools/head.c \
     elfs/tools/env.c \
