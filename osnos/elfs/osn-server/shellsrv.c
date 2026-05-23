@@ -790,20 +790,35 @@ typedef struct {
 
 /* Split `line` by `|` into N stage strings (in-place: replaces `|` with
  * NUL). Each stage string is later tokenised + redirect-extracted by
- * stage_parse. Returns N or -1 on too-many-stages. */
+ * stage_parse. Returns N or -1 on too-many-stages.
+ *
+ * Quote-aware: `|` inside `'...'` or `"..."` is treated as a literal
+ * character, not a pipe operator. Without this, `jq '.a | .b'` was
+ * being split mid-program-string. The kernel's build_argv_block (in
+ * src/proc/exec.c) already understands `'...'` and `"..."` when re-
+ * tokenising args, so this just needs to match that contract at the
+ * pipe-split layer. `\\|` outside quotes also escapes the pipe.
+ */
 static int line_split_stages(char *line, char *stage_raw[MAX_STAGES]) {
     int n = 0;
     stage_raw[n++] = line;
+    int in_sq = 0, in_dq = 0;
     for (char *p = line; *p; p++) {
-        if (*p == '|') {
+        char c = *p;
+        if (!in_sq && !in_dq && c == '\\' && p[1]) {
+            p++;             /* skip escaped char */
+            continue;
+        }
+        if (!in_dq && c == '\'') { in_sq = !in_sq; continue; }
+        if (!in_sq && c == '"')  { in_dq = !in_dq; continue; }
+        if (in_sq || in_dq) continue;
+        if (c == '|') {
             *p = 0;
             p++;
             while (*p == ' ' || *p == '\t') p++;
             if (n >= MAX_STAGES) return -1;
             stage_raw[n++] = p;
-            /* `p` will be incremented by the for-loop again, so step
-             * back one. */
-            p--;
+            p--;             /* for-loop ++ will skip the first char */
         }
     }
     return n;
@@ -1313,11 +1328,24 @@ static void dispatch(char *line_in) {
         while (*p == ' ' || *p == '\t') p++;
         if (!*p) break;
         char *seg = p;
-        /* Walk to next operator. `|` alone is a pipe (skip past),
-         * `||` is OR (stop). `&` alone is background (handled inside
-         * dispatch_segment), `&&` is AND (stop). */
+        /* Walk to next operator. `|` alone is a pipe (skip past — it
+         * gets handled later by line_split_stages), `||` is OR (stop).
+         * `&` alone is background, `&&` is AND (stop).
+         *
+         * Quote-aware: a `;`/`&&`/`||` inside `'...'` or `"..."` is
+         * not an operator — same rule as line_split_stages. Matches
+         * what the kernel's build_argv_block does when re-tokenising. */
+        int in_sq = 0, in_dq = 0;
         while (*p) {
-            if (*p == ';') break;
+            char c = *p;
+            if (!in_sq && !in_dq && c == '\\' && p[1]) {
+                p += 2;
+                continue;
+            }
+            if (!in_dq && c == '\'') { in_sq = !in_sq; p++; continue; }
+            if (!in_sq && c == '"')  { in_dq = !in_dq; p++; continue; }
+            if (in_sq || in_dq) { p++; continue; }
+            if (c == ';') break;
             if (p[0] == '&' && p[1] == '&') break;
             if (p[0] == '|' && p[1] == '|') break;
             p++;
