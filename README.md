@@ -306,6 +306,12 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | **`wait(2)` / `waitpid(2)` real** (SYS_WAIT4=61) + TASK_ZOMBIE state + WIFEXITED/WEXITSTATUS/WIFSIGNALED/WTERMSIG macros | ✅ |
 | **`sigaction(2)` real** (SYS_RT_SIGACTION=13, SYS_RT_SIGRETURN=15) — sa_handler-only, sigframe en user stack, libc __sigtramp epilogue | ✅ |
 | **EINTR** en blocking syscalls (`read`/`wait`/`nanosleep`/`recvfrom`/`accept`) cuando llega signal | ✅ |
+| **SIGCHLD automático** al child exit + `signal()`/`sigaction()` reales sobre el mismo handler model | ✅ |
+| **Process groups + sessions** (`setpgid`/`getpgid`/`setsid`/`getsid`/`getpgrp`/`getppid`) + `kill(-pgid, sig)` broadcast | ✅ |
+| **Open File Description (OFD) refactor** — `ofd_pool[128]`, dup/dup2/fork share offset POSIX-strict | ✅ |
+| **FD_CLOEXEC** (per-fd, no shared via dup; execve cierra solo CLOEXEC) | ✅ |
+| **PTY pairs** (`/dev/ptmx` + `/dev/pts/N`, pool de 8, canon/raw, ECHO, EOF/EPIPE, ioctls TIOCGPTN/TCGETS/TCSETS) + libc `posix_openpt`/`ptsname`/`grantpt`/`unlockpt` | ✅ |
+| **12/12 tests automatizados** via `/bin/alltest` (kerntest, forktest, waittest, sigtest, sigchldtest, pgrouptest, spawntest, exectest, ofdtest, ptytest, fdedgetest, libctest) | ✅ |
 | **init-respawn watchdog** — consrv/kbdsrv/shellsrv auto-restart on death | ✅ |
 | Driver ATA PIO + FAT16 read/write + dir-chain extension + NT case-bits + persistencia | ✅ |
 | **/bin disk-resident** — sd.img poblado al build via mtools, kernel binary 1.1 MB (era 7.6 MB) | ✅ |
