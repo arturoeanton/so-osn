@@ -48,6 +48,7 @@
 #define OSNOS_FD_CLOEXEC 0x1
 
 struct pipe;
+struct pty_pair;
 
 /* The shared open file description. Refcounted. */
 typedef struct osnos_ofd {
@@ -59,10 +60,15 @@ typedef struct osnos_ofd {
     bool         is_socket;           /* opened via sys_socket */
     bool         is_pipe;             /* opened via sys_pipe / inherited */
     bool         is_chr;              /* character device */
+    bool         is_pty;              /* /dev/ptmx or /dev/pts/N */
 
     int          sock_idx;            /* index into net/socket table */
     struct pipe *pipe_ref;            /* shared pipe object */
     int          pipe_side;           /* 0 = read end, 1 = write end */
+
+    struct pty_pair *pty_ref;         /* shared pty pair, when is_pty */
+    int              pty_side;        /* 0 = master, 1 = slave */
+
     int          flags;               /* O_RDONLY etc. */
     uint64_t     offset;              /* file position OR readdir cursor */
     char         path[OSNOS_PATH_MAX];

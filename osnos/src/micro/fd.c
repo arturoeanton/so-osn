@@ -3,6 +3,7 @@
 #include "../include/osnos_fcntl.h"
 #include "../net/socket.h"
 #include "pipe.h"
+#include "pty.h"
 #include "task.h"
 #include "tty.h"
 
@@ -29,9 +30,12 @@ static void ofd_clear(osnos_ofd_t *o) {
     o->is_socket  = false;
     o->is_pipe    = false;
     o->is_chr     = false;
+    o->is_pty     = false;
     o->sock_idx   = -1;
     o->pipe_ref   = 0;
     o->pipe_side  = 0;
+    o->pty_ref    = 0;
+    o->pty_side   = 0;
     o->flags      = 0;
     o->offset     = 0;
     o->path[0]    = 0;
@@ -79,6 +83,10 @@ void ofd_unref(int idx) {
     }
     if (o->is_socket && o->sock_idx >= 0) {
         sock_close(o->sock_idx);
+    }
+    if (o->is_pty && o->pty_ref) {
+        if (o->pty_side == 0) pty_master_unref(o->pty_ref);
+        else                   pty_slave_unref (o->pty_ref);
     }
     ofd_clear(o);
 }

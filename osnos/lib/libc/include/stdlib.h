@@ -73,3 +73,17 @@ void   exit   (int code);
 
 __attribute__((noreturn))
 void   abort  (void);
+
+/*
+ * POSIX pseudoterminal helpers. posix_openpt opens /dev/ptmx and
+ * returns a master fd; grantpt is a no-op on osnos (no perm model);
+ * unlockpt issues TIOCSPTLCK (also a no-op kernel-side but the
+ * ABI exists for compatibility). ptsname_r writes "/dev/pts/<N>"
+ * into the caller's buffer; the slave fd is then obtained with
+ * open(pts_name, O_RDWR).
+ */
+int   posix_openpt(int flags);
+int   grantpt    (int fd);
+int   unlockpt   (int fd);
+int   ptsname_r  (int fd, char *buf, size_t buflen);
+char *ptsname    (int fd);

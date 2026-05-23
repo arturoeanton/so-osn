@@ -207,6 +207,8 @@ roadmap), mover los servidores debería ser mecánico.
 │  Syscall ABI Linux x86_64 (read/write/open/pipe/dup/...):   │
 │   SYS_FORK (57) + SYS_EXECVE (59) + SYS_WAIT4 (61) +        │
 │   SYS_RT_SIGACTION (13) / SIGRETURN (15) → POSIX core ✅     │
+│   SETPGID (109) GETPPID (110) GETPGRP (111) SETSID (112)    │
+│   GETPGID (121) GETSID (124) → job control ✅                │
 │   osnos-specific (≥ 250):                                    │
 │   SYS_IPC_SEND/RECV (260/261), SERVICE_* (262/263),         │
 │   SYS_TTY_INPUT (264), SYS_TASKINFO (265),                  │

@@ -94,6 +94,9 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 |   fd (per-task slot {used, ofd_idx, fd_flags=CLOEXEC}) +       |
 |     global ofd_pool[128] shared open file descriptions —       |
 |     refcounted; dup/dup2/fork share offset via OFD ref bump    |
+|   pty (pool de 8 pty_pair_t — m2s/s2m ring buffers 4 KiB +     |
+|     termios per-pair + canon line accumulator; /dev/ptmx +     |
+|     /dev/pts/N via OFD with is_pty + pty_side)                  |
 |   scheduler (preempt CPL=3 + cooperative + resume_jump)        |
 |   reaper (kstack free queue + DEAD→UNUSED reaping)             |
 |   ipc, service, fd, pipe, fpu, extable, uaccess (fault-recov)  |

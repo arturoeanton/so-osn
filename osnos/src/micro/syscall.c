@@ -19,6 +19,7 @@
 #include "kmalloc.h"
 #include "pipe.h"
 #include "pmm.h"
+#include "pty.h"
 #include "scheduler.h"
 #include "task.h"
 #include "timer.h"
@@ -40,10 +41,73 @@ static int64_t err(osnos_status_t s) {
 /* sys_open                                                           */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Special-case PTY path opens.
+ *
+ *   open("/dev/ptmx")    → allocate a fresh pty_pair, return master fd
+ *                          (is_pty + pty_side=0 + pty_ref).
+ *   open("/dev/pts/N")   → find existing pty_pair[N], return slave fd
+ *                          (is_pty + pty_side=1 + pty_ref).
+ *
+ * The PTY layer has lifecycle semantics totally different from
+ * regular char devices (each /dev/ptmx open spawns a new object;
+ * /dev/pts/N is dynamic), so we bypass devfs's read/write callback
+ * model here and wire the OFD directly to a pty_pair_t.
+ *
+ * Returns >=0 fd on success, negative -errno on failure, or -1 to
+ * signal "not a PTY path, fall through to normal sys_open logic".
+ */
+static int64_t try_open_pty(const char *path, int flags) {
+    (void)flags;
+    if (!path) return -1;
+    if (os_streq(path, "/dev/ptmx")) {
+        pty_pair_t *p = pty_alloc();
+        if (!p) return err(OSNOS_ENFILE);
+        int fd = fd_alloc(task_current());
+        if (fd < 0) { pty_master_unref(p); return err(OSNOS_EMFILE); }
+        osnos_fd_t *o = fd_get(task_current(), fd);
+        o->is_pty   = true;
+        o->pty_ref  = p;
+        o->pty_side = 0;
+        o->flags    = flags;
+        os_strlcpy(o->path, path, OSNOS_PATH_MAX);
+        return fd;
+    }
+    if (os_strstarts(path, "/dev/pts/")) {
+        /* Parse N. Be conservative: only decimal, no leading zeros
+         * past 0, no trailing junk. */
+        const char *n_str = path + 9;
+        if (!*n_str) return err(OSNOS_ENOENT);
+        int n = 0;
+        for (const char *p2 = n_str; *p2; p2++) {
+            if (*p2 < '0' || *p2 > '9') return err(OSNOS_ENOENT);
+            n = n * 10 + (*p2 - '0');
+            if (n >= MAX_PTYS) return err(OSNOS_ENOENT);
+        }
+        pty_pair_t *p = pty_get(n);
+        if (!p) return err(OSNOS_ENOENT);
+        int fd = fd_alloc(task_current());
+        if (fd < 0) return err(OSNOS_EMFILE);
+        pty_slave_ref(p);
+        osnos_fd_t *o = fd_get(task_current(), fd);
+        o->is_pty   = true;
+        o->pty_ref  = p;
+        o->pty_side = 1;
+        o->flags    = flags;
+        os_strlcpy(o->path, path, OSNOS_PATH_MAX);
+        return fd;
+    }
+    return -1;     /* not a PTY path */
+}
+
 int64_t sys_open(const char *path, int flags, uint32_t mode) {
     (void)mode;  /* permission bits not enforced yet */
 
     if (!path) return err(OSNOS_EFAULT);
+
+    /* PTY special-case: handled by the dedicated layer, not VFS. */
+    int64_t pty_rc = try_open_pty(path, flags);
+    if (pty_rc != -1) return pty_rc;
 
     vfs_stat_t st;
     osnos_status_t s = vfs_stat(path, &st);
@@ -98,13 +162,11 @@ int64_t sys_close(int fd) {
     osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f) return err(OSNOS_EBADF);
     if (f->is_special) return err(OSNOS_EBADF);
-    if (f->is_socket && f->sock_idx >= 0) {
-        sock_close(f->sock_idx);
-    }
-    if (f->is_pipe && f->pipe_ref) {
-        if (f->pipe_side == 0) pipe_close_reader(f->pipe_ref);
-        else                   pipe_close_writer(f->pipe_ref);
-    }
+    /* Post-OFD refactor: fd_free decrements the OFD refcount.
+     * When the refcount hits 0, ofd_unref dispatches the backend
+     * cleanup (pipe_close_reader/writer, sock_close, pty_*_unref).
+     * No manual backend cleanup here — that would double-close on
+     * dup'd or fork-inherited fds. */
     fd_free(task_current(), fd);
     return 0;
 }
@@ -180,6 +242,15 @@ int64_t sys_write(int fd, const void *buf, size_t count) {
     if (f->is_pipe) {
         if (f->pipe_side != 1 || !f->pipe_ref) return err(OSNOS_EBADF);
         return pipe_write(f->pipe_ref, buf, count);
+    }
+
+    /* PTY: dispatch to master/slave write. The other side's reader
+     * picks bytes up via pty_*_read; canonical mode line-buffering
+     * + echo are applied in pty_master_write itself. */
+    if (f->is_pty && f->pty_ref) {
+        return (f->pty_side == 0)
+            ? pty_master_write(f->pty_ref, buf, count)
+            : pty_slave_write (f->pty_ref, buf, count);
     }
 
     int access = f->flags & O_ACCMODE;
@@ -312,6 +383,17 @@ int64_t sys_read(int fd, void *buf, size_t count) {
     if (f->is_pipe) {
         if (f->pipe_side != 0 || !f->pipe_ref) return err(OSNOS_EBADF);
         return pipe_read(f->pipe_ref, buf, count);
+    }
+
+    /* PTY read — master and slave have different semantics:
+     *   master reads s2m_buf raw (slave's output)
+     *   slave  reads m2s_buf with canonical/raw processing
+     * Both return -EAGAIN when their respective buffer is empty
+     * (and the peer is still alive). libc loops via nanosleep. */
+    if (f->is_pty && f->pty_ref) {
+        return (f->pty_side == 0)
+            ? pty_master_read(f->pty_ref, buf, count)
+            : pty_slave_read (f->pty_ref, buf, count);
     }
 
     if (f->is_dir) return err(OSNOS_EISDIR);
@@ -1016,6 +1098,11 @@ static bool fd_readable(int fd) {
         return (fd == OSNOS_FD_STDIN) ? stdin_readable() : false;
     }
     if (f->is_socket) return sock_readable(f->sock_idx);
+    if (f->is_pty && f->pty_ref) {
+        return (f->pty_side == 0)
+            ? pty_master_readable(f->pty_ref)
+            : pty_slave_readable (f->pty_ref);
+    }
     /* Regular files / dirs are always readable up to EOF. */
     return true;
 }
@@ -2156,9 +2243,62 @@ int64_t sys_fcntl(int fd, int cmd, int64_t arg) {
  * Anything else returns -ENOTTY. termios I/O goes via copy_*_user so
  * a faulting pointer becomes EFAULT, not a kernel panic.
  */
+/* Linux ioctl numbers for PTY master operations. */
+#define TTY_TIOCGPTN   0x80045430u    /* get pts number */
+#define TTY_TIOCSPTLCK 0x40045431u    /* lock pts (no-op for us) */
+
 int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
     osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f) return err(OSNOS_EBADF);
+
+    /* PTY ioctls — work on master OR slave fds opened via
+     * /dev/ptmx and /dev/pts/N. The pair has its OWN termios so
+     * TCGETS/TCSETS on a PTY don't touch the kernel TTY's state. */
+    if (f->is_pty && f->pty_ref) {
+        pty_pair_t *p = f->pty_ref;
+        switch (request) {
+        case TTY_TCGETS: {
+            if (copy_to_user(arg, &p->termios,
+                             sizeof(p->termios)) != OSNOS_OK)
+                return err(OSNOS_EFAULT);
+            return 0;
+        }
+        case TTY_TCSETS:
+        case TTY_TCSETSW:
+        case TTY_TCSETSF: {
+            struct osnos_termios t;
+            if (copy_from_user(&t, arg, sizeof(t)) != OSNOS_OK)
+                return err(OSNOS_EFAULT);
+            p->termios = t;
+            return 0;
+        }
+        case TTY_TIOCGPTN: {
+            /* Master ioctl: ptsname implementation calls this to
+             * learn the pts index, then formats "/dev/pts/<N>". */
+            if (f->pty_side != 0) return -(int64_t)OSNOS_ENOTTY;
+            int n = p->index;
+            if (copy_to_user(arg, &n, sizeof(n)) != OSNOS_OK)
+                return err(OSNOS_EFAULT);
+            return 0;
+        }
+        case TTY_TIOCSPTLCK: {
+            /* No-op: glibc calls this to unlock the slave before
+             * opening it. We don't implement locking. */
+            return 0;
+        }
+        case TTY_TIOCGWINSZ: {
+            /* PTY pair doesn't track winsize yet — return 0x0. A
+             * future TIOCSWINSZ + SIGWINCH would belong here. */
+            struct osnos_winsize ws = { 0, 0, 0, 0 };
+            if (copy_to_user(arg, &ws, sizeof(ws)) != OSNOS_OK)
+                return err(OSNOS_EFAULT);
+            return 0;
+        }
+        default:
+            return -(int64_t)OSNOS_ENOTTY;
+        }
+    }
+
     /* Only the special fds 0/1/2 (the TTY) accept these requests. */
     if (!f->is_special) return -(int64_t)OSNOS_ENOTTY;
 

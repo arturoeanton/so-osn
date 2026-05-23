@@ -18,6 +18,7 @@
 #include "../micro/kmalloc.h"
 #include "../micro/pipe.h"
 #include "../micro/pmm.h"
+#include "../micro/pty.h"
 #include "../micro/reaper.h"
 #include "../micro/task.h"
 #include "../micro/syscall.h"
@@ -133,6 +134,7 @@ void kmain(void) {
 
     ipc_init();
     pipe_init();           /* shell-pipeline kernel object */
+    pty_init();            /* /dev/ptmx + /dev/pts/N pool */
     task_init();
     reaper_init();
     scheduler_init();

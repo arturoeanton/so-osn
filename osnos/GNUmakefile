@@ -164,6 +164,8 @@ USER_ELF_LIBC_SRCS := \
     elfs/tests/pgrouptest.c \
     elfs/tests/alltest.c \
     elfs/tests/ofdtest.c \
+    elfs/tests/ptytest.c \
+    elfs/tests/fdedgetest.c \
     elfs/osn-server/consrv.c \
     elfs/osn-server/kbdsrv.c \
     elfs/osn-server/shellsrv.c
