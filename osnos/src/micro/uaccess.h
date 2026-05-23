@@ -23,3 +23,25 @@ void uaccess_init(void);
 
 osnos_status_t copy_from_user(void *dst, const void *user_src, size_t n);
 osnos_status_t copy_to_user  (void *user_dst, const void *src, size_t n);
+
+/*
+ * Copy a NUL-terminated string from user space into `dst`, up to
+ * `maxlen` bytes (including the NUL). Stops as soon as a NUL byte
+ * is encountered, so unmapped memory past the end of the string
+ * does NOT fault — unlike a fixed-size `copy_from_user(.., maxlen)`
+ * which reads the full window even if the string is short.
+ *
+ * Returns:
+ *   OSNOS_OK     — NUL found within maxlen, `dst` holds the string.
+ *                  On truncation (no NUL within maxlen), `dst` is
+ *                  forcibly NUL-terminated at dst[maxlen-1] and we
+ *                  still return OK (POSIX-ish — let caller detect
+ *                  truncation if needed).
+ *   OSNOS_EFAULT — page fault before NUL was reached. Partial data
+ *                  may have been written to `dst`.
+ *
+ * Used by sys_execve / sys_writev / any syscall that copies
+ * variable-length user strings near a page boundary.
+ */
+osnos_status_t copy_string_from_user(char *dst, const char *user_src,
+                                      size_t maxlen);

@@ -92,6 +92,27 @@ pid_t        getpid(void);
 pid_t        fork(void);
 
 /*
+ * POSIX job control: process groups + sessions.
+ *   getppid  → parent's pid (0 if orphan or kernel-spawned)
+ *   getpgrp  → caller's process-group id
+ *   getpgid  → pgid of `pid` (0 = self), or -1+ESRCH
+ *   getsid   → sid  of `pid` (0 = self), or -1+ESRCH
+ *   setpgid(pid, pgid) → 0 / -1+EPERM/ESRCH (pid=0 → self; pgid=0 → pid)
+ *   setsid   → new sid (= caller's pid), or -1+EPERM if already a
+ *              process-group leader
+ *
+ * Default after fork: child inherits parent's pgid + sid. Default
+ * after a top-level spawn: pgid = sid = pid (own one-task group +
+ * own session, like Linux for direct-spawned tasks).
+ */
+pid_t        getppid(void);
+pid_t        getpgrp(void);
+pid_t        getpgid(pid_t pid);
+pid_t        getsid (pid_t pid);
+int          setpgid(pid_t pid, pid_t pgid);
+pid_t        setsid (void);
+
+/*
  * POSIX cwd. getcwd writes the absolute path into `buf` (NUL
  * terminated) and returns `buf`, or NULL with errno on failure
  * (ERANGE if `size` too small). chdir adopts `path` as the new

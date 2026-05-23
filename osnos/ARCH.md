@@ -55,6 +55,8 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 |   unlink/ioctl/getdents64/gettimeofday/time/kill/exit/         |
 |   fork (#57) execve (#59) wait4 (#61) — POSIX core              |
 |   rt_sigaction (#13) rt_sigprocmask (#14) rt_sigreturn (#15)   |
+|   setpgid (#109) getppid (#110) getpgrp (#111) setsid (#112)   |
+|   getpgid (#121) getsid (#124) — job control                   |
 |                                                                 |
 |   osnos: IPC_SEND (260) IPC_RECV (261) SERVICE_REGISTER (262)  |
 |   SERVICE_LOOKUP (263) TTY_INPUT (264) TASKINFO (265)          |
@@ -87,7 +89,8 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 |   task (16 slots; per-task fds[16], FPU state, mmap regions,   |
 |     cwd, kill/stop_pending, stdin/stdout_redir, saved iret,    |
 |     parent_pid + wait_status_ptr (wait4), sa_handler[32] +     |
-|     sig_pending (sigaction), TASK_ZOMBIE state)                |
+|     sig_pending (sigaction), pgid + sid (job-control),         |
+|     TASK_ZOMBIE state)                                          |
 |   scheduler (preempt CPL=3 + cooperative + resume_jump)        |
 |   reaper (kstack free queue + DEAD→UNUSED reaping)             |
 |   ipc, service, fd, pipe, fpu, extable, uaccess (fault-recov)  |

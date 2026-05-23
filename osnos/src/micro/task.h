@@ -64,6 +64,22 @@ typedef struct task {
     int     *wait_status_ptr;     /* user-virtual */
 
     /*
+     * Process group + session — POSIX job-control primitives (FASE
+     * 10.6). Default after task_create: `pgid = pid; sid = pid;` so
+     * a task that never calls setpgid/setsid is its own session
+     * leader of its own one-process group (Linux behaviour for fresh
+     * top-level tasks). fork inherits both; execve preserves both.
+     *
+     * Today only `kill(-pgid, sig)` and the getpgid/setpgid/getsid/
+     * setsid syscalls consume these. Ctrl+C routing in tty.c still
+     * targets `kernel_fg_pid` (a single pid), not the foreground
+     * process group — fan-out to whole pgid is a future change that
+     * doesn't break source compat.
+     */
+    uint64_t pgid;
+    uint64_t sid;
+
+    /*
      * Signal handling — sa_handler-only POSIX model.
      *
      * sa_handler[s-1] holds the user-mode disposition for signal s

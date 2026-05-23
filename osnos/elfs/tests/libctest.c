@@ -362,16 +362,29 @@ int main(int argc, char **argv) {
         check("limits-LONG_MAX", LONG_MAX == 9223372036854775807L);
     }
 
-    /* ---------------- signal (stubs) ---------------- */
+    /* ---------------- signal (real after FASE wait+sigaction) ---------------- */
     {
         check("signal-sig-numbers", SIGINT == 2 && SIGTERM == 15);
+        /* signal() now wraps sigaction(). Install SIG_DFL, retrieve
+         * previous (also SIG_DFL since we never set anything else),
+         * verify round-trip. */
         errno = 0;
         sighandler_t prev = signal(SIGUSR1, SIG_DFL);
-        check("signal-default-noop", prev == SIG_DFL);
+        check("signal-default-roundtrip", prev == SIG_DFL);
+
+        /* Install an arbitrary user pointer. The kernel doesn't
+         * dereference it until a signal actually fires, so the
+         * call just stashes it in t->sa_handler[]. Returns the
+         * previous handler (SIG_DFL). */
         errno = 0;
         prev = signal(SIGUSR1, (sighandler_t)0x12345);
-        check("signal-non-default-enosys",
-              prev == SIG_ERR && errno == ENOSYS);
+        check("signal-install-returns-prev", prev == SIG_DFL);
+
+        /* Restore + verify we get back the 0x12345 we installed. */
+        errno = 0;
+        prev = signal(SIGUSR1, SIG_DFL);
+        check("signal-restore-returns-installed",
+              prev == (sighandler_t)0x12345);
     }
 
     /* ---------------- math (requires FPU init from kernel) ---------------- */

@@ -614,38 +614,23 @@ int64_t sys_nanosleep(const osnos_timespec_t *req, osnos_timespec_t *rem) {
 /* the death. Refuses kernel tasks (pml4 == NULL).                    */
 /* ------------------------------------------------------------------ */
 
-int64_t sys_kill(uint64_t pid, int sig) {
-    task_t *t = task_by_pid(pid);
-    if (!t || !t->pml4) return -(int64_t)OSNOS_ESRCH;
-    if (sig < 1 || sig > 31) return -(int64_t)OSNOS_EINVAL;
-
-    /* Deliver via the unified signal-pending bitmap. user_task_resume
-     * consumes the lowest bit on the next dispatch and either runs
-     * the registered handler or applies the default disposition
-     * (terminate for SIGINT/SIGTERM/SIGKILL/etc). */
+/* Deliver `sig` to one task. Mutating helper used by both the
+ * single-pid path and the broadcast path below. Returns 1 if
+ * delivered (target was a live ring-3 task), 0 otherwise. */
+static int kill_one_task(task_t *t, int sig) {
+    if (!t || !t->pml4) return 0;
+    if (t->state == TASK_UNUSED || t->state == TASK_DEAD ||
+        t->state == TASK_ZOMBIE) return 0;
     t->sig_pending |= 1u << (sig - 1);
-
-    /* Legacy compat: SIGINT used to flip kill_pending — keep doing so
-     * for SIGINT/SIGKILL/SIGTERM so the existing user_task_trampoline
-     * fast-path (proc_exit_current_user from kill_pending check)
-     * still fires even before user_task_resume runs. Removing this
-     * line would be safe once kill_pending is fully retired. */
     if (sig == 2 /* SIGINT */ ||
         sig == 9 /* SIGKILL */ ||
         sig == 15 /* SIGTERM */) {
         t->kill_pending = 1;
     }
-
-    /* If the target is BLOCKED or STOPPED, force-wake so it sees the
-     * signal soon. Same rationale as before — without this, a task
-     * sleeping in nanosleep would only get its SIGINT at wake-time.
-     *
-     * EINTR semantics: the BLOCKED task is suspended inside some
-     * syscall (nanosleep / wait4 / future read-on-pipe). Its
-     * snapshotted saved_rax reflects the success-path return value;
-     * override it to -EINTR so libc returns -1 + errno=EINTR. The
-     * signal handler runs first via user_task_resume; after
-     * sigreturn the sigframe replay still has rax = -EINTR. */
+    /* Wake from BLOCKED/STOPPED so the signal lands promptly.
+     * EINTR semantics (see longer comment in old sys_kill body): the
+     * snapshotted saved_rax becomes -EINTR for the interrupted
+     * blocking syscall to surface POSIX-correctly. */
     if (t->state == TASK_BLOCKED) {
         if (t->saved_valid) {
             t->saved_rax = (uint64_t)(int64_t)-(int64_t)OSNOS_EINTR;
@@ -655,6 +640,52 @@ int64_t sys_kill(uint64_t pid, int sig) {
     } else if (t->state == TASK_STOPPED) {
         t->state = TASK_READY;
     }
+    return 1;
+}
+
+int64_t sys_kill(uint64_t pid, int sig) {
+    if (sig < 1 || sig > 31) return -(int64_t)OSNOS_EINVAL;
+
+    /* Linux kill(2) overloads `pid` semantically:
+     *   pid >  0  → that specific pid
+     *   pid == 0  → all tasks in the caller's process group
+     *   pid == -1 → all ring-3 tasks (best-effort broadcast)
+     *   pid <  -1 → all tasks in process group (-pid)
+     * uint64_t carries the sign bit transparently — cast back to
+     * int64_t to recover the signed semantics. */
+    int64_t spid = (int64_t)pid;
+
+    if (spid > 0) {
+        task_t *t = task_by_pid(pid);
+        if (!t || !t->pml4) return -(int64_t)OSNOS_ESRCH;
+        if (!kill_one_task(t, sig)) return -(int64_t)OSNOS_ESRCH;
+        return 0;
+    }
+
+    /* Broadcast paths: walk the task table. Skip the caller for
+     * pid==-1 broadcast (POSIX: shouldn't include self by default —
+     * but we deliver to self too because our scope is "all live ring-3
+     * tasks", and the caller can opt-out via a SIG_IGN install). */
+    task_t *self = task_current();
+    uint64_t target_pgid;
+    if (spid == 0) {
+        if (!self) return -(int64_t)OSNOS_ESRCH;
+        target_pgid = self->pgid;
+    } else {
+        /* spid < 0: |spid| is the pgid (with spid==-1 a wildcard
+         * broadcast). Use 0 as the wildcard sentinel internally. */
+        target_pgid = (spid == -1) ? 0 : (uint64_t)(-spid);
+    }
+
+    int delivered = 0;
+    for (size_t i = 0; i < MAX_TASKS; i++) {
+        task_t *u = (task_t *)task_slot(i);
+        if (!u) continue;
+        if (u->state == TASK_UNUSED || !u->pml4) continue;
+        if (target_pgid != 0 && u->pgid != target_pgid) continue;
+        delivered += kill_one_task(u, sig);
+    }
+    if (delivered == 0) return -(int64_t)OSNOS_ESRCH;
     return 0;
 }
 
@@ -666,6 +697,99 @@ int64_t sys_getpid(void) {
     task_t *t = task_current();
     if (!t) return 0;
     return (int64_t)t->pid;
+}
+
+/* ------------------------------------------------------------------ */
+/* Process group + session syscalls (POSIX job-control).              */
+/*                                                                    */
+/* All read-only lookups: getppid / getpgid / getsid / getpgrp.       */
+/* Mutators: setpgid / setsid. Linux x86_64 numbers throughout.       */
+/*                                                                    */
+/* Today these only update the task_t fields and gate kill(-pgid).    */
+/* Signal routing on Ctrl+C still targets kernel_fg_pid (single pid)  */
+/* — fan-out to whole pgid is a future enhancement that doesn't       */
+/* require ABI changes here.                                          */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_getppid(void) {
+    task_t *t = task_current();
+    if (!t) return 0;
+    return (int64_t)t->parent_pid;
+}
+
+int64_t sys_getpgrp(void) {
+    task_t *t = task_current();
+    if (!t) return 0;
+    return (int64_t)t->pgid;
+}
+
+int64_t sys_getpgid(uint64_t pid) {
+    task_t *t = (pid == 0) ? task_current() : task_by_pid(pid);
+    if (!t || t->state == TASK_UNUSED) return err(OSNOS_ESRCH);
+    return (int64_t)t->pgid;
+}
+
+int64_t sys_getsid(uint64_t pid) {
+    task_t *t = (pid == 0) ? task_current() : task_by_pid(pid);
+    if (!t || t->state == TASK_UNUSED) return err(OSNOS_ESRCH);
+    return (int64_t)t->sid;
+}
+
+/* setpgid(pid, pgid) — sets the process-group ID of `pid` (0 = self)
+ * to `pgid` (0 = pid). POSIX restrictions we honour:
+ *   - target must exist and be a ring-3 task
+ *   - cannot move a process across sessions: requested pgid's
+ *     existing leader (if any) must share our session
+ *   - cannot setpgid a session leader (its pid == sid)
+ * Returns 0 on success or -EPERM / -ESRCH / -EINVAL. */
+int64_t sys_setpgid(uint64_t pid, uint64_t pgid) {
+    task_t *self = task_current();
+    if (!self) return err(OSNOS_ESRCH);
+
+    task_t *t = (pid == 0) ? self : task_by_pid(pid);
+    if (!t || t->state == TASK_UNUSED || !t->pml4) return err(OSNOS_ESRCH);
+
+    uint64_t new_pgid = (pgid == 0) ? t->pid : pgid;
+
+    /* Session leader can't change its pgid (POSIX EPERM). */
+    if (t->pid == t->sid && new_pgid != t->pgid) {
+        return err(OSNOS_EPERM);
+    }
+
+    /* If new_pgid already exists as a group somewhere, it must live
+     * in the same session as `t`. Walk the task table looking for a
+     * pgid leader (pid == pgid) with that group id. */
+    if (new_pgid != t->pid) {
+        int found_match = 0;
+        for (size_t i = 0; i < MAX_TASKS; i++) {
+            task_t *u = (task_t *)task_slot(i);
+            if (!u || u->state == TASK_UNUSED) continue;
+            if (u->pgid != new_pgid) continue;
+            if (u->sid != t->sid) return err(OSNOS_EPERM);
+            found_match = 1;
+            break;
+        }
+        if (!found_match) return err(OSNOS_EPERM);
+    }
+
+    t->pgid = new_pgid;
+    return 0;
+}
+
+/* setsid() — create a new session: current task becomes session
+ * leader (sid = pid) AND process-group leader (pgid = pid). Fails
+ * with -EPERM if the caller is already a process-group leader
+ * (POSIX, prevents a leader from "escaping" its group). */
+int64_t sys_setsid(void) {
+    task_t *t = task_current();
+    if (!t) return err(OSNOS_ESRCH);
+    if (t->pgid == t->pid) {
+        /* Already a process-group leader → setsid forbidden. */
+        return err(OSNOS_EPERM);
+    }
+    t->sid  = t->pid;
+    t->pgid = t->pid;
+    return (int64_t)t->sid;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1354,6 +1478,13 @@ int64_t sys_fork(void) {
 
     /* fork(2) parent-child link — enables wait(2) on the parent. */
     child->parent_pid        = parent->pid;
+    /* POSIX: fork inherits the parent's process group + session.
+     * execve preserves them (we don't touch pgid/sid in
+     * proc_execve_replace). setsid() / setpgid() are the explicit
+     * mutators. Overrides the default `pgid=pid; sid=pid;` that
+     * task_create_user_elf seeded. */
+    child->pgid              = parent->pgid;
+    child->sid               = parent->sid;
     /* Child starts NOT waiting and with no inherited signal state.
      * POSIX says fd table inherited (done above) + sigactions
      * inherited (preserved across fork; CLOSED on execve). */
@@ -1704,12 +1835,12 @@ int64_t sys_execve(const char *u_path,
     if (!t || !t->pml4) return err(OSNOS_ESRCH);
     if (!u_path)        return err(OSNOS_EFAULT);
 
-    /* Copy path. */
+    /* Copy path. Use the string-aware variant so a short path near a
+     * page boundary doesn't EFAULT on the read-past-NUL. */
     char kpath[OSNOS_PATH_MAX];
-    if (copy_from_user(kpath, u_path, OSNOS_PATH_MAX) != OSNOS_OK) {
+    if (copy_string_from_user(kpath, u_path, OSNOS_PATH_MAX) != OSNOS_OK) {
         return err(OSNOS_EFAULT);
     }
-    kpath[OSNOS_PATH_MAX - 1] = 0;
 
     /* Walk argv: build a single space-separated args string from
      * argv[1..N]. argv[0] is the program name — proc_execve_replace
@@ -1726,12 +1857,13 @@ int64_t sys_execve(const char *u_path,
             if (!p_user) break;
             if (i == 0) continue;       /* skip argv[0] (program name) */
 
-            /* Copy this arg string into a small staging buffer. */
+            /* Copy this arg string into a small staging buffer. Use
+             * the string-aware copy so short strings near a page
+             * boundary don't trigger spurious EFAULT. */
             char arg[128];
-            if (copy_from_user(arg, p_user, sizeof(arg)) != OSNOS_OK) {
+            if (copy_string_from_user(arg, p_user, sizeof(arg)) != OSNOS_OK) {
                 return err(OSNOS_EFAULT);
             }
-            arg[sizeof(arg) - 1] = 0;
 
             size_t arg_len = 0;
             while (arg[arg_len]) arg_len++;
@@ -1759,10 +1891,12 @@ int64_t sys_execve(const char *u_path,
             }
             if (!p_user) break;
             char ent[256];
-            if (copy_from_user(ent, p_user, sizeof(ent)) != OSNOS_OK) {
+            /* String-aware copy: stops at NUL, won't over-read into
+             * unmapped memory past the last env string (common when
+             * envp lives near the top of the user stack page). */
+            if (copy_string_from_user(ent, p_user, sizeof(ent)) != OSNOS_OK) {
                 return err(OSNOS_EFAULT);
             }
-            ent[sizeof(ent) - 1] = 0;
             size_t l = 0;
             while (ent[l]) l++;
             if (envp_pos + l + 1 > sizeof(envp_buf)) return err(OSNOS_E2BIG);
@@ -2276,6 +2410,18 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
             return pack(sys_kill(frame->rdi, (int)frame->rsi));
         case SYS_FORK:
             return pack(sys_fork());
+        case SYS_SETPGID:
+            return pack(sys_setpgid((uint64_t)frame->rdi, (uint64_t)frame->rsi));
+        case SYS_GETPPID:
+            return pack(sys_getppid());
+        case SYS_GETPGRP:
+            return pack(sys_getpgrp());
+        case SYS_SETSID:
+            return pack(sys_setsid());
+        case SYS_GETPGID:
+            return pack(sys_getpgid((uint64_t)frame->rdi));
+        case SYS_GETSID:
+            return pack(sys_getsid((uint64_t)frame->rdi));
         case SYS_WAIT4:
             return pack(sys_wait4(
                 (int64_t)frame->rdi,

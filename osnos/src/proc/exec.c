@@ -609,6 +609,28 @@ static int64_t task_create_user_elf(
     t->heap_start        = USER_HEAP_BASE;
     t->heap_brk          = USER_HEAP_BASE;
 
+    /* POSIX job-control defaults: a freshly-spawned top-level task
+     * is its own session leader of its own one-task process group.
+     * fork(2) overwrites both with the parent's pgid/sid (POSIX
+     * inheritance); see sys_fork. */
+    t->pgid              = t->pid;
+    t->sid               = t->pid;
+
+    /* Parent linkage: if there's a current user-mode caller (i.e.
+     * proc_execve was invoked from sys_spawn / from a shell
+     * builtin via osn_spawn), point the new task at it so
+     * getppid(2) returns the spawner. Kernel-spawned tasks
+     * (kmain → consrv/kbdsrv/shellsrv via proc_execve with no
+     * caller) get parent_pid = 0 ("orphan" from POSIX POV; the
+     * reaper handles them directly).
+     *
+     * sys_fork(2) overwrites this anyway with the actual forker
+     * pid, so we don't conflict with the fork code path. */
+    {
+        task_t *caller = task_current();
+        t->parent_pid = (caller && caller->pml4) ? caller->pid : 0;
+    }
+
     /* Seed FPU state — first FXRSTOR on this task's first dispatch
      * needs sane bytes, not whatever the BSS happens to hold. */
     fpu_state_init(t->fpu_state);
@@ -711,6 +733,21 @@ void proc_exit_current_user(int exit_code) {
     t->kernel_stack_top  = 0;
     t->kernel_stack_base = 0;
     t->exit_code         = exit_code;
+
+    /*
+     * SIGCHLD delivery to live parent. POSIX: when a child changes
+     * state (exited, killed, stopped, continued), the parent gets
+     * SIGCHLD. Default disposition for SIGCHLD is "ignore" — user_
+     * task_resume's SIG_DFL branch already skips SIGCHLD without
+     * killing the parent — so this is a no-op for programs that
+     * don't install a handler. Programs that DO install one (typical
+     * `signal(SIGCHLD, on_child)`) get woken up at the next iretq.
+     *
+     * Bit 16 = signal 17 (SIGCHLD).
+     */
+    if (has_live_parent) {
+        parent_t->sig_pending |= 1u << (17 - 1);
+    }
 
     /* If the dying task held the TTY foreground, clear it. Otherwise
      * the next Ctrl+C would chase a ghost pid and be silently lost —

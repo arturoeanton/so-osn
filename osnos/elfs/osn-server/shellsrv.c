@@ -30,6 +30,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -594,6 +595,7 @@ static int do_jobs(int argc, char **argv) {
             if (r < 0) continue;
             if ((long)info.pid != bg_jobs[i].pid) continue;
             if (info.state == OSNOS_TASK_DEAD)   continue;
+            if (info.state == OSNOS_TASK_ZOMBIE) continue;
             live[i] = 1;
             switch (info.state) {
                 case OSNOS_TASK_RUNNING: state_label[i] = "running"; break;
@@ -975,6 +977,21 @@ static int wait_pid_capture(long pid, int *stopped_out) {
          * pid successfully, so the task did at least start). */
         if (!found) return last_ec;
         if (state == OSNOS_TASK_DEAD) return last_ec;
+        if (state == OSNOS_TASK_ZOMBIE) {
+            /* Child entered ZOMBIE state (kernel ABI added in the
+             * wait4 fase: any child whose parent is alive lingers
+             * here with exit_code preserved until waitpid consumes
+             * it). Since shellsrv is the parent now (FASE 10.6
+             * parent_pid linkage), we must explicitly reap, or
+             * zombies pile up and exhaust task slots. waitpid
+             * transitions ZOMBIE → DEAD; reaper recycles the slot
+             * on the next scheduler tick. */
+            int status = 0;
+            waitpid((pid_t)pid, &status, 0);
+            if (WIFEXITED(status))   last_ec = WEXITSTATUS(status);
+            else if (WIFSIGNALED(status)) last_ec = 128 + WTERMSIG(status);
+            return last_ec;
+        }
         if (state == OSNOS_TASK_STOPPED) {
             if (stopped_out) *stopped_out = 1;
             return 0;

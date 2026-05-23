@@ -43,6 +43,13 @@
 #define SYS_RT_SIGACTION   13
 #define SYS_RT_SIGPROCMASK 14
 #define SYS_RT_SIGRETURN   15
+/* Job-control: process group + session (POSIX). */
+#define SYS_SETPGID  109
+#define SYS_GETPPID  110
+#define SYS_GETPGRP  111
+#define SYS_SETSID   112
+#define SYS_GETPGID  121
+#define SYS_GETSID   124
 #define SYS_GETCWD    79
 #define SYS_CHDIR     80
 #define SYS_RENAME    82

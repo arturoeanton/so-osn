@@ -294,6 +294,40 @@ pid_t fork(void) {
     return (pid_t)r;
 }
 
+/* ---- Process group + session (POSIX job-control) ---- */
+
+pid_t getppid(void) {
+    return (pid_t)osnos_syscall0(SYS_GETPPID);
+}
+
+pid_t getpgrp(void) {
+    return (pid_t)osnos_syscall0(SYS_GETPGRP);
+}
+
+pid_t getpgid(pid_t pid) {
+    long r = osnos_syscall1(SYS_GETPGID, (long)pid);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (pid_t)r;
+}
+
+pid_t getsid(pid_t pid) {
+    long r = osnos_syscall1(SYS_GETSID, (long)pid);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (pid_t)r;
+}
+
+int setpgid(pid_t pid, pid_t pgid) {
+    long r = osnos_syscall2(SYS_SETPGID, (long)pid, (long)pgid);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return 0;
+}
+
+pid_t setsid(void) {
+    long r = osnos_syscall0(SYS_SETSID);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (pid_t)r;
+}
+
 /* ---- exec family ----
  *
  * Each variant ultimately routes to SYS_EXECVE. The kernel currently

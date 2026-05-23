@@ -36,6 +36,13 @@
 #define SYS_RT_SIGACTION   13
 #define SYS_RT_SIGPROCMASK 14
 #define SYS_RT_SIGRETURN   15
+/* job-control: process group + session. Linux x86_64 numbers. */
+#define SYS_SETPGID  109
+#define SYS_GETPPID  110
+#define SYS_GETPGRP  111
+#define SYS_SETSID   112
+#define SYS_GETPGID  121
+#define SYS_GETSID   124
 #define SYS_ACCESS   21
 #define SYS_GETCWD   79
 #define SYS_CHDIR    80
@@ -189,6 +196,21 @@ int64_t sys_execve(const char *u_path,
  * replays the frame.
  */
 int64_t sys_fork(void);
+
+/* Process group + session — POSIX job control (FASE 10.6).
+ *   getppid  → parent_pid (0 if orphan)
+ *   getpgrp  → caller's pgid
+ *   getpgid  → t->pgid (0 = self), or -ESRCH
+ *   getsid   → t->sid  (0 = self), or -ESRCH
+ *   setpgid(pid, pgid) → 0 / -EPERM / -ESRCH (POSIX restrictions)
+ *   setsid   → new sid (= pid), or -EPERM if already pgrp leader
+ */
+int64_t sys_getppid(void);
+int64_t sys_getpgrp(void);
+int64_t sys_getpgid(uint64_t pid);
+int64_t sys_getsid (uint64_t pid);
+int64_t sys_setpgid(uint64_t pid, uint64_t pgid);
+int64_t sys_setsid (void);
 
 /*
  * sys_wait4 (#61) — Linux wait4(pid, *status, options, *rusage).

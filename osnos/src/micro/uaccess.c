@@ -91,3 +91,38 @@ osnos_status_t copy_to_user(void *user_dst, const void *src, size_t n) {
         !user_range_ok((uintptr_t)user_dst, n)) return OSNOS_EFAULT;
     return (osnos_status_t)__uaccess_copy_bytes(user_dst, src, (uint64_t)n);
 }
+
+osnos_status_t copy_string_from_user(char *dst, const char *user_src,
+                                      size_t maxlen) {
+    if (maxlen == 0) return OSNOS_OK;
+    if (!dst || !user_src) return OSNOS_EFAULT;
+    if (!in_kernel_caller() &&
+        !user_range_ok((uintptr_t)user_src, 1)) return OSNOS_EFAULT;
+
+    /* Byte-by-byte copy that stops at the first NUL. Each
+     * __uaccess_copy_bytes(.., 1) call is protected by extable, so a
+     * fault on any single byte returns EFAULT without panic. Reading
+     * "noexisto\0" (9 bytes) only reads 9 bytes — no over-read into
+     * the next (possibly-unmapped) page like a fixed-size copy would.
+     *
+     * On every iteration we re-validate the next byte's user range,
+     * to catch the case where the string straddles past OSNOS_USER_
+     * VIRT_MAX (unlikely but cheap to guard). */
+    for (size_t i = 0; i < maxlen; i++) {
+        if (!in_kernel_caller() &&
+            !user_range_ok((uintptr_t)(user_src + i), 1)) {
+            return OSNOS_EFAULT;
+        }
+        uint8_t c = 0;
+        osnos_status_t s = (osnos_status_t)__uaccess_copy_bytes(
+            &c, user_src + i, 1);
+        if (s != OSNOS_OK) return s;
+        dst[i] = (char)c;
+        if (c == 0) return OSNOS_OK;
+    }
+    /* Hit maxlen without NUL — force-terminate, signal OK. Caller can
+     * detect truncation by checking strlen(dst) == maxlen-1 if it
+     * cares. */
+    dst[maxlen - 1] = 0;
+    return OSNOS_OK;
+}
