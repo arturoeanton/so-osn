@@ -172,17 +172,20 @@ static void open_entry(int idx) {
             return;
         }
     }
-    /* Default: open in /bin/oxnotepad (it'll see if the path is a
-     * real file; if not it shows empty). */
-    /* TODO: a real "open notepad with this file" requires notepad to
-     * accept a path argv. For V1 we just spawn notepad, user can
-     * re-open the project file there. */
+    /* Default: open the file in /bin/oxnotepad. Build the full path
+     * (cwd/name) and pass it as args — oxnotepad parses argv[1]. */
+    char full[512];
+    if (strcmp(g_cwd, "/") == 0) {
+        snprintf(full, sizeof(full), "/%s", e->name);
+    } else {
+        snprintf(full, sizeof(full), "%s/%s", g_cwd, e->name);
+    }
     static const char envp_flat[] =
         "PATH=/bin\0"
         "HOME=/home\0"
         "SHELL=/bin/uxsh\0"
         "TERM=osnos\0";
-    osn_spawn("/bin/oxnotepad", "", envp_flat, -1, -1);
+    osn_spawn("/bin/oxnotepad", full, envp_flat, -1, -1);
 }
 
 int main(int argc, char **argv) {

@@ -18,12 +18,13 @@
 #define WIN_H 400
 #define MARGIN 8
 #define LINE_H 12
-#define FILE_PATH "/home/notepad.txt"
+#define DEFAULT_PATH "/home/notepad.txt"
 #define BUF_MAX 4096
 
 static char g_buf[BUF_MAX];
 static int  g_len = 0;
 static ox_win_t g_win;
+static char g_path[256] = DEFAULT_PATH;
 
 static void render(void) {
     /* Paint background. */
@@ -31,7 +32,7 @@ static void render(void) {
     /* Status bar. */
     ox_draw_rect(g_win, 0, WIN_H - 16, WIN_W, 16, OX_RGB(60, 80, 130));
     char status[64];
-    snprintf(status, sizeof(status), " %s  %d bytes  Ctrl+S save", FILE_PATH, g_len);
+    snprintf(status, sizeof(status), " %s  %d bytes  Ctrl+S save", g_path, g_len);
     ox_draw_text(g_win, MARGIN, WIN_H - 12, status, OX_RGB(240, 240, 255));
     /* Body — split into lines, render up to what fits. */
     int x = MARGIN, y = MARGIN;
@@ -59,7 +60,7 @@ static void render(void) {
 }
 
 static void load_file(void) {
-    int fd = open(FILE_PATH, O_RDONLY);
+    int fd = open(g_path, O_RDONLY);
     if (fd < 0) return;
     int n = (int)read(fd, g_buf, BUF_MAX - 1);
     close(fd);
@@ -67,16 +68,27 @@ static void load_file(void) {
 }
 
 static void save_file(void) {
-    int fd = open(FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = open(g_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return;
     write(fd, g_buf, g_len);
     close(fd);
 }
 
 int main(int argc, char **argv) {
-    (void)argc; (void)argv;
+    /* Open the file given in argv[1] (when spawned from oxfiles via
+     * osn_spawn(path, "/home/foo.txt", ...)) — falls back to the
+     * default scratch file when run with no args. */
+    if (argc > 1 && argv[1] && argv[1][0]) {
+        size_t L = strlen(argv[1]);
+        if (L >= sizeof(g_path)) L = sizeof(g_path) - 1;
+        memcpy(g_path, argv[1], L);
+        g_path[L] = 0;
+    }
     if (ox_init() < 0) return 1;
-    g_win = ox_window_create(WIN_W, WIN_H, "Notepad");
+    /* Window title shows the path so users know which file. */
+    char title[80];
+    snprintf(title, sizeof(title), "Notepad — %s", g_path);
+    g_win = ox_window_create(WIN_W, WIN_H, title);
     if (g_win < 0) return 1;
 
     load_file();

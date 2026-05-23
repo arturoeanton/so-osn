@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /*
@@ -67,21 +68,42 @@ static void ensure_buf(FILE *f) {
 }
 
 /* Drain pending write buffer to fd. Returns 0 on success, -1 on error
- * with f->err set. */
+ * with f->err set.
+ *
+ * Retries transparently on EAGAIN with short nanosleeps — needed for
+ * burst output (TCC writing an ELF, cat dumping a big file into an
+ * oxterm window) where the kernel side (pipe / PTY ring) is full and
+ * the writer would otherwise see its output silently truncated. Cap
+ * at a few hundred ms of retries so a genuinely broken sink does
+ * eventually fail rather than hanging forever. */
 static int drain_write(FILE *f) {
     if (f->dir != 1 || f->bufpos == 0) return 0;
     size_t off = 0;
+    int eagain_attempts = 0;
     while (off < f->bufpos) {
         ssize_t w = write(f->fd, f->buf + off, f->bufpos - off);
-        if (w <= 0) {
+        if (w < 0) {
+            extern int errno;
+            if (errno == EAGAIN && eagain_attempts < 200) {
+                /* ~1 ms × 200 = 200 ms worst-case backoff. */
+                struct timespec ts = { 0, 1 * 1000000 };
+                nanosleep(&ts, 0);
+                eagain_attempts++;
+                continue;
+            }
             f->err = 1;
-            /* preserve unwritten bytes at the start of the buffer */
             size_t left = f->bufpos - off;
             for (size_t i = 0; i < left; i++) f->buf[i] = f->buf[off + i];
             f->bufpos = left;
             return -1;
         }
+        if (w == 0) {
+            /* Zero-byte write — treat as error to avoid spinning. */
+            f->err = 1;
+            return -1;
+        }
         off += (size_t)w;
+        eagain_attempts = 0;
     }
     f->bufpos = 0;
     return 0;
