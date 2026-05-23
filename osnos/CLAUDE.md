@@ -38,17 +38,29 @@ ISO, sd.img) and runs QEMU directly.
     serialtest tcctest luatest jqtest ttytest hello_libc user_hello`).
   - `osn-server/` — **the actual ring-3 servers**: `consrv.c`,
     `kbdsrv.c`, `shellsrv.c` (FASE 10 done).
+  - `gui/` — **Ox window system** (FASE 12): `oxsrv.c` (server),
+    plus four GUI client apps: `oxnotepad.c`, `oxcalc.c`,
+    `oxterm.c` (PTY + minishell child), `oxsettings.c`.
   - `libc.lds` — linker script shared by libc-linked ELFs.
   - `tests/user_hello.lds` — bare ELF's own linker script.
 - `vendor/` — `tinycc/` (0.9.27), `lua/` (5.4.7), `jq/` (1.7.1) ported
   as ring-3 ELFs against osnos libc.
+- `tools/` — host-side helpers. `gen_placeholder.c` + `gen_wallpapers.sh`
+  build the Ox wallpaper PPMs at build time (PNG via ImageMagick when
+  available, otherwise procedurally-themed placeholders).
+- `res/wallpapers/source/` — optional drop-in dir for real `.png`
+  source images named `samurai.png` + `girl.png`. The build picks them
+  up automatically and converts to PPM; otherwise generates themed
+  placeholders. Always unattended.
 - `build/` — all outputs (kernel ELF, object files, per-program ELFs,
   ISO at `build/osnos-x86_64.iso`).
-- `sd.img` — 16 MiB FAT16 disk image, rebuilt by the Makefile on every
-  build. Populated with `/bin/<every ELF>`, `/home/`, `/lib/` (TCC
+- `sd.img` — 32 MiB FAT16 disk image, rebuilt by the Makefile on every
+  build. Populated with `/bin/<every ELF>`, `/home/`,
+  `/home/wallpapers/{samurai,girl}.ppm`, `/home/.oxrc`, `/lib/` (TCC
   sysroot: crt scaffolding + `libc.a` + `libtcc1.a`) and `/usr/include/`
   (full libc headers + freestanding headers). Used by QEMU as primary
-  IDE disk.
+  IDE disk. mformat is invoked with `-c 8` so the cluster count stays
+  under the FAT16 limit even at 32 MiB.
 
 ## Build & run
 
@@ -160,7 +172,7 @@ Boot path (`src/kernel/main.c`, `kmain`):
   - `service.{c,h}` — name→pid registry. `SERVER_KEYBOARD=1`,
     `SERVER_SHELL=2`, `SERVER_CONSOLE=3`, `SERVER_FS=4` (reserved but
     no longer used — the shell talks VFS directly via syscalls since
-    FASE 10.3).
+    FASE 10.3), `SERVER_OX=5` (FASE 12 — Ox window system).
   - `gdt.{c,h}` + `tss.{c,h}` — GDT (kcode 0x08, kdata 0x10, udata 0x18,
     ucode 0x20, TSS 0x28). User-data BEFORE user-code is required so
     SYSRET64 lands on the right selectors. `tss.rsp0` mirrored in
@@ -202,7 +214,11 @@ Boot path (`src/kernel/main.c`, `kmain`):
     EINTR on blocked reads. Backs both PS/2 and serial input.
 - `src/drivers/`
   - `framebuffer` — handles `\b`, `\n`, `\r`, `\t` in `draw_string`;
-    also exposes `/dev/fb0` (writes paint pixels).
+    also exposes `/dev/fb0`. Two access modes: writes go through the
+    ANSI-cooked text path (consrv etc.), and the FASE 12 ioctls
+    `FBIOGET_VSCREENINFO` + `FBIO_BLIT` give the Ox window server
+    direct pixel access via `framebuffer_get_info` /
+    `framebuffer_blit_kernel`.
   - `keyboard` — PS/2; tracks shift/ctrl, extended `0xE0`; emits
     `keyboard_event_t { ascii, keycode }` (keycode uses Linux
     `input-event-codes.h` values).
@@ -270,7 +286,12 @@ Boot path (`src/kernel/main.c`, `kmain`):
   the kernel↔userland boundary** — changing one requires rebuilding
   kernel + libc + every ELF.
   - `osnos_ipc_abi.h` — `ipc_msg_t`, `ipc_type_t`, `SERVER_*`,
-    `IPC_DATA_SIZE=1024`, `IPC_QUEUE_SIZE=64`.
+    `IPC_DATA_SIZE=1024`, `IPC_QUEUE_SIZE=64`. Opcode ranges include
+    `0x60-0x7F` for Ox window-system messages (FASE 12).
+  - `osnos_fb_abi.h` — `osnos_fb_var_screeninfo`, `osnos_fb_blit_req`,
+    `OSNOS_FBIOGET_VSCREENINFO=0x4600`, `OSNOS_FBIO_BLIT=0x4680`.
+    User-side mirror in `lib/libc/include/sys/ioctl.h` and
+    `lib/libc/include/linux/fb.h`.
   - `osnos_status.h` — error enum. **Numeric values match Linux
     x86_64 errno exactly** (`EPERM=1`, `ENOENT=2`, `EIO=5`,
     `EEXIST=17`, …). See ABI invariant below.
@@ -291,9 +312,12 @@ Boot path (`src/kernel/main.c`, `kmain`):
   with `USER_CFLAGS` (no `-mcmodel=kernel`). Headers in
   `lib/libc/include/`: `stdio stdlib string unistd fcntl errno
   dirent signal time math setjmp termios pthread locale libgen
-  inttypes ctype alloca assert endian float limits` plus
+  inttypes ctype alloca assert endian float limits ox` plus
   `sys/{ioctl mman mouse reboot select socket stat time types wait}`,
-  `arpa/inet.h`, `netinet/in.h`, `osnos_ipc.h`. Internals:
+  `arpa/inet.h`, `netinet/in.h`, `linux/fb.h`, `osnos_ipc.h`.
+  `ox.h` is the Ox window-system client API; `linux/fb.h` mirrors
+  Linux's `<linux/fb.h>` so a future tinyX port resolves the same
+  identifiers. Internals:
   `crt0.S` (`_start` → argc/argv/envp → `main` → `_exit`),
   `unistd.c` (Linux errno convention `-1 + errno`), `signal.c` +
   `sigtramp.S` (sigframe + `__sigtramp`), `setjmp.S`, `pthread.c`,
@@ -302,7 +326,8 @@ Boot path (`src/kernel/main.c`, `kmain`):
   `stdlib.c` (`malloc` on `sbrk` first-fit free list), `resolver.c`
   (DNS), `inet.c`, `time.c`, `mman.c`, `wait.c`, `dirent.c`,
   `reboot.c`, `pty.c`, `math.c`, `libgen.c`, `locale.c`, `netdb.c`,
-  `errno.c`.
+  `errno.c`. **`ox.c`** + **`ox_font.c`** implement the Ox client
+  (window create / draw / events) — see `lib/libc/include/ox.h`.
 - `elfs/` — see layout above. Pattern: drop
   `elfs/<category>/<name>.c`, append to `USER_ELF_LIBC_SRCS` (libc-
   linked, provides `main`) or `USER_ELF_SRCS` (bare, provides own
@@ -345,7 +370,8 @@ modify those two before sysret restoration.
 
 **IPC contract** (`osnos_ipc_abi.h`). Opcode numeric ranges:
 `0x00–0x0F` system, `0x10–0x1F` console, `0x20–0x3F` fs/vfs,
-`0x40–0x5F` process lifecycle (`IPC_PROC_EXITED/STOPPED/CONTINUED`).
+`0x40–0x5F` process lifecycle (`IPC_PROC_EXITED/STOPPED/CONTINUED`),
+`0x60–0x7F` Ox window system (FASE 12: `IPC_OX_*`).
 Every response sets `arg0=status, arg1=size, data=text`. `ipc_send`
 may fail with EAGAIN (queue full) or ESRCH (no such service) — never
 ignore the return when correctness matters.
@@ -441,6 +467,7 @@ ELFs. For libc-linked programs, the pattern is `int main(int, char**)`
 - `STATUS.md` — running log of what works today, ordered newest-first
   by phase, with sections by subsystem. **The most up-to-date source
   of truth**; consult before proposing where new features slot in.
+  Current phase: **FASE 12.0** — Ox mini-X window system.
 - `ARCH.md` — architecture diagram + IPC / syscall flow walkthroughs.
 - `ROADMAP_APENDICE.md` — multi-phase plan appendix.
 - `PLAN_FASE10.md` — detailed plan for FASE 10 (ring-3 servers).

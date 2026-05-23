@@ -48,3 +48,28 @@ void framebuffer_backspace(void);
  * /bin/ovi and other TUIs via ioctl(TIOCGWINSZ). */
 unsigned short framebuffer_cols(void);
 unsigned short framebuffer_rows(void);
+
+/* ---------------- Pixel-level API (FASE 12 — ox WM) -------------- */
+/*
+ * Geometry inspector. All-zero outputs if framebuffer_init never ran.
+ * pitch_bytes is the raw byte stride between rows.
+ */
+void framebuffer_get_info(
+    uint32_t *out_width,
+    uint32_t *out_height,
+    uint32_t *out_pitch_bytes,
+    uint32_t *out_bpp
+);
+
+/*
+ * Blit a rectangle of BGRA pixels straight into the framebuffer.
+ * `src` is a KERNEL pointer (caller copy_from_user's user data into a
+ * scratch buffer first if needed). Clips to screen bounds. No alpha
+ * blending; pixels are written verbatim.
+ */
+void framebuffer_blit_kernel(
+    uint32_t x, uint32_t y,
+    uint32_t w, uint32_t h,
+    const void *src,
+    uint32_t src_pitch_bytes
+);

@@ -116,11 +116,12 @@ extern const uint8_t user_fault_end[];
 /* Bare ELF demo — no libc, hand-rolled _start. Tiny (~1 KiB). */
 DECLARE_ELF(user_hello);
 
-/* ROM recovery set: the 3 ring-3 servers + banner. ~150 KiB total. */
+/* ROM recovery set: the 3 ring-3 servers + banner + window server. */
 DECLARE_ELF(consrv);
 DECLARE_ELF(kbdsrv);
 DECLARE_ELF(shellsrv);
 DECLARE_ELF(banner);
+DECLARE_ELF(oxsrv);
 
 #undef DECLARE_ELF
 
@@ -153,6 +154,7 @@ static const builtin_t builtins[] = {
     ELF(kbdsrv,   "ring-3 keyboard server (recovery ROM)"),
     ELF(shellsrv, "ring-3 shell (recovery ROM)"),
     ELF(banner,   "osnos welcome banner (recovery ROM)"),
+    ELF(oxsrv,    "ring-3 Ox window server (FASE 12)"),
 };
 
 #undef USER

@@ -75,12 +75,29 @@ static void install(int vec, void *handler) {
 /* Panic helpers — direct to framebuffer, no IPC.                   */
 /* ---------------------------------------------------------------- */
 
+/* Re-entrancy guard. If a fault happens INSIDE the panic path (e.g.
+ * framebuffer_draw_string takes a page fault because FB state is
+ * corrupt), recursing back through put_str would stack-overflow and
+ * triple-fault. While `in_panic` is set we skip the framebuffer path
+ * entirely and only spin out to serial — that's pure inb/outb and
+ * can't fault. */
+static volatile int in_panic = 0;
+
 static void put_str(const char *s, uint32_t color) {
-    framebuffer_draw_string(s, color);
-    /* Panic / exception output also goes to serial so a host
-     * capturing `-serial file:serial.log` sees the backtrace even
-     * when the framebuffer is corrupt or invisible. */
-    if (s) serial_puts(s, os_strlen(s));
+    if (!s) return;
+    size_t n = os_strlen(s);
+    if (!in_panic) {
+        framebuffer_draw_string(s, color);
+    }
+    serial_puts(s, n);
+}
+
+/* Called at the top of every panic handler. Disables interrupts and
+ * raises the in_panic flag so put_str stops touching the framebuffer.
+ * Safe to call multiple times (idempotent). */
+static void panic_enter(void) {
+    __asm__ volatile ("cli");
+    in_panic = 1;
 }
 
 static void put_hex(uint64_t value, uint32_t color) {
@@ -138,6 +155,7 @@ static void hcf(void) {
 }
 
 static void panic_header(int vec) {
+    panic_enter();
     exception_count++;
     put_str("\n\n*** EXCEPTION ", 0xff5555);
     put_dec((uint64_t)vec, 0xff5555);

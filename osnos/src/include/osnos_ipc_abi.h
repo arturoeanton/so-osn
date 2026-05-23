@@ -41,6 +41,7 @@
 #define SERVER_SHELL    2
 #define SERVER_CONSOLE  3
 #define SERVER_FS       4
+#define SERVER_OX       5   /* FASE 12 — mini-X window system        */
 
 /*
  * Opcode ranges (numeric values are part of the ABI; do not reorder):
@@ -48,6 +49,7 @@
  *   0x10 - 0x1F   console
  *   0x20 - 0x3F   fs / vfs
  *   0x40 - 0x5F   process lifecycle
+ *   0x60 - 0x7F   ox window system (FASE 12)
  */
 typedef enum {
     IPC_NONE             = 0x00,
@@ -56,6 +58,8 @@ typedef enum {
 
     IPC_CONSOLE_WRITE    = 0x10,
     IPC_CONSOLE_CLEAR    = 0x11,
+    IPC_CONSOLE_SUSPEND  = 0x12,   /* GUI compositor takes the FB     */
+    IPC_CONSOLE_RESUME   = 0x13,   /* GUI gone — shell text again     */
 
     IPC_FS_RESPONSE      = 0x20,
     IPC_FS_LIST          = 0x21,
@@ -72,7 +76,47 @@ typedef enum {
 
     IPC_PROC_EXITED      = 0x40,
     IPC_PROC_STOPPED     = 0x41,   /* Ctrl+Z hit a fg user task     */
-    IPC_PROC_CONTINUED   = 0x42    /* `fg` / `bg` resumed it back   */
+    IPC_PROC_CONTINUED   = 0x42,   /* `fg` / `bg` resumed it back   */
+
+    /*
+     * Ox window system (FASE 12). Client→Server (C→S) and
+     * Server→Client (S→C) messages share the same numeric space.
+     *
+     * Wire layout for OX requests:
+     *   arg0 = win_id (or 0 for global)
+     *   arg1 = command-specific scalar
+     *   data = command-specific blob (text, BGRA tile, etc.)
+     *
+     * Wire layout for OX events (S→C):
+     *   arg0 = win_id (event target)
+     *   arg1 = packed event scalars (ascii<<16 | keycode for KEY,
+     *          x<<16|y for MOUSE move, etc.)
+     *   data = empty
+     *
+     * Wire layout for OX_RESPONSE (S→C reply):
+     *   arg0 = status (osnos_status_t, 0=OK)
+     *   arg1 = returned value (win_id on CREATE, etc.)
+     */
+    IPC_OX_CONNECT        = 0x60,  /* C→S: client identifies itself        */
+    IPC_OX_WINDOW_CREATE  = 0x61,  /* C→S: arg0=w<<16|h, data=title        */
+    IPC_OX_WINDOW_DESTROY = 0x62,  /* C→S: arg0=win_id                     */
+    IPC_OX_DRAW_RECT      = 0x63,  /* C→S: arg0=win_id arg1=rgba           */
+                                   /* data = packed { x,y,w,h } uint32 ×4  */
+    IPC_OX_DRAW_TEXT      = 0x64,  /* C→S: arg0=win_id arg1=rgba           */
+                                   /* data = packed { x,y } uint32 ×2 + str */
+    IPC_OX_DRAW_IMAGE     = 0x65,  /* C→S: arg0=win_id                     */
+                                   /* data = { x,y,w,h, BGRA tile <=120px } */
+    IPC_OX_PRESENT        = 0x66,  /* C→S: arg0=win_id                     */
+    IPC_OX_SET_TITLE      = 0x67,  /* C→S: arg0=win_id, data=title         */
+    IPC_OX_EVENT_KEY      = 0x68,  /* S→C: arg0=win_id, data[0]=ascii      */
+                                   /*      data[1..2]=keycode LE, [3]=mods */
+    IPC_OX_EVENT_MOUSE    = 0x69,  /* S→C: arg0=win_id, arg1=x<<32|y       */
+                                   /*      data[0]=buttons, data[1]=type   */
+    IPC_OX_EVENT_EXPOSE   = 0x6a,  /* S→C: arg0=win_id, arg1=x<<32|y       */
+                                   /*      data=packed{w,h}                */
+    IPC_OX_EVENT_CLOSE    = 0x6b,  /* S→C: arg0=win_id                     */
+    IPC_OX_RELOAD_SETTINGS= 0x6c,  /* C→S: re-read /home/.oxrc             */
+    IPC_OX_RESPONSE       = 0x6f   /* S→C: arg0=status arg1=value          */
 } ipc_type_t;
 
 /*

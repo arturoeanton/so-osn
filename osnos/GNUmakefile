@@ -180,7 +180,12 @@ USER_ELF_LIBC_SRCS := \
     elfs/tools/term.c \
     elfs/osn-server/consrv.c \
     elfs/osn-server/kbdsrv.c \
-    elfs/osn-server/shellsrv.c
+    elfs/osn-server/shellsrv.c \
+    elfs/gui/oxsrv.c \
+    elfs/gui/oxnotepad.c \
+    elfs/gui/oxcalc.c \
+    elfs/gui/oxterm.c \
+    elfs/gui/oxsettings.c
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS)) \
@@ -198,7 +203,8 @@ USER_ELF_ROM_SRCS := \
     elfs/osn-server/consrv.c \
     elfs/osn-server/kbdsrv.c \
     elfs/osn-server/shellsrv.c \
-    elfs/tools/banner.c
+    elfs/tools/banner.c \
+    elfs/gui/oxsrv.c
 
 # objcopy only the ROM set: those are the bytes that travel inside the
 # kernel image. Everything else lives exclusively on /sd/bin.
@@ -243,25 +249,42 @@ QEMUFLAGS ?= -m 2G
 # expects.
 # ---------------------------------------------------------------------------
 SD_IMG       := sd.img
-SD_SIZE_MB   ?= 16
+# 32 MiB now (FASE 12 — wallpapers + GUI ELFs push past the old 16 MiB
+# limit). mformat with -c 8 (4 KiB clusters) keeps the cluster count
+# under 65525 so the volume stays FAT16, which is what our parser
+# understands.
+SD_SIZE_MB   ?= 32
 SD_TMP       := $(BUILD)/sd_seed
 SD_README_TXT = hola desde el disco
 SD_HELLO_TXT  = fat works!
 SD_LONG_TXT   = hola con nombre largo
 
+# --------------------------------------------------------------------------
+# Wallpapers (FASE 12 — ox window system).
+# Generated host-side from PNGs in res/wallpapers/source/ when ImageMagick
+# is available; otherwise the placeholder generator emits procedural
+# anime-style PPMs. Either way the build runs unattended.
+# --------------------------------------------------------------------------
+WALLPAPER_TMP := $(BUILD)/wallpapers
+WALLPAPERS    := $(WALLPAPER_TMP)/samurai.ppm $(WALLPAPER_TMP)/girl.ppm
+
+$(WALLPAPERS): tools/gen_wallpapers.sh tools/gen_placeholder.c
+	@./tools/gen_wallpapers.sh $(WALLPAPER_TMP)
+
 # Re-build sd.img whenever ANY built ELF changes or the build script
 # changes (so the disk always reflects the freshly compiled binaries).
 # Filenames inside ::/bin drop the .elf extension so they match the
 # exec lookup path (proc_execve("/bin/cat") → /sd/bin/cat via aliasfs).
-$(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBTCC1_A) $(CRTI_O) $(CRTN_O) GNUmakefile
+$(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBTCC1_A) $(CRTI_O) $(CRTN_O) $(WALLPAPERS) GNUmakefile
 	@command -v mformat >/dev/null 2>&1 || { echo "error: mtools (mformat/mcopy) not found. Install: brew install mtools / sudo apt install mtools" >&2; exit 1; }
 	@command -v mcopy   >/dev/null 2>&1 || { echo "error: mtools (mformat/mcopy) not found. Install: brew install mtools / sudo apt install mtools" >&2; exit 1; }
 	@command -v mmd     >/dev/null 2>&1 || { echo "error: mtools mmd not found." >&2; exit 1; }
 	@echo "  GEN     $@ (FAT16 + populate /bin + /home)"
 	dd if=/dev/zero of=$@ bs=1048576 count=$(SD_SIZE_MB) status=none
-	mformat -i $@ ::
+	mformat -i $@ -c 8 ::
 	mmd -i $@ ::/bin
 	mmd -i $@ ::/home
+	mmd -i $@ ::/home/wallpapers
 	mmd -i $@ ::/lib
 	mmd -i $@ ::/lib/tcc
 	mmd -i $@ ::/lib/tcc/include
@@ -293,6 +316,13 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBTCC1_A) $(CRTI_O) $(CRTN
 	mcopy -i $@ $(SD_TMP)/.oshrc      ::/home/.oshrc
 	mcopy -i $@ $(SD_TMP)/hello.c     ::/home/hello.c
 	mcopy -i $@ $(SD_TMP)/test.json   ::/home/test.json
+	@# Default .oxrc — oxsrv reads this at boot. /bin/oxsettings rewrites
+	@# it from the GUI. If left absent, oxsrv falls back to "samurai".
+	printf 'current_wallpaper=samurai\n' > $(SD_TMP)/.oxrc
+	mcopy -i $@ $(SD_TMP)/.oxrc       ::/home/.oxrc
+	@# Wallpaper PPMs (FASE 12).
+	mcopy -i $@ $(WALLPAPER_TMP)/samurai.ppm ::/home/wallpapers/samurai.ppm
+	mcopy -i $@ $(WALLPAPER_TMP)/girl.ppm    ::/home/wallpapers/girl.ppm
 	@# Copy every built ELF into /bin/, stripping the .elf extension so
 	@# shellsrv's PATH lookup finds /bin/cat (not /bin/cat.elf).
 	@for elf in $(USER_ELF_LIST); do \

@@ -182,6 +182,15 @@ void bootstrap_fs(void) {
             "export HOME=/home\n"
             "export SHELL=/bin/shellsrv\n"
             "export OSNAME=osnos\n");
+        /* Ox window-system settings (FASE 12). oxsrv reads this at
+         * boot; /bin/oxsettings rewrites it. */
+        seed_if_absent("/home/.oxrc",
+            "current_wallpaper=samurai\n");
+        /* Ensure /home/wallpapers/ exists even when no PPMs were
+         * shipped on the disk image (rare — sd.img seeds them, but
+         * a hand-edited disk might lack the dir). vfs_mkdir is
+         * idempotent (EEXIST is OK). */
+        vfs_mkdir("/home/wallpapers");
     } else {
         /* Diskless: same ramfs-backed /home as before. */
         vfs_mkdir("/home");
@@ -194,5 +203,7 @@ void bootstrap_fs(void) {
             "export HOME=/home\n"
             "export SHELL=/bin/shellsrv\n"
             "export OSNAME=osnos\n");
+        seed_file("/home/.oxrc", "current_wallpaper=samurai\n");
+        vfs_mkdir("/home/wallpapers");
     }
 }

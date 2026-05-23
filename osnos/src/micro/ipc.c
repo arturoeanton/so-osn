@@ -15,10 +15,22 @@ void ipc_init(void) {
 }
 
 osnos_status_t ipc_send(const ipc_msg_t *msg) {
+    /* Two-step routing:
+     *   1. Try service-ID lookup. This covers the canonical case
+     *      (clients address kernel servers via SERVER_FOO constants).
+     *   2. If no service matches, fall through to direct-pid routing
+     *      so a server (e.g. oxsrv) can deliver events back to a
+     *      specific client. The pid must correspond to a live task.
+     *
+     * Both code paths preserve the invariant that the queue stores
+     * receiver pid (never SID) so sys_ipc_recv can match by pid.
+     */
     uint64_t pid = service_get_pid(msg->to);
-
     if (pid == 0) {
-        return OSNOS_ESRCH;
+        /* Direct-pid routing fallback (FASE 12 / Ox client events). */
+        if (msg->to == 0) return OSNOS_ESRCH;
+        if (!task_by_pid(msg->to)) return OSNOS_ESRCH;
+        pid = msg->to;
     }
 
     if (count >= IPC_QUEUE_SIZE) {
@@ -26,10 +38,6 @@ osnos_status_t ipc_send(const ipc_msg_t *msg) {
     }
 
     queue[write_index] = *msg;
-    /* Translate the service ID in `msg->to` into the actual receiver
-     * pid in the queued copy. Receivers filter by their own pid
-     * (sys_ipc_recv) so the queue MUST store pid, not the SID. The
-     * sender's view of msg.to is unchanged. */
     queue[write_index].to = pid;
 
     write_index++;

@@ -5,8 +5,10 @@
 
 #include "../include/osnos_keys.h"
 
-#define PS2_DATA   0x60
-#define PS2_STATUS 0x64
+#define PS2_DATA       0x60
+#define PS2_STATUS     0x64
+#define STAT_OUTBUF    0x01    /* bit 0: data available on 0x60 */
+#define STAT_AUX_DATA  0x20    /* bit 5: byte is from AUX (mouse) — NOT ours */
 
 static bool shift_down = false;
 static bool ctrl_down = false;
@@ -93,7 +95,16 @@ void keyboard_init(void) {
 }
 
 bool keyboard_poll(keyboard_event_t *ev) {
-    if ((inb(PS2_STATUS) & 1) == 0) {
+    uint8_t st = inb(PS2_STATUS);
+    if (!(st & STAT_OUTBUF)) {
+        return false;
+    }
+    /* CRITICAL: leave AUX (mouse) bytes for mouse_poll. Reading them
+     * here would interpret mouse deltas/buttons as keyboard scancodes
+     * — that's why moving the mouse used to spew garbage into the
+     * focused window (the dx/dy bytes happen to match digit/letter
+     * scancodes, e.g. 0x02='1', 0x03='2', 0x10='q'). */
+    if (st & STAT_AUX_DATA) {
         return false;
     }
 

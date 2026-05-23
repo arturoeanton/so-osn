@@ -199,6 +199,13 @@ void kmain(void) {
         service_register(SERVER_SHELL, (uint64_t)shellsrv_pid);
     }
 
+    /* Ox window system (FASE 12) — opt-in. /bin/oxsrv ships on disk
+     * and registers SERVER_OX itself on first launch; the user types
+     * `oxsrv` in the shell to start the GUI. Auto-start was
+     * disabled because the cooked-text consrv path keeps painting
+     * the shell on top of the GUI framebuffer, and the user wants
+     * explicit control over when the GUI takes over the screen. */
+
     /* Watchdog: cada ~100ms checkea si shellsrv sigue vivo. Si murió
      * (e.g. por `exec /bin/foo`, sys_exit, o fault), lo respawnea +
      * re-registra SERVER_SHELL. Sin esto, un `exec` interactivo deja
@@ -272,6 +279,9 @@ static void server_respawn_tick(void) {
     respawn_if_dead(SERVER_CONSOLE,  "/bin/consrv");
     respawn_if_dead(SERVER_KEYBOARD, "/bin/kbdsrv");
     respawn_if_dead(SERVER_SHELL,    "/bin/shellsrv");
+    /* SERVER_OX (oxsrv) is opt-in — user starts it via `oxsrv` in
+     * the shell. No respawn here so quitting it (Alt+F12 / sys_exit)
+     * actually stays quit. */
 
     /* Sleep ~100 ms between checks. Without this the scheduler
      * re-dispatches us every round-robin cycle (~50us with idle

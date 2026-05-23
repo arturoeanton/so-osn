@@ -3,8 +3,10 @@
 #include <stddef.h>
 
 #include "../drivers/framebuffer.h"
+#include "../drivers/serial.h"
 #include "../fs/vfs.h"
 #include "../include/osnos_dirent.h"
+#include "../include/osnos_fb_abi.h"
 #include "../include/osnos_fcntl.h"
 #include "../include/osnos_status.h"
 #include "../include/osnos_taskinfo.h"
@@ -2430,6 +2432,60 @@ int64_t sys_fcntl(int fd, int cmd, int64_t arg) {
 int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
     osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f) return err(OSNOS_EBADF);
+
+    /* /dev/fb0 ioctls (FASE 12 — ox window system).
+     * Detected by exact path match so we don't have to add a new
+     * is_fb flag to the OFD struct. */
+    if (f->is_chr && os_streq(f->path, "/dev/fb0")) {
+        switch (request) {
+        case OSNOS_FBIOGET_VSCREENINFO: {
+            struct osnos_fb_var_screeninfo info = {0};
+            uint32_t w, h, pitch_bytes, bpp;
+            framebuffer_get_info(&w, &h, &pitch_bytes, &bpp);
+            info.xres           = w;
+            info.yres           = h;
+            info.xres_virtual   = w;
+            info.yres_virtual   = h;
+            info.bits_per_pixel = bpp;
+            info.line_length    = pitch_bytes;
+            /* Limine on x86_64 lays out 32 bpp as BGRA: byte 0 = B,
+             * byte 1 = G, byte 2 = R, byte 3 = A. */
+            info.red_offset     = 16;
+            info.green_offset   = 8;
+            info.blue_offset    = 0;
+            info.alpha_offset   = 24;
+            if (copy_to_user(arg, &info, sizeof(info)) != OSNOS_OK)
+                return err(OSNOS_EFAULT);
+            return 0;
+        }
+        case OSNOS_FBIO_BLIT: {
+            struct osnos_fb_blit_req req;
+            if (copy_from_user(&req, arg, sizeof(req)) != OSNOS_OK)
+                return err(OSNOS_EFAULT);
+            if (req.w == 0 || req.h == 0) return 0;
+            if (req.w > 4096 || req.h > 4096) return err(OSNOS_EINVAL);
+            size_t row_bytes = (size_t)req.w * 4;
+            void *scratch = kmalloc(row_bytes);
+            if (!scratch) return err(OSNOS_ENOMEM);
+            const uint8_t *src_p = (const uint8_t *)req.src;
+            for (uint32_t row = 0; row < req.h; row++) {
+                if (copy_from_user(scratch,
+                                   src_p + (size_t)row * req.src_pitch,
+                                   row_bytes) != OSNOS_OK) {
+                    kfree(scratch);
+                    return err(OSNOS_EFAULT);
+                }
+                framebuffer_blit_kernel(req.x, req.y + row,
+                                         req.w, 1,
+                                         scratch, row_bytes);
+            }
+            kfree(scratch);
+            return 0;
+        }
+        default:
+            return -(int64_t)OSNOS_ENOTTY;
+        }
+    }
 
     /* PTY ioctls — work on master OR slave fds opened via
      * /dev/ptmx and /dev/pts/N. The pair has its OWN termios so

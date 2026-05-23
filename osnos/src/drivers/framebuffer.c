@@ -412,3 +412,45 @@ unsigned short framebuffer_rows(void) {
     if (fb_height <= 2 * TERM_MARGIN_Y) return 0;
     return (unsigned short)((fb_height - 2 * TERM_MARGIN_Y) / CHAR_HEIGHT);
 }
+
+/* -------------------- Pixel-level API (FASE 12) ------------------ */
+
+void framebuffer_get_info(
+    uint32_t *out_width,
+    uint32_t *out_height,
+    uint32_t *out_pitch_bytes,
+    uint32_t *out_bpp
+) {
+    if (out_width)       *out_width       = (uint32_t)fb_width;
+    if (out_height)      *out_height      = (uint32_t)fb_height;
+    /* fb_pitch is stored as uint32_t units (we divided pitch/4 at
+     * init). External callers expect raw bytes. */
+    if (out_pitch_bytes) *out_pitch_bytes = (uint32_t)(fb_pitch * 4);
+    if (out_bpp)         *out_bpp         = 32;
+}
+
+void framebuffer_blit_kernel(
+    uint32_t x, uint32_t y,
+    uint32_t w, uint32_t h,
+    const void *src,
+    uint32_t src_pitch_bytes
+) {
+    if (!fb || !src || w == 0 || h == 0) return;
+    if (x >= fb_width || y >= fb_height) return;
+
+    /* Clip to screen bounds. */
+    uint32_t max_w = (uint32_t)fb_width  - x;
+    uint32_t max_h = (uint32_t)fb_height - y;
+    if (w > max_w) w = max_w;
+    if (h > max_h) h = max_h;
+
+    const uint8_t *src_bytes = (const uint8_t *)src;
+    for (uint32_t row = 0; row < h; row++) {
+        const uint32_t *src_row =
+            (const uint32_t *)(src_bytes + row * src_pitch_bytes);
+        volatile uint32_t *dst_row = fb + (y + row) * fb_pitch + x;
+        for (uint32_t col = 0; col < w; col++) {
+            dst_row[col] = src_row[col];
+        }
+    }
+}

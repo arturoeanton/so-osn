@@ -41,6 +41,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* Suspended while a GUI compositor (oxsrv) owns the framebuffer.
+     * Writes are dropped (we still drain the IPC queue so senders
+     * don't pile up). RESUME via IPC_CONSOLE_RESUME re-enables. */
+    int suspended = 0;
+
     for (;;) {
         ipc_msg_t msg;
         if (ipc_recv_block(&msg) != 0) {
@@ -51,7 +56,18 @@ int main(int argc, char **argv) {
         }
 
         switch (msg.type) {
+        case IPC_CONSOLE_SUSPEND:
+            suspended = 1;
+            break;
+        case IPC_CONSOLE_RESUME:
+            suspended = 0;
+            /* When the GUI exits, the user typically wants the shell
+             * back where it was. Clear the FB so prompt redraws on
+             * a clean canvas. */
+            write(fb, "\x1b[2J\x1b[H", 7);
+            break;
         case IPC_CONSOLE_WRITE: {
+            if (suspended) break;
             /* arg1 holds the byte count when the sender wants a
              * specific length (e.g. shell colored writes); fall
              * back to strlen so legacy plain-C-string senders
@@ -81,6 +97,7 @@ int main(int argc, char **argv) {
             break;
         }
         case IPC_CONSOLE_CLEAR:
+            if (suspended) break;
             /* VT100 clear + home is what the kernel console used
              * to emit directly. The framebuffer CSI parser handles
              * both bytes in a single write. */
