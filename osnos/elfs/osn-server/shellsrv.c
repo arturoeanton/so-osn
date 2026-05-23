@@ -343,7 +343,17 @@ static int split_args(char *line, char **argv, int max) {
         int in_sq = 0, in_dq = 0;
         while (*r) {
             char c = *r;
+            /* Backslash escape — different scope per quote state.
+             * Outside quotes: `\X` → literal X (any X).
+             * Inside double quotes: `\"` and `\\` → literal " / \,
+             *   other `\X` stays as `\X` (bash semantics).
+             * Inside single quotes: backslash is always literal. */
             if (!in_sq && !in_dq && c == '\\' && r[1]) {
+                *w++ = r[1];
+                r += 2;
+                continue;
+            }
+            if (in_dq && c == '\\' && (r[1] == '"' || r[1] == '\\')) {
                 *w++ = r[1];
                 r += 2;
                 continue;
