@@ -55,6 +55,8 @@ typedef enum {
     IPC_NONE             = 0x00,
     IPC_KEY_EVENT        = 0x01,
     IPC_COMMAND_RUN      = 0x02,
+    IPC_KEYBOARD_SUSPEND = 0x03,   /* GUI grabs the keyboard          */
+    IPC_KEYBOARD_RESUME  = 0x04,   /* GUI gone — TTY/shell again      */
 
     IPC_CONSOLE_WRITE    = 0x10,
     IPC_CONSOLE_CLEAR    = 0x11,

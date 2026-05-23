@@ -569,18 +569,22 @@ static void do_reboot(void) {
     osnos_syscall1(169 /* SYS_REBOOT */, 0x01234567);
 }
 
-/* Resume consrv so the shell text reappears when oxsrv exits. */
-static void resume_consrv(void) {
+/* Resume consrv + kbdsrv so the shell + TTY come back when oxsrv exits. */
+static void resume_underlings(void) {
     ipc_msg_t sm;
     memset(&sm, 0, sizeof(sm));
     sm.to   = SERVER_CONSOLE;
     sm.type = IPC_CONSOLE_RESUME;
     ipc_send(&sm);
+    memset(&sm, 0, sizeof(sm));
+    sm.to   = SERVER_KEYBOARD;
+    sm.type = IPC_KEYBOARD_RESUME;
+    ipc_send(&sm);
 }
 
 static void on_term(int sig) {
     (void)sig;
-    resume_consrv();
+    resume_underlings();
     _exit(0);
 }
 
@@ -1065,15 +1069,24 @@ int main(int argc, char **argv) {
         write(ttyfd, m, 25);
     }
 
-    /* Tell consrv to stop painting the framebuffer so we own it
-     * exclusively (no more shell-text flicker through our GUI).
-     * RESUME is sent in the SIGTERM handler below. */
+    /* Take exclusive ownership of the framebuffer AND the keyboard
+     * ring (/dev/input0). consrv stops painting, kbdsrv stops
+     * draining input events — both yield to us until RESUME on exit. */
     {
         ipc_msg_t sm;
         memset(&sm, 0, sizeof(sm));
         sm.to   = SERVER_CONSOLE;
         sm.type = IPC_CONSOLE_SUSPEND;
         ipc_send(&sm);
+        memset(&sm, 0, sizeof(sm));
+        sm.to   = SERVER_KEYBOARD;
+        sm.type = IPC_KEYBOARD_SUSPEND;
+        ipc_send(&sm);
+        /* Give kbdsrv a moment to actually park (it polls IPC every
+         * ~30 ms in suspended state). Without this, the first few
+         * keystrokes still get stolen during the handoff. */
+        struct timespec ts = { 0, 50 * 1000000 };
+        nanosleep(&ts, 0);
     }
 
     /* Install termination handlers so `kill <pid>` lets us tell

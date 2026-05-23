@@ -12,33 +12,35 @@ type 'help' for commands
   Build: FASE 11.3 (tcc + lua + jq self-host)
   Type 'help' for a list of shell builtins.
 [39m
-[38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39m
-[38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mexport OSNAME=osnos[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mo[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mox[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxs[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxsr[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxsrv[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxsrv
+[38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mo[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mox[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxs[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxsr[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxsrv[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxsrv
 oxsrv: starting
 oxsrv: fb 1280x800 bpp=32 pitch=5120
 oxsrv: entered main loop
-oxsrv: frame 0 cur=(640,400) wins=0
 oxsrv: wallpaper 'samurai' ready, entering loop
-oxsrv: frame 60 cur=(640,400) wins=0
-oxsrv: frame 120 cur=(425,296) wins=0
-oxsrv: frame 180 cur=(187,231) wins=1
-oxsrv: frame 240 cur=(235,221) wins=1
-oxsrv: frame 300 cur=(233,192) wins=1
-oxsrv: frame 360 cur=(198,276) wins=1
-oxsrv: frame 420 cur=(271,29) wins=0
-oxsrv: frame 480 cur=(389,160) wins=0
-oxsrv: frame 540 cur=(152,171) wins=1
-oxsrv: frame 600 cur=(473,127) wins=1
-oxsrv: frame 660 cur=(452,136) wins=0
-oxsrv: frame 720 cur=(367,167) wins=1
-oxsrv: frame 780 cur=(364,88) wins=1
-oxsrv: frame 840 cur=(364,88) wins=1
-oxsrv: frame 900 cur=(637,108) wins=1
-oxsrv: frame 960 cur=(982,196) wins=1
-oxsrv: frame 1020 cur=(438,210) wins=2
-oxsrv: frame 1080 cur=(438,210) wins=2
-oxsrv: frame 1140 cur=(727,119) wins=1
-oxsrv: frame 1200 cur=(912,111) wins=1
+oxsrv: frame 0 cur=(640,400) wins=0
+oxsrv: frame 60 cur=(472,270) wins=0
+oxsrv: frame 120 cur=(500,287) wins=1
+oxsrv: frame 180 cur=(253,137) wins=1
+oxsrv: frame 240 cur=(72,32) wins=1
+oxsrv: frame 300 cur=(72,32) wins=1
+oxsrv: frame 360 cur=(72,32) wins=1
+oxsrv: frame 420 cur=(216,432) wins=1
+oxsrv: frame 480 cur=(163,423) wins=1
+oxsrv: frame 540 cur=(239,410) wins=0
+oxsrv: frame 600 cur=(299,471) wins=1
+oxsrv: frame 660 cur=(299,471) wins=1
+oxsrv: frame 720 cur=(299,471) wins=1
+oxsrv: frame 780 cur=(308,582) wins=1
+oxsrv: frame 840 cur=(378,134) wins=2
+oxsrv: frame 900 cur=(498,156) wins=2
+oxsrv: frame 960 cur=(741,131) wins=2
+oxsrv: frame 1020 cur=(652,61) wins=1
+oxsrv: frame 1080 cur=(545,451) wins=0
+oxsrv: frame 1140 cur=(552,454) wins=0
+oxsrv: frame 1200 cur=(553,401) wins=0
+oxsrv: frame 1260 cur=(276,269) wins=1
+oxsrv: frame 1320 cur=(344,370) wins=1
+oxsrv: frame 1380 cur=(415,274) wins=0
 
 shellsrv: ring-3 shell (FASE 10.4)
 type 'help' for commands

@@ -47,15 +47,50 @@ int main(int argc, char **argv) {
     int kbd = open("/dev/input0", O_RDONLY);
     if (kbd < 0) return 1;
 
+    /* O_NONBLOCK: we need to multiplex /dev/input0 reads with IPC
+     * polling (for SUSPEND/RESUME). Without it, the libc-default
+     * blocking read loops on EAGAIN with nanosleep — it'd never
+     * return long enough to check the IPC queue. */
+    fcntl(kbd, F_SETFL, O_NONBLOCK);
+
     if (ipc_service_register(SERVER_KEYBOARD) != 0) {
         close(kbd);
         return 1;
     }
 
+    /* When a GUI grabs the keyboard (oxsrv sends SUSPEND), kbdsrv
+     * stops draining /dev/input0 so events reach the GUI instead
+     * of being cooked + forwarded to the TTY. RESUME restores the
+     * normal shell path. */
+    int suspended = 0;
+
     for (;;) {
+        /* IPC first — check for SUSPEND/RESUME or other control msgs. */
+        ipc_msg_t cmd;
+        while (ipc_recv(&cmd) == 0) {
+            if (cmd.type == IPC_KEYBOARD_SUSPEND) suspended = 1;
+            else if (cmd.type == IPC_KEYBOARD_RESUME) suspended = 0;
+        }
+
+        if (suspended) {
+            /* Yield the keyboard ring entirely to whoever's reading
+             * /dev/input0 directly (oxsrv). Don't even peek — any
+             * read here would race-steal the event. */
+            struct timespec ts = { 0, 30 * 1000000 };   /* 30 ms */
+            nanosleep(&ts, 0);
+            continue;
+        }
+
+        /* Normal path: drain raw events from /dev/input0 and cook
+         * them into the TTY ring. */
         kbd_event_t ev;
         long n = read(kbd, &ev, sizeof(ev));
-        if (n != (long)sizeof(ev)) continue;     /* short read — skip */
+        if (n != (long)sizeof(ev)) {
+            /* EAGAIN or short read — sleep briefly and loop. */
+            struct timespec ts = { 0, 10 * 1000000 };   /* 10 ms */
+            nanosleep(&ts, 0);
+            continue;
+        }
 
         /* TTY feed: plain ASCII goes straight through. Arrow keys
          * synthesise CSI sequences so canonical apps + raw-mode TUIs
@@ -76,12 +111,5 @@ int main(int argc, char **argv) {
                 ipc_tty_input(final);
             }
         }
-
-        /* No IPC_KEY_EVENT fan-out: the legacy kernel shell read keys
-         * via IPC, but the ring-3 shellsrv (FASE 10.4) reads them
-         * via the TTY (sys_tty_input above + raw-mode read(0)),
-         * which already carries arrow keys as CSI sequences. Sending
-         * IPC_KEY_EVENT here would just pile messages in the queue
-         * — nobody drains them. */
     }
 }
