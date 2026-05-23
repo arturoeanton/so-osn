@@ -3000,6 +3000,68 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
                 (int)frame->r10,
                 (void *)frame->r8,
                 (void *)frame->r9));
+        case SYS_WRITEV: {
+            /* Linux writev(fd, iovec[], iovcnt) — musl's stdio writes
+             * via this path. Loop and reuse sys_write for each iov. */
+            int    fd     = (int)frame->rdi;
+            uint64_t uvec = frame->rsi;
+            int    iovcnt = (int)frame->rdx;
+            if (iovcnt <= 0) return 0;
+            if (iovcnt > 16) return pack(-(int64_t)OSNOS_EINVAL);
+            struct { uint64_t base; uint64_t len; } iov[16];
+            if (copy_from_user(iov, (void *)uvec,
+                                (size_t)iovcnt * sizeof(iov[0])) != OSNOS_OK)
+                return pack(-(int64_t)OSNOS_EFAULT);
+            int64_t total = 0;
+            for (int i = 0; i < iovcnt; i++) {
+                if (iov[i].len == 0) continue;
+                int64_t w = sys_write(fd, (const void *)iov[i].base,
+                                       (size_t)iov[i].len);
+                if (w < 0) {
+                    if (total > 0) return pack(total);
+                    return pack(w);
+                }
+                total += w;
+                if ((uint64_t)w < iov[i].len) break;
+            }
+            return pack(total);
+        }
+        case SYS_ARCH_PRCTL: {
+            /* musl uses ARCH_SET_FS to install its TLS pointer.
+             *   code 0x1002 = ARCH_SET_FS  → wrmsr MSR_FS_BASE = addr
+             *   code 0x1003 = ARCH_GET_FS  → rdmsr to *addr (musl
+             *                                rarely needs this)
+             * Other codes return -EINVAL. */
+            int      code = (int)frame->rdi;
+            uint64_t addr = frame->rsi;
+            if (code == 0x1002) {
+                uint32_t lo = (uint32_t)addr;
+                uint32_t hi = (uint32_t)(addr >> 32);
+                __asm__ volatile (
+                    "wrmsr"
+                    :
+                    : "c"((uint32_t)0xC0000100), "a"(lo), "d"(hi));
+                return 0;
+            }
+            if (code == 0x1003) {
+                uint32_t lo, hi;
+                __asm__ volatile (
+                    "rdmsr"
+                    : "=a"(lo), "=d"(hi)
+                    : "c"((uint32_t)0xC0000100));
+                uint64_t v = ((uint64_t)hi << 32) | lo;
+                if (copy_to_user((void *)addr, &v, sizeof(v)) != OSNOS_OK)
+                    return pack(-(int64_t)OSNOS_EFAULT);
+                return 0;
+            }
+            return pack(-(int64_t)OSNOS_EINVAL);
+        }
+        case SYS_SET_TID_ADDRESS: {
+            /* musl calls this very early. We don't implement clear-
+             * on-exit semantics — just return the caller's pid. */
+            task_t *t = task_current();
+            return pack(t ? (int64_t)t->pid : 1);
+        }
         default:
             return pack(-(int64_t)OSNOS_EINVAL);
     }

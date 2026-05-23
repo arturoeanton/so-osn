@@ -16,6 +16,7 @@ typedef struct task task_t;
  */
 #define SYS_READ      0
 #define SYS_WRITE     1
+#define SYS_WRITEV   20
 #define SYS_OPEN      2
 #define SYS_CLOSE     3
 #define SYS_STAT      4
@@ -67,6 +68,10 @@ typedef struct task task_t;
 #define SYS_BIND       49
 #define SYS_LISTEN     50
 #define SYS_SETSOCKOPT 54
+
+/* musl libc bootstrap requirements. */
+#define SYS_ARCH_PRCTL    158   /* TLS — wrmsr MSR_FS_BASE          */
+#define SYS_SET_TID_ADDRESS 218 /* musl __init_libc; trivial stub   */
 
 /* osnos-specific (above 250 to dodge Linux's #201 = time, #228 = clock_gettime). */
 #define SYS_ISATTY            250

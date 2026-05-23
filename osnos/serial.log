@@ -12,56 +12,17 @@ type 'help' for commands
   Build: FASE 11.3 (tcc + lua + jq self-host)
   Type 'help' for a list of shell builtins.
 [39m
-[38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mo[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mox[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxs[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxsr[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxsrv[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxsrv
+[38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mx[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mo[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mox[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxs[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxsr[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxsrv[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxsrv
 oxsrv: starting
 oxsrv: fb 1280x800 bpp=32 pitch=5120
 oxsrv: entered main loop
 oxsrv: wallpaper 'samurai' ready, entering loop
 oxsrv: frame 0 cur=(640,400) wins=0
-oxsrv: frame 60 cur=(549,321) wins=0
-oxsrv: frame 120 cur=(119,154) wins=1
-oxsrv: frame 180 cur=(460,80) wins=2
-oxsrv: frame 240 cur=(661,57) wins=2
-oxsrv: frame 300 cur=(661,57) wins=2
-oxsrv: frame 360 cur=(662,57) wins=2
-oxsrv: frame 420 cur=(395,186) wins=1
-oxsrv: frame 480 cur=(692,96) wins=2
-oxsrv: frame 540 cur=(191,206) wins=1
-oxsrv: frame 600 cur=(723,124) wins=2
-oxsrv: frame 660 cur=(378,227) wins=1
-oxsrv: frame 720 cur=(368,236) wins=2
-oxsrv: frame 780 cur=(747,152) wins=2
-oxsrv: frame 840 cur=(548,31) wins=0
-oxsrv: frame 900 cur=(585,122) wins=0
-oxsrv: frame 960 cur=(588,114) wins=1
-oxsrv: frame 1020 cur=(588,114) wins=1
-oxsrv: frame 1080 cur=(588,114) wins=1
-oxsrv: frame 1140 cur=(588,114) wins=1
-oxsrv: frame 1200 cur=(588,114) wins=1
-oxsrv: frame 1260 cur=(588,114) wins=1
-oxsrv: frame 1320 cur=(588,114) wins=1
-oxsrv: frame 1380 cur=(588,114) wins=1
-oxsrv: frame 1440 cur=(588,114) wins=1
-oxsrv: frame 1500 cur=(588,114) wins=1
-oxsrv: frame 1560 cur=(588,114) wins=1
-oxsrv: frame 1620 cur=(588,114) wins=1
-oxsrv: frame 1680 cur=(588,114) wins=1
-oxsrv: frame 1740 cur=(588,114) wins=1
-oxsrv: frame 1800 cur=(588,114) wins=1
-oxsrv: frame 1860 cur=(588,114) wins=1
-oxsrv: frame 1920 cur=(822,483) wins=0
-
-shellsrv: ring-3 shell (FASE 10.4)
-type 'help' for commands
-
-[38;2;0;255;102m  ___  ____         ___  ____  
- / _ \/ ___| _ __  / _ \/ ___| 
-| | | \___ \| '_ \| | | \___ \ 
-| |_| |___) | | | | |_| |___) |
- \___/|____/|_| |_|\___/|____/ 
-[39m
-[38;2;255;200;100m  osnos — x86_64 microkernel hobby OS
-  Build: FASE 11.3 (tcc + lua + jq self-host)
-  Type 'help' for a list of shell builtins.
-[39m
-[38;2;0;255;102mshellsrv:/$ [39m[7m [27m
+oxsrv: frame 60 cur=(640,400) wins=0
+oxsrv: frame 120 cur=(640,400) wins=0
+oxsrv: frame 180 cur=(560,376) wins=0
+oxsrv: frame 240 cur=(407,259) wins=0
+oxsrv: frame 300 cur=(417,254) wins=0
+oxsrv: frame 360 cur=(263,167) wins=1
+oxsrv: frame 420 cur=(707,189) wins=1
+oxsrv: frame 480 cur=(750,275) wins=2

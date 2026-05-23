@@ -44,7 +44,10 @@ ISO, sd.img) and runs QEMU directly.
   - `libc.lds` — linker script shared by libc-linked ELFs.
   - `tests/user_hello.lds` — bare ELF's own linker script.
 - `vendor/` — `tinycc/` (0.9.27), `lua/` (5.4.7), `jq/` (1.7.1) ported
-  as ring-3 ELFs against osnos libc.
+  as ring-3 ELFs against osnos libc. **`musl/` (1.2.5)** built as
+  `vendor/musl/build-osnos/lib/{libc.a, crt1.o, crti.o, crtn.o}` —
+  ring-3 programs opt-in by listing in `USER_ELF_MUSL_SRCS` (vs. the
+  mini libc default `USER_ELF_LIBC_SRCS`). See FASE 13.0 in STATUS.md.
 - `tools/` — host-side helpers. `gen_placeholder.c` + `gen_wallpapers.sh`
   build the Ox wallpaper PPMs at build time (PNG via ImageMagick when
   available, otherwise procedurally-themed placeholders).
@@ -193,11 +196,13 @@ Boot path (`src/kernel/main.c`, `kmain`):
     `wait4`, `kill`, `rt_sigaction`/`sigreturn`, `pipe`, `dup`/`dup2`,
     `mmap`/`munmap`, `brk`, `nanosleep`, `getdents`, `getcwd`/`chdir`,
     `stat`/`fstat`/`access`, `time`/`clock_gettime`, `mkdir`/`rmdir`/
-    `unlink`/`rename`, full BSD sockets, `select`, `ioctl` for termios,
-    `fcntl`, process groups + sessions), plus osnos-specific (#250+):
-    `SYS_ISATTY`, `SYS_IPC_SEND/RECV`, `SYS_SERVICE_REGISTER/LOOKUP`,
-    `SYS_TTY_INPUT`, `SYS_TASKINFO`, `SYS_SPAWN`, `SYS_SET_FG`,
-    `SYS_RESUME`.
+    `unlink`/`rename`, full BSD sockets, `select`, `ioctl` for termios
+    + framebuffer, `fcntl`, process groups + sessions, **`writev`,
+    `arch_prctl` (TLS via wrmsr MSR_FS_BASE), `set_tid_address`** —
+    last three are musl-bootstrap requirements), plus osnos-specific
+    (#250+): `SYS_ISATTY`, `SYS_IPC_SEND/RECV`,
+    `SYS_SERVICE_REGISTER/LOOKUP`, `SYS_TTY_INPUT`, `SYS_TASKINFO`,
+    `SYS_SPAWN`, `SYS_SET_FG`, `SYS_RESUME`.
   - `int80.c` — IDT[0x80] entry stub (legacy compat ABI).
   - `syscall_msr.{c,h}` — programs EFER.SCE, STAR, LSTAR, FMASK.
   - `syscall_entry.c` — `syscall` instruction entry stub. Mirrors the

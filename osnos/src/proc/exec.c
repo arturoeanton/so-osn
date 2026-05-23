@@ -531,11 +531,21 @@ static uint64_t build_argv_block(uint64_t   *pml4,
     for (int i = 0; i < argc; i++) strings_total += token_lens[i] + 1;
     for (int i = 0; i < envc; i++) strings_total += env_lens[i] + 1;
 
+    /* musl + glibc init code expects an `auxv` array right after the
+     * envp NULL: pairs of {key, value} terminated by {AT_NULL, 0}.
+     * Without it, __init_libc reads past envp into random string bytes
+     * and assigns nonsense to libc.page_size etc. We ship a tiny set:
+     *   AT_PAGESZ = 6  → 4096   (musl uses this; readelf -d shows it)
+     *   AT_NULL   = 0  → 0      (terminator)
+     * 4 u64s = 32 bytes. */
+    size_t aux_bytes = 4 * 8;
+
     /* Stay well inside the 4 KiB user stack page. */
     size_t block_size =
         8 /* argc */ +
         8 * (size_t)(argc + 1) /* argv + NULL */ +
         8 * (size_t)(envc + 1) /* envp + NULL */ +
+        aux_bytes +
         ((strings_total + 7) & ~(size_t)7);
     if (block_size > ARGV_BLOCK_MAX) return 0;
 
@@ -550,12 +560,25 @@ static uint64_t build_argv_block(uint64_t   *pml4,
     uint64_t strings_base_virt =
         (user_stack_top - strings_total) & ~(uint64_t)7;
 
-    /* Pointer area: envp_null, envp[envc-1..0], argv_null, argv[argc-1..0], argc. */
-    uint64_t envp_null_virt = strings_base_virt - 8;
-    uint64_t envp0_virt     = envp_null_virt    - 8 * (uint64_t)envc;
-    uint64_t argv_null_virt = envp0_virt        - 8;
-    uint64_t argv0_virt     = argv_null_virt    - 8 * (uint64_t)argc;
-    uint64_t argc_virt      = argv0_virt        - 8;
+    /* Pointer area layout (top → bottom):
+     *   [strings_base]
+     *   [aux: AT_NULL,0]
+     *   [aux: AT_PAGESZ,4096]
+     *   [envp_null]
+     *   [envp[envc-1..0]]
+     *   [argv_null]
+     *   [argv[argc-1..0]]
+     *   [argc]                ← argc_virt = RSP at entry
+     */
+    uint64_t aux_null_val_virt = strings_base_virt   - 8;
+    uint64_t aux_null_key_virt = aux_null_val_virt   - 8;
+    uint64_t aux_ps_val_virt   = aux_null_key_virt   - 8;
+    uint64_t aux_ps_key_virt   = aux_ps_val_virt     - 8;
+    uint64_t envp_null_virt    = aux_ps_key_virt     - 8;
+    uint64_t envp0_virt        = envp_null_virt      - 8 * (uint64_t)envc;
+    uint64_t argv_null_virt    = envp0_virt          - 8;
+    uint64_t argv0_virt        = argv_null_virt      - 8 * (uint64_t)argc;
+    uint64_t argc_virt         = argv0_virt          - 8;
 
     /* Copy strings, recording the virt address of each. */
     uint64_t arg_ptrs[MAX_ARGV];
@@ -581,6 +604,11 @@ static uint64_t build_argv_block(uint64_t   *pml4,
     }
 
     /* Write the pointer block. */
+    /* auxv: {AT_PAGESZ=6, 4096}, {AT_NULL=0, 0} */
+    *(uint64_t *)(page + (aux_null_val_virt - page_virt)) = 0;
+    *(uint64_t *)(page + (aux_null_key_virt - page_virt)) = 0;        /* AT_NULL   */
+    *(uint64_t *)(page + (aux_ps_val_virt   - page_virt)) = 4096;
+    *(uint64_t *)(page + (aux_ps_key_virt   - page_virt)) = 6;        /* AT_PAGESZ */
     *(uint64_t *)(page + (envp_null_virt - page_virt)) = 0;
     for (int i = 0; i < envc; i++) {
         *(uint64_t *)(page + (envp0_virt + 8 * (uint64_t)i - page_virt)) =

@@ -189,8 +189,12 @@ USER_ELF_LIBC_SRCS := \
     elfs/gui/oxfiles.c \
     elfs/tools/uxsh.c
 
+# musl-linked ELFs (vendor/musl). Declared early so USER_ELF_LIST sees it.
+USER_ELF_MUSL_SRCS := elfs/tests/hello_musl.c
+
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS)) \
+                 $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_MUSL_SRCS)) \
                  $(BUILD)/elfs/tools/tcc.elf \
                  $(BUILD)/elfs/tools/lua.elf \
                  $(BUILD)/elfs/tools/jq.elf
@@ -432,6 +436,43 @@ $(BUILD)/elfs/%.elf: elfs/%.c elfs/libc.lds $(LIBC_A) $(LIBC_CRT0)
 	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include -c $< -o $@.tmp.o
 	$(LD) $(USER_LDFLAGS) -T elfs/libc.lds \
 	    $(LIBC_CRT0) $@.tmp.o $(LIBC_A) -o $@
+	rm $@.tmp.o
+
+# --------------------------------------------------------------------------
+# musl-linked ring-3 ELFs (FASE 12.1 — vendored musl 1.2.5).
+#
+# Distinct from the libc-linked path above: uses vendor/musl/build-osnos/
+# (built once by the musl Makefile via ./configure + make). Apps that
+# want the full musl surface (printf %f / wide chars / fnmatch / setjmp
+# from a real implementation / locale) opt-in via USER_ELF_MUSL_SRCS.
+#
+# Use musl's own crt1.o (which calls __libc_start_main) + crti.o + crtn.o.
+# Compile with -isystem on musl headers so we don't pull our minimal
+# headers in. Link is purely static.
+# --------------------------------------------------------------------------
+MUSL_DIR     := vendor/musl
+MUSL_BUILD   := $(MUSL_DIR)/build-osnos
+MUSL_INC     := $(MUSL_DIR)/include $(MUSL_DIR)/arch/x86_64 $(MUSL_DIR)/arch/generic $(MUSL_BUILD)/obj/include
+MUSL_LIB     := $(MUSL_BUILD)/lib/libc.a
+MUSL_CRT1    := $(MUSL_BUILD)/lib/crt1.o
+MUSL_CRTI    := $(MUSL_BUILD)/lib/crti.o
+MUSL_CRTN    := $(MUSL_BUILD)/lib/crtn.o
+
+MUSL_CFLAGS  := -O2 -g -nostdinc -ffreestanding -fno-stack-protector \
+                -fno-PIC -fno-pie -ffunction-sections -fdata-sections \
+                -target x86_64-unknown-none-elf -m64 -march=x86-64 \
+                -mno-red-zone \
+                $(addprefix -isystem ,$(MUSL_INC))
+
+MUSL_LDFLAGS := -m elf_x86_64 -nostdlib -static -no-pie \
+                -z noexecstack --gc-sections
+
+$(BUILD)/elfs/tests/hello_musl.elf: elfs/tests/hello_musl.c elfs/musl.lds \
+        $(MUSL_LIB) $(MUSL_CRT1) $(MUSL_CRTI) $(MUSL_CRTN)
+	mkdir -p "$(dir $@)"
+	$(CC) $(MUSL_CFLAGS) -c $< -o $@.tmp.o
+	$(LD) $(MUSL_LDFLAGS) -T elfs/musl.lds \
+	    $(MUSL_CRT1) $(MUSL_CRTI) $@.tmp.o $(MUSL_LIB) $(MUSL_CRTN) -o $@
 	rm $@.tmp.o
 
 # --------------------------------------------------------------------------
