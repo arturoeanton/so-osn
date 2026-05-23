@@ -40,6 +40,14 @@ int isfinite(double x) {
     return exp != 0x7FF;
 }
 
+/* isnormal: true iff x is a finite, non-zero, non-subnormal number.
+ * Equivalently: exponent field is in [1, 2046]. */
+int isnormal(double x) {
+    uint64_t u = dbits(x);
+    uint64_t exp = (u >> 52) & 0x7FF;
+    return (exp != 0 && exp != 0x7FF);
+}
+
 /* ---- Trivial wrappers ---- */
 
 double fabs(double x)  { return x < 0 ? -x : x; }

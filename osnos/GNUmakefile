@@ -174,6 +174,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/tests/serialtest.c \
     elfs/tests/tcctest.c \
     elfs/tests/luatest.c \
+    elfs/tests/jqtest.c \
     elfs/tools/minishell.c \
     elfs/tools/term.c \
     elfs/osn-server/consrv.c \
@@ -183,7 +184,8 @@ USER_ELF_LIBC_SRCS := \
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS)) \
                  $(BUILD)/elfs/tools/tcc.elf \
-                 $(BUILD)/elfs/tools/lua.elf
+                 $(BUILD)/elfs/tools/lua.elf \
+                 $(BUILD)/elfs/tools/jq.elf
 
 # ---------------------------------------------------------------------------
 # Fase 2 disk-resident: split the embedded set into ROM (small, kept inside
@@ -276,6 +278,11 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBTCC1_A) $(CRTI_O) $(CRTN
 	@# Seed a hello.c for TCC smoke testing — first thing you can do
 	@# after `tcc -v` is `tcc -o /home/hello /home/hello.c && hello`.
 	printf '#include <stdio.h>\n\nint main(void) {\n    printf("hello from tcc on osnos!\\n");\n    return 0;\n}\n' > $(SD_TMP)/hello.c
+	@# Seed a test.json so jq users have something to play with:
+	@#   jq '.os' /home/test.json
+	@#   jq '.tools[]' /home/test.json
+	@#   jq '.tools | length' /home/test.json
+	printf '{\n  "os": "osnos",\n  "version": "0.11.3",\n  "kernel_mb": 1.3,\n  "self_hosting": ["tcc", "lua", "jq"],\n  "tools": [\n    {"name": "tcc",  "kind": "compiler", "lang": "c"},\n    {"name": "lua",  "kind": "interpreter", "lang": "lua"},\n    {"name": "jq",   "kind": "filter",   "lang": "json"},\n    {"name": "ovi",  "kind": "editor",   "modal": true}\n  ],\n  "tests": {"alltest": 17, "passing": 17}\n}\n' > $(SD_TMP)/test.json
 	mcopy -i $@ $(SD_TMP)/README.TXT  ::/README.TXT
 	mcopy -i $@ $(SD_TMP)/HELLO.TXT   ::/HELLO.TXT
 	mcopy -i $@ $(SD_TMP)/long.txt    "::/My Long Filename.txt"
@@ -284,6 +291,7 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBTCC1_A) $(CRTI_O) $(CRTN
 	mcopy -i $@ $(SD_TMP)/HELLO.TXT   ::/home/HELLO.TXT
 	mcopy -i $@ $(SD_TMP)/.oshrc      ::/home/.oshrc
 	mcopy -i $@ $(SD_TMP)/hello.c     ::/home/hello.c
+	mcopy -i $@ $(SD_TMP)/test.json   ::/home/test.json
 	@# Copy every built ELF into /bin/, stripping the .elf extension so
 	@# shellsrv's PATH lookup finds /bin/cat (not /bin/cat.elf).
 	@for elf in $(USER_ELF_LIST); do \
@@ -452,6 +460,42 @@ $(BUILD)/elfs/tools/lua.elf: $(LUA_OBJS) elfs/libc.lds $(LIBC_A) $(LIBC_CRT0)
 	mkdir -p "$(dir $@)"
 	$(LD) $(USER_LDFLAGS) -T elfs/libc.lds \
 	    $(LIBC_CRT0) $(LUA_OBJS) $(LIBC_A) -o $@
+
+# --------------------------------------------------------------------------
+# jq 1.7.1 port — FASE 11.3. Vendor tree at vendor/jq/src/.
+#
+# We build WITHOUT_ONIG (no regex builtins — test/match/sub/gsub fail
+# at runtime, language otherwise intact) which strips the ~30 KLOC
+# oniguruma dependency.
+#
+# Pre-built parser + lexer ship in the release tarball. We pre-generate
+# builtin.inc, config_opts.inc, version.h on the host once; they live
+# in the vendored tree.
+# --------------------------------------------------------------------------
+JQ_DIR        := vendor/jq/src
+JQ_CPPFLAGS   := -I vendor/jq -I $(JQ_DIR) -I $(JQ_DIR)/decNumber \
+                 -DWITHOUT_ONIG=1 -DHAVE_ISATTY=1 -DHAVE_SETLOCALE=1 \
+                 -DHAVE_MEMMEM=1 -DHAVE_ALLOCA_H=1 \
+                 -DHAVE_DECL_INFINITY=1 -DHAVE_DECL_ISNAN=1 \
+                 -DHAVE_DECL_NAN=1 -DHAVE_DECL_ISINF=1 \
+                 -DHAVE_STRDUP=1 \
+                 -DIEEE_8087=1
+JQ_SRCS       := \
+    builtin.c bytecode.c compile.c execute.c jv.c jv_alloc.c jv_aux.c \
+    jv_dtoa.c jv_dtoa_tsd.c jv_file.c jv_parse.c jv_print.c \
+    jv_unicode.c linker.c locfile.c util.c lexer.c parser.c main.c \
+    jq_test.c \
+    decNumber/decContext.c decNumber/decNumber.c
+JQ_OBJS       := $(patsubst %.c,$(BUILD)/$(JQ_DIR)/%.c.o,$(JQ_SRCS))
+
+$(BUILD)/$(JQ_DIR)/%.c.o: $(JQ_DIR)/%.c
+	mkdir -p "$(dir $@)"
+	$(CC) $(USER_CFLAGS) -w -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include $(JQ_CPPFLAGS) -c $< -o $@
+
+$(BUILD)/elfs/tools/jq.elf: $(JQ_OBJS) elfs/libc.lds $(LIBC_A) $(LIBC_CRT0)
+	mkdir -p "$(dir $@)"
+	$(LD) $(USER_LDFLAGS) -T elfs/libc.lds \
+	    $(LIBC_CRT0) $(JQ_OBJS) $(LIBC_A) -o $@
 
 # libtcc1.a — TCC's runtime support library. Holds 64-bit divmod
 # helpers, soft-float conversion, alloca, etc. Compiled with the

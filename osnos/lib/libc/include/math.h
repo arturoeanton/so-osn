@@ -28,6 +28,9 @@
 #define HUGE_VALF   __builtin_inff()
 
 int isnan(double x);
+/* isnormal: true if x is finite + normalized (NOT subnormal/zero/inf/NaN).
+ * Used by jq to detect numbers that need special formatting. */
+int isnormal(double x);
 int isinf(double x);
 int isfinite(double x);
 

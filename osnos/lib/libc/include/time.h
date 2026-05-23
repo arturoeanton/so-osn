@@ -67,3 +67,9 @@ double difftime(time_t b, time_t a);
 /* strftime: %Y %m %d %H %M %S %p %a %A %b %B %c %x %X %% subset. */
 size_t strftime(char *buf, size_t buf_size, const char *fmt,
                 const struct tm *t);
+
+/* strptime: parse string into struct tm per fmt. osnos provides
+ * an UNSUPPORTED stub (returns NULL always) — apps that need real
+ * date parsing should ship their own. jq's `fromdate` etc fall
+ * back gracefully to "unsupported format" error at runtime. */
+char *strptime(const char *s, const char *fmt, struct tm *t);

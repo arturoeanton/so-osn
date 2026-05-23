@@ -25,6 +25,16 @@ double             strtod  (const char *s, char **endptr);
  * -1 for any command. Apps that want subprocess control use fork()
  * + execve() directly. */
 int                system  (const char *cmd);
+
+/* realpath: resolve `path` to an absolute pathname. osnos has no
+ * symlinks so the resolution is "lexical normalize + absolutize via
+ * getcwd if needed". If `resolved` is NULL we malloc the result. */
+char              *realpath(const char *path, char *resolved);
+
+/* ISO C rand/srand — linear congruential. Not cryptographic. */
+#define RAND_MAX  0x7FFFFFFF
+int   rand (void);
+void  srand(unsigned seed);
 float              strtof  (const char *s, char **endptr);
 double             atof    (const char *s);
 

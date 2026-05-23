@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -162,6 +163,18 @@ long double strtold(const char *s, char **endptr) {
 
 double atof(const char *s) { return strtod(s, 0); }
 
+/* ISO C rand/srand — linear congruential generator. Predictable
+ * by design (testable / reproducible) — do NOT use for crypto. */
+static unsigned rand_state = 1;
+
+void srand(unsigned seed) { rand_state = seed; }
+
+int rand(void) {
+    /* Numerical Recipes' LCG: A=1103515245, C=12345, M=2^31. */
+    rand_state = rand_state * 1103515245u + 12345u;
+    return (int)((rand_state >> 1) & RAND_MAX);
+}
+
 /* system: osnos has no shell-exec for ring-3. Apps that want a
  * subprocess go via fork+execve directly. Returning -1 for any
  * non-NULL command and 0 for the "is a command processor
@@ -170,6 +183,67 @@ double atof(const char *s) { return strtod(s, 0); }
 int system(const char *cmd) {
     if (!cmd) return 0;
     return -1;
+}
+
+/* realpath: lexical path normalization since osnos has no symlinks.
+ * Steps:
+ *   1. If `path` is relative, prefix with getcwd().
+ *   2. Walk segments, collapsing "." and "..".
+ *   3. Write into `resolved` (must be PATH_MAX bytes) or malloc one.
+ * Errors return NULL + errno (ENOENT if final target doesn't stat).
+ */
+char *realpath(const char *path, char *resolved) {
+    if (!path) { errno = EINVAL; return 0; }
+
+    /* Local workspace: assemble absolute path then normalize in place. */
+    static char tmp[PATH_MAX];
+    size_t pos = 0;
+
+    if (path[0] != '/') {
+        if (!getcwd(tmp, sizeof(tmp))) { errno = ENOENT; return 0; }
+        pos = strlen(tmp);
+        if (pos > 0 && tmp[pos - 1] != '/') tmp[pos++] = '/';
+    } else {
+        tmp[pos++] = '/';
+    }
+    for (size_t i = 0; path[i] && pos < sizeof(tmp) - 1; i++) tmp[pos++] = path[i];
+    tmp[pos] = 0;
+
+    /* In-place normalize: drop "//", ".", ".." segments. */
+    char out[PATH_MAX];
+    size_t op = 0;
+    out[op++] = '/';
+    size_t i = 1;
+    while (tmp[i]) {
+        /* skip extra slashes */
+        while (tmp[i] == '/') i++;
+        if (!tmp[i]) break;
+
+        /* read segment */
+        size_t s = i;
+        while (tmp[i] && tmp[i] != '/') i++;
+        size_t len = i - s;
+        if (len == 1 && tmp[s] == '.') continue;
+        if (len == 2 && tmp[s] == '.' && tmp[s+1] == '.') {
+            /* pop last segment from out */
+            if (op > 1) {
+                op--;                                /* drop trailing '/' */
+                while (op > 0 && out[op - 1] != '/') op--;
+            }
+            continue;
+        }
+        if (op + len + 1 >= sizeof(out)) { errno = ENAMETOOLONG; return 0; }
+        for (size_t k = 0; k < len; k++) out[op++] = tmp[s + k];
+        out[op++] = '/';
+    }
+    /* Strip trailing slash (unless we're "/"). */
+    if (op > 1 && out[op - 1] == '/') op--;
+    out[op] = 0;
+
+    char *result = resolved ? resolved : (char *)malloc(op + 1);
+    if (!result) { errno = ENOMEM; return 0; }
+    for (size_t k = 0; k <= op; k++) result[k] = out[k];
+    return result;
 }
 
 int       abs  (int       n) { return n < 0 ? -n : n; }
@@ -221,7 +295,13 @@ static block_hdr_t *payload_to_hdr(void *p) {
 }
 
 void *malloc(size_t size) {
-    if (size == 0) return 0;
+    /* glibc semantic: malloc(0) returns a unique non-NULL pointer
+     * that free() can safely accept. The C standard allows either
+     * NULL or non-NULL, but real-world code (jq, sqlite, ...) often
+     * assumes non-NULL — they treat NULL as OOM and abort. Round
+     * 0 up to the minimum alignment so we always allocate at least
+     * one header + 16-byte payload. */
+    if (size == 0) size = 1;
     size = ROUND_UP(size);
 
     /* First-fit walk of the free list. */

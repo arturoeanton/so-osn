@@ -196,6 +196,14 @@ size_t strftime(char *buf, size_t buf_size, const char *fmt,
     return pos;
 }
 
+/* strptime: not implemented (osnos has no real wall clock anyway).
+ * Returning NULL signals parse failure so callers fall through to
+ * their error path instead of getting garbage. */
+char *strptime(const char *s, const char *fmt, struct tm *t) {
+    (void)s; (void)fmt; (void)t;
+    return 0;
+}
+
 /* gettimeofday — micro-resolution wall clock. osnos exposes only
  * monotonic-since-boot, so we read clock_gettime(CLOCK_MONOTONIC)
  * and split into sec/usec. Good enough for TCC's timing and any

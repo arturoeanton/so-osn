@@ -27,6 +27,11 @@ char  *strndup(const char *s, size_t n);
  * defers to strcmp. Same for strxfrm. */
 int    strcoll(const char *a, const char *b);
 size_t strxfrm(char *dst, const char *src, size_t n);
+
+/* memmem: GNU/BSD extension. Find `needle` in `haystack`. Returns
+ * pointer into haystack, or NULL if not found. */
+void  *memmem(const void *haystack, size_t hl,
+              const void *needle,   size_t nl);
 char  *strstr (const char *hay, const char *needle);
 char  *strpbrk(const char *s, const char *accept);
 size_t strspn (const char *s, const char *accept);

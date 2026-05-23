@@ -62,6 +62,13 @@ mini-libc propia para programas de usuario en ring 3.
    > = math.sqrt(2)
    1.4142135623731
    > os.exit()
+   shellsrv:/$ cat /home/test.json | jq          # ¡jq filter JSON!
+   { "os": "osnos", "self_hosting": ["tcc","lua","jq"], ... }
+   shellsrv:/$ jq -r '.tools[].name' /home/test.json
+   tcc
+   lua
+   jq
+   ovi
 ```
 
 > **TL;DR para reentrar al proyecto después de meses:** instalar Limine
@@ -366,7 +373,8 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | **🎉 FASE 11.0 — TinyCC self-hosting** (`/bin/tcc` 0.9.27 portado): compila programas C nativos desde dentro de osnos contra `/lib/libc.a` + `/usr/include/`. Produce ELFs estáticos runnable. `tcc hello.c -o hello && ./hello` funciona end-to-end. Patch crítico en TCC para que static-link convierta PLT32 → PC32 direct (sin GOT). | ✅ |
 | **FASE 11.1 polish — FAT true append + offset-native VFS + caching**: O(N) RMW reemplazado con cluster-chain extend O(len); FAT-sector cache en fat_get_entry; BUFSIZ 512→4096. TCC compile time pasó de "tarda mucho" a **instantáneo**. `/bin/readelf -S` para sección headers. | ✅ |
 | **🎉 FASE 11.2 — Lua 5.4 self-host** (`/bin/lua` Lua 5.4.7 portado): segundo lenguaje en osnos. REPL interactivo + ejecución de scripts. `ovi script.lua && lua script.lua` end-to-end. Libc gap-fill: `locale.h`, `frexp`/`modf`/`asin`/`acos`/`sinh`/`cosh`/`tanh`, `clock`/`mktime`/`strftime`/`difftime`, `system` stub. | ✅ |
-| **17/17 tests automatizados** via `/bin/alltest` (kerntest, forktest, waittest, sigtest, sigchldtest, pgrouptest, spawntest, exectest, ofdtest, ptytest, fdedgetest, jobtest, termtest, serialtest, tcctest, luatest, libctest) | ✅ |
+| **🎉 FASE 11.3 — jq 1.7.1 self-host** (`/bin/jq` portado, WITHOUT_ONIG): tercer lenguaje en osnos. Filter + transformer de JSON. `cat data.json \| jq '.field'`, `jq '.list \| length'`, pipes funcionales, builtins. Libc gap-fill: `alloca.h`, `pthread.h` shim single-thread, `libgen.h`, `memmem`, `isnormal`, `realpath`, `rand/srand`. **Bug crítico fixed**: `malloc(0)` ahora retorna non-NULL (glibc-compat). `/home/test.json` seed para jugar. | ✅ |
+| **18/18 tests automatizados** via `/bin/alltest` (kerntest, forktest, waittest, sigtest, sigchldtest, pgrouptest, spawntest, exectest, ofdtest, ptytest, fdedgetest, jobtest, termtest, serialtest, tcctest, luatest, jqtest, libctest) | ✅ |
 | **init-respawn watchdog** — consrv/kbdsrv/shellsrv auto-restart on death | ✅ |
 | Driver ATA PIO + FAT16 read/write + dir-chain extension + NT case-bits + persistencia | ✅ |
 | **/bin disk-resident** — sd.img poblado al build via mtools, kernel binary 1.1 MB (era 7.6 MB) | ✅ |

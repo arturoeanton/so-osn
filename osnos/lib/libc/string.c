@@ -27,6 +27,23 @@ int strcoll(const char *a, const char *b) {
     return strcmp(a, b);
 }
 
+/* memmem: linear search. O(hl × nl) worst-case — fine for the
+ * small needle/haystack sizes that ported tools (jq) actually
+ * use. Real glibc uses Two-Way; not worth the complexity here. */
+void *memmem(const void *haystack, size_t hl,
+              const void *needle,   size_t nl) {
+    if (nl == 0) return (void *)haystack;
+    if (hl < nl) return 0;
+    const unsigned char *h = (const unsigned char *)haystack;
+    const unsigned char *n = (const unsigned char *)needle;
+    for (size_t i = 0; i + nl <= hl; i++) {
+        size_t k = 0;
+        while (k < nl && h[i + k] == n[k]) k++;
+        if (k == nl) return (void *)(h + i);
+    }
+    return 0;
+}
+
 size_t strxfrm(char *dst, const char *src, size_t n) {
     size_t len = strlen(src);
     if (n > 0) {
