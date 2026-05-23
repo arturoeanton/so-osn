@@ -6,7 +6,8 @@
  *
  *   readelf -h FILE     ELF header (type/machine/entry/...)
  *   readelf -l FILE     program headers (PT_LOAD/INTERP/DYNAMIC/...)
- *   readelf -a FILE     all of the above
+ *   readelf -S FILE     section headers (.text/.data/.bss/.plt/...)
+ *   readelf -a FILE     header + program headers + section headers
  *
  * Intentionally NOT supporting: section headers (long), dynamic
  * symbol table, relocs. Add when needed.
@@ -39,6 +40,25 @@ static const char *machine_name(uint16_t m) {
     case 40:        return "ARM";
     case 183:       return "AArch64";
     default:        return "?";
+    }
+}
+
+static const char *stype_name(uint32_t t) {
+    switch (t) {
+    case SHT_NULL:        return "NULL";
+    case SHT_PROGBITS:    return "PROGBITS";
+    case SHT_SYMTAB:      return "SYMTAB";
+    case SHT_STRTAB:      return "STRTAB";
+    case SHT_RELA:        return "RELA";
+    case SHT_HASH:        return "HASH";
+    case SHT_DYNAMIC:     return "DYNAMIC";
+    case SHT_NOTE:        return "NOTE";
+    case SHT_NOBITS:      return "NOBITS";
+    case SHT_REL:         return "REL";
+    case SHT_DYNSYM:      return "DYNSYM";
+    case SHT_INIT_ARRAY:  return "INIT_ARRAY";
+    case SHT_FINI_ARRAY:  return "FINI_ARRAY";
+    default:              return "?";
     }
 }
 
@@ -147,26 +167,72 @@ static void print_phdrs(const Elf64_Ehdr *eh, const char *data,
     }
 }
 
+static void print_shdrs(const Elf64_Ehdr *eh, const char *data,
+                         size_t data_size) {
+    if (eh->e_shnum == 0) {
+        printf("\nNo section headers.\n");
+        return;
+    }
+    if (eh->e_shoff + (uint64_t)eh->e_shnum * eh->e_shentsize > data_size) {
+        printf("\nSection headers truncated.\n");
+        return;
+    }
+    /* String table for section names — section[e_shstrndx]. */
+    const char *strtab = 0;
+    size_t strtab_size = 0;
+    if (eh->e_shstrndx < eh->e_shnum) {
+        const Elf64_Shdr *s =
+            (const Elf64_Shdr *)(data + eh->e_shoff
+                                  + eh->e_shstrndx * eh->e_shentsize);
+        if (s->sh_offset + s->sh_size <= data_size) {
+            strtab = data + s->sh_offset;
+            strtab_size = s->sh_size;
+        }
+    }
+
+    printf("\nSection Headers (%d entries):\n", eh->e_shnum);
+    printf("  [Nr] Name                 Type        Address          Offset   Size     Flg\n");
+    for (uint16_t i = 0; i < eh->e_shnum; i++) {
+        const Elf64_Shdr *s =
+            (const Elf64_Shdr *)(data + eh->e_shoff + i * eh->e_shentsize);
+        const char *nm = (strtab && s->sh_name < strtab_size)
+                         ? strtab + s->sh_name : "?";
+        char flg[5] = "    ";
+        int k = 0;
+        if (s->sh_flags & SHF_WRITE)     flg[k++] = 'W';
+        if (s->sh_flags & SHF_ALLOC)     flg[k++] = 'A';
+        if (s->sh_flags & SHF_EXECINSTR) flg[k++] = 'X';
+        flg[k] = 0;
+        printf("  [%2d] %-20s %-11s 0x%016lx %08lx %08lx %s\n",
+               i, nm, stype_name(s->sh_type),
+               (unsigned long)s->sh_addr,
+               (unsigned long)s->sh_offset,
+               (unsigned long)s->sh_size, flg);
+    }
+}
+
 static void usage(void) {
     fprintf(stderr,
-            "usage: readelf -h|-l|-a FILE\n"
+            "usage: readelf -h|-l|-S|-a FILE\n"
             "  -h   ELF header only\n"
             "  -l   program headers only\n"
-            "  -a   header + program headers\n");
+            "  -S   section headers only\n"
+            "  -a   header + program + section headers\n");
 }
 
 int main(int argc, char **argv) {
-    int want_h = 0, want_l = 0;
+    int want_h = 0, want_l = 0, want_s = 0;
     int i = 1;
     while (i < argc && argv[i][0] == '-') {
         if      (strcmp(argv[i], "-h") == 0) want_h = 1;
         else if (strcmp(argv[i], "-l") == 0) want_l = 1;
-        else if (strcmp(argv[i], "-a") == 0) want_h = want_l = 1;
+        else if (strcmp(argv[i], "-S") == 0) want_s = 1;
+        else if (strcmp(argv[i], "-a") == 0) want_h = want_l = want_s = 1;
         else { usage(); return 1; }
         i++;
     }
     if (i >= argc) { usage(); return 1; }
-    if (!want_h && !want_l) want_h = want_l = 1;   /* default = -a */
+    if (!want_h && !want_l && !want_s) want_h = want_l = want_s = 1;
 
     const char *path = argv[i];
     size_t size = 0;
@@ -187,6 +253,7 @@ int main(int argc, char **argv) {
 
     if (want_h) print_header(eh);
     if (want_l) print_phdrs(eh, data, size);
+    if (want_s) print_shdrs(eh, data, size);
 
     free(data);
     return 0;

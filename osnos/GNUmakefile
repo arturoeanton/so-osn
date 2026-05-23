@@ -172,6 +172,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/tests/jobtest.c \
     elfs/tests/termtest.c \
     elfs/tests/serialtest.c \
+    elfs/tests/tcctest.c \
     elfs/tools/minishell.c \
     elfs/tools/term.c \
     elfs/osn-server/consrv.c \

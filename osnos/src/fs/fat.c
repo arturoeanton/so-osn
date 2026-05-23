@@ -72,14 +72,29 @@ static uint32_t cluster_to_lba(uint16_t cluster) {
  * Look up the FAT entry for `cluster`. *next receives the 16-bit value
  * (next cluster, 0=free, or 0xFFF8..0xFFFF=EOF). Returns 0 on success.
  */
+/* Single-entry FAT sector cache. The chain walk inside
+ * fat_extend_existing reads the same FAT sector ~12 times for a
+ * 50 KiB file (entries for consecutive clusters fall in the same
+ * sector). Caching the most recent FAT sector drops that to 1 ATA
+ * read per write call. The cache is invalidated by any function
+ * that writes the FAT (fat_set_entry, fat_alloc_cluster). */
+static uint32_t fat_cache_sec     = (uint32_t)-1;
+static uint8_t  fat_cache_buf[SECTOR_SIZE];
+
+static void fat_cache_invalidate(uint32_t sec) {
+    if (fat_cache_sec == sec) fat_cache_sec = (uint32_t)-1;
+}
+
 static int fat_get_entry(uint16_t cluster, uint16_t *next) {
     uint32_t byte_off = (uint32_t)cluster * 2;
     uint32_t sec      = fs.fat_lba + byte_off / SECTOR_SIZE;
     uint32_t in_sec   = byte_off % SECTOR_SIZE;
 
-    uint8_t buf[SECTOR_SIZE];
-    if (block_ata_read_sector(sec, buf) != 0) return -1;
-    *next = rd16(buf + in_sec);
+    if (fat_cache_sec != sec) {
+        if (block_ata_read_sector(sec, fat_cache_buf) != 0) return -1;
+        fat_cache_sec = sec;
+    }
+    *next = rd16(fat_cache_buf + in_sec);
     return 0;
 }
 
@@ -680,6 +695,7 @@ static int fat_set_entry(uint16_t cluster, uint16_t value) {
         buf[in_sec]     = (uint8_t)(value);
         buf[in_sec + 1] = (uint8_t)(value >> 8);
         if (block_ata_write_sector(sec, buf) != 0) return -1;
+        fat_cache_invalidate(sec);
     }
     return 0;
 }
@@ -1391,36 +1407,124 @@ int fat_write_path(const char *path, const char *buf, uint32_t len) {
  * Caller is sys_write which already bounds total at 4 MiB. */
 #define FAT_APPEND_LIMIT (4 * 1024 * 1024)
 
+/*
+ * True FAT append: walk the existing cluster chain to its tail,
+ * write the new bytes there (RMW-ing the partial sector that holds
+ * the current EOF, sequentially writing the rest), allocate +
+ * chain new clusters if the existing chain can't hold everything,
+ * then bump the dirent size field.
+ *
+ * Cost: O(chain_walk) + O(len). Previous "RMW the whole file"
+ * implementation was O(existing_size + len) per call; for a writer
+ * that grows a 50 KiB file in 6 × 8 KiB appends that was O(N²)
+ * total. Important enough to TCC's compile loop that it's the
+ * actual fast path now; the read-all fallback is gone.
+ */
+static int fat_extend_existing(const fat_dirent_t *de,
+                                const char *buf, uint32_t len) {
+    if (len == 0) return 0;
+    uint32_t existing_size = de->size;
+    uint16_t first_cluster = de->first_cluster;
+
+    uint32_t cluster_size =
+        (uint32_t)fs.sectors_per_cluster * SECTOR_SIZE;
+
+    /* Walk to last cluster (and count how many bytes the
+     * preceding clusters cover). */
+    uint16_t cluster      = first_cluster;
+    uint16_t last_cluster = cluster;
+    uint32_t bytes_before_last = 0;
+    for (;;) {
+        last_cluster = cluster;
+        uint16_t next;
+        if (fat_get_entry(cluster, &next) != 0) return FAT_EIO;
+        if (next >= FAT16_EOF_MIN) break;
+        bytes_before_last += cluster_size;
+        cluster = next;
+        if (cluster < 2) return FAT_EIO;
+    }
+
+    uint32_t tail_off = (existing_size > bytes_before_last)
+                         ? existing_size - bytes_before_last : 0;
+    uint32_t space_in_last = (tail_off < cluster_size)
+                              ? cluster_size - tail_off : 0;
+
+    uint32_t to_last = (len < space_in_last) ? len : space_in_last;
+    uint32_t remaining = len - to_last;
+
+    /* Fill the last cluster's trailing space (sector-by-sector RMW
+     * for the boundary sector, full overwrite for the rest). */
+    if (to_last > 0) {
+        uint32_t lba0   = cluster_to_lba(last_cluster);
+        uint32_t sec_off = tail_off / SECTOR_SIZE;
+        uint32_t in_sec  = tail_off % SECTOR_SIZE;
+        uint32_t src_off = 0;
+        uint8_t  sbuf[SECTOR_SIZE];
+        while (src_off < to_last) {
+            uint32_t lba = lba0 + sec_off;
+            if (block_ata_read_sector(lba, sbuf) != 0) return FAT_EIO;
+            uint32_t can = SECTOR_SIZE - in_sec;
+            if (can > to_last - src_off) can = to_last - src_off;
+            for (uint32_t k = 0; k < can; k++) {
+                sbuf[in_sec + k] = (uint8_t)buf[src_off + k];
+            }
+            if (block_ata_write_sector(lba, sbuf) != 0) return FAT_EIO;
+            src_off += can;
+            sec_off++;
+            in_sec = 0;
+        }
+    }
+
+    /* Allocate + chain new clusters for the tail that didn't fit. */
+    if (remaining > 0) {
+        uint32_t need = (remaining + cluster_size - 1) / cluster_size;
+        uint16_t new_chain = 0;
+        int rc = fat_alloc_chain(need, &new_chain);
+        if (rc != 0) return rc;
+        if (fat_set_entry(last_cluster, new_chain) != 0) {
+            fat_free_chain(new_chain);
+            return FAT_EIO;
+        }
+        rc = write_data_into_chain(new_chain, buf + to_last, remaining);
+        if (rc != 0) {
+            /* Best-effort cleanup — the chain is now linked, the
+             * EOF marker still points at the partly-written tail.
+             * fsck will recover the orphan clusters next mount. */
+            return rc;
+        }
+    }
+
+    /* Bump the dirent size field. */
+    uint8_t sb[SECTOR_SIZE];
+    if (block_ata_read_sector(de->dirent_lba, sb) != 0) return FAT_EIO;
+    uint8_t raw[DIRENT_SIZE];
+    for (uint32_t i = 0; i < DIRENT_SIZE; i++) {
+        raw[i] = sb[de->dirent_offset + i];
+    }
+    uint32_t new_size = existing_size + len;
+    raw[28] = (uint8_t)(new_size);
+    raw[29] = (uint8_t)(new_size >> 8);
+    raw[30] = (uint8_t)(new_size >> 16);
+    raw[31] = (uint8_t)(new_size >> 24);
+    return read_modify_write_dirent(de->dirent_lba, de->dirent_offset, raw);
+}
+
 int fat_append_path(const char *path, const char *buf, uint32_t len) {
     if (!fs_ready) return FAT_EIO;
+    if (len == 0)  return 0;
 
     fat_dirent_t de;
     int looked_up = fat_lookup(path, &de);
 
-    uint32_t existing_size = 0;
-    if (looked_up == 0) {
-        if (de.is_dir) return FAT_EISDIR;
-        existing_size = de.size;
+    /* File doesn't exist or is empty → create via the write path
+     * (which allocates a fresh cluster chain). */
+    if (looked_up != 0) return fat_write_path(path, buf, len);
+    if (de.is_dir)      return FAT_EISDIR;
+    if (de.size == 0 || de.first_cluster < 2) {
+        return fat_write_path(path, buf, len);
     }
-    uint64_t total = (uint64_t)existing_size + (uint64_t)len;
-    if (total > FAT_APPEND_LIMIT) return FAT_ENOSPC;
 
-    char *scratch = (char *)kmalloc(total > 0 ? (size_t)total : 1);
-    if (!scratch) return FAT_EIO;
-
-    if (existing_size > 0) {
-        int n = fat_read_file(&de, 0, scratch, existing_size);
-        if (n < 0 || (uint32_t)n != existing_size) {
-            kfree(scratch);
-            return FAT_EIO;
-        }
-    }
-    for (uint32_t i = 0; i < len; i++) {
-        scratch[existing_size + i] = buf[i];
-    }
-    int rc = fat_write_path(path, scratch, (uint32_t)total);
-    kfree(scratch);
-    return rc;
+    return fat_extend_existing(&de, buf, len);
 }
 
 /* mkdir: create empty subdir cluster with "." and ".." entries. */

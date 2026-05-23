@@ -24,7 +24,12 @@
  */
 
 #define EOF (-1)
-#define BUFSIZ 512
+/* 4 KiB matches osnos page size + amortizes the per-syscall + FAT
+ * cluster-walk overhead well. Was 512 historically; bumped because
+ * TCC writes ELFs section-by-section via fwrite + fputc(0)-pad and
+ * the 512-byte threshold was triggering ~100 sys_write hops per
+ * 50 KiB output. */
+#define BUFSIZ 4096
 
 #define _IOFBF 0
 #define _IOLBF 1

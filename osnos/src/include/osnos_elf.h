@@ -80,3 +80,38 @@ typedef struct {
 #define PF_X        (1u << 0)
 #define PF_W        (1u << 1)
 #define PF_R        (1u << 2)
+
+/* Section headers — needed for `readelf -S` only; not used by the
+ * ELF loader (which walks PT_LOAD segments instead). */
+typedef struct {
+    uint32_t sh_name;
+    uint32_t sh_type;
+    uint64_t sh_flags;
+    uint64_t sh_addr;
+    uint64_t sh_offset;
+    uint64_t sh_size;
+    uint32_t sh_link;
+    uint32_t sh_info;
+    uint64_t sh_addralign;
+    uint64_t sh_entsize;
+} __attribute__((packed)) Elf64_Shdr;
+
+/* sh_type — most-used subset. */
+#define SHT_NULL          0
+#define SHT_PROGBITS      1
+#define SHT_SYMTAB        2
+#define SHT_STRTAB        3
+#define SHT_RELA          4
+#define SHT_HASH          5
+#define SHT_DYNAMIC       6
+#define SHT_NOTE          7
+#define SHT_NOBITS        8
+#define SHT_REL           9
+#define SHT_DYNSYM       11
+#define SHT_INIT_ARRAY   14
+#define SHT_FINI_ARRAY   15
+
+/* sh_flags */
+#define SHF_WRITE        (1u << 0)
+#define SHF_ALLOC        (1u << 1)
+#define SHF_EXECINSTR    (1u << 2)
