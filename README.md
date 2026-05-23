@@ -37,13 +37,21 @@ mini-libc propia para programas de usuario en ring 3.
    shellsrv:/$ ovi .oshrc           # editor modal vim-style
    # i = insert, Esc = normal, hjkl = move,
    # x = del char, dd = del línea, :w = save, :q = quit
-   shellsrv:/$ alltest              # 13/13 tests PASS
+   shellsrv:/$ alltest              # 14/14 tests PASS
    ALLTEST SUMMARY
      PASS  kerntest    forktest    waittest    sigtest
      PASS  sigchldtest pgrouptest  spawntest   exectest
      PASS  ofdtest     ptytest     fdedgetest  jobtest
-     PASS  libctest
-   RESULT: 13/13 passed
+     PASS  termtest    libctest
+   RESULT: 14/14 passed
+   shellsrv:/$ term                 # sub-shell interactivo en PTY
+   term: started /bin/minishell (pid N) on /dev/pts/0 — Ctrl+D to exit
+   minishell: type 'exit' to quit.
+   mini$ hola mundo
+   you said: hola mundo
+   mini$ exit
+   bye
+   term: child exited with code 0
 ```
 
 > **TL;DR para reentrar al proyecto después de meses:** instalar Limine
@@ -319,7 +327,8 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | **FD_CLOEXEC** (per-fd, no shared via dup; execve cierra solo CLOEXEC) | ✅ |
 | **PTY pairs** (`/dev/ptmx` + `/dev/pts/N`, pool de 8, canon/raw, ECHO, EOF/EPIPE, ioctls TIOCGPTN/TCGETS/TCSETS) + libc `posix_openpt`/`ptsname`/`grantpt`/`unlockpt` | ✅ |
 | **WUNTRACED / WCONTINUED** en `wait4(2)` + SIGSTOP/SIGCONT delivery + fan-out de Ctrl+C/Z a TODA la foreground process group + shellsrv migrado a `waitpid()` real (sin polling) | ✅ |
-| **13/13 tests automatizados** via `/bin/alltest` (kerntest, forktest, waittest, sigtest, sigchldtest, pgrouptest, spawntest, exectest, ofdtest, ptytest, fdedgetest, jobtest, libctest) | ✅ |
+| **Mini terminal emulator** (`/bin/term` spawn `/bin/minishell` en PTY) — sub-shell interactivo, showcase del stack POSIX completo | ✅ |
+| **14/14 tests automatizados** via `/bin/alltest` (kerntest, forktest, waittest, sigtest, sigchldtest, pgrouptest, spawntest, exectest, ofdtest, ptytest, fdedgetest, jobtest, termtest, libctest) | ✅ |
 | **init-respawn watchdog** — consrv/kbdsrv/shellsrv auto-restart on death | ✅ |
 | Driver ATA PIO + FAT16 read/write + dir-chain extension + NT case-bits + persistencia | ✅ |
 | **/bin disk-resident** — sd.img poblado al build via mtools, kernel binary 1.1 MB (era 7.6 MB) | ✅ |

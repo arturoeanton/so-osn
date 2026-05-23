@@ -167,6 +167,9 @@ USER_ELF_LIBC_SRCS := \
     elfs/tests/ptytest.c \
     elfs/tests/fdedgetest.c \
     elfs/tests/jobtest.c \
+    elfs/tests/termtest.c \
+    elfs/tools/minishell.c \
+    elfs/tools/term.c \
     elfs/osn-server/consrv.c \
     elfs/osn-server/kbdsrv.c \
     elfs/osn-server/shellsrv.c

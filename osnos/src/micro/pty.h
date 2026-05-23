@@ -67,6 +67,14 @@ typedef struct pty_pair {
      * kernel can free the pair only when BOTH ends are closed). */
     int                  master_refs;
     int                  slave_refs;
+
+    /* Has the slave EVER been opened? Until the first open(/dev/pts/N)
+     * succeeds, master reads must NOT return EOF on an empty s2m —
+     * the slave just hasn't started yet (typical fork+exec race:
+     * parent's select can fire before child reaches open(slave)).
+     * EOF semantics: only after slave_was_opened becomes true AND
+     * slave_refs drops back to 0 do we report EOF on master_read. */
+    bool                 slave_was_opened;
 } pty_pair_t;
 
 /* Boot-time pool init — zero all slots. Call once from kmain. */

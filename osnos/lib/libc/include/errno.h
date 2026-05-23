@@ -29,6 +29,7 @@ extern int errno;
 #define ENOTTY         25
 #define ENOSPC         28
 #define EROFS          30
+#define EPIPE          32   /* broken pipe (writer with no readers) */
 #define ERANGE         34
 #define ENAMETOOLONG   36
 #define ENOTEMPTY      39

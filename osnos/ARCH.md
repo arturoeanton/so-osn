@@ -97,7 +97,9 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 |     refcounted; dup/dup2/fork share offset via OFD ref bump    |
 |   pty (pool de 8 pty_pair_t — m2s/s2m ring buffers 4 KiB +     |
 |     termios per-pair + canon line accumulator; /dev/ptmx +     |
-|     /dev/pts/N via OFD with is_pty + pty_side)                  |
+|     /dev/pts/N via OFD with is_pty + pty_side; slave_was_      |
+|     opened latch evita EOF race en master post-openpt;         |
+|     showcase via /bin/term spawneando /bin/minishell)           |
 |   scheduler (preempt CPL=3 + cooperative + resume_jump)        |
 |   reaper (kstack free queue + DEAD→UNUSED reaping)             |
 |   ipc, service, fd, pipe, fpu, extable, uaccess (fault-recov)  |

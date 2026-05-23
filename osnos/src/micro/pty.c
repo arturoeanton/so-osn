@@ -13,6 +13,7 @@ static void pty_clear(pty_pair_t *p) {
     p->canon_level = 0;
     p->master_refs = 0;
     p->slave_refs  = 0;
+    p->slave_was_opened = false;
 
     /* Default termios: same as the kernel TTY does at boot — ICANON
      * + ECHO + ISIG, c_cc seeded with the classic control chars. The
@@ -72,7 +73,11 @@ void pty_master_unref(pty_pair_t *p) {
     if (p->master_refs > 0) p->master_refs--;
     pty_release_if_orphan(p);
 }
-void pty_slave_ref(pty_pair_t *p)    { if (p) p->slave_refs++; }
+void pty_slave_ref(pty_pair_t *p)    {
+    if (!p) return;
+    p->slave_refs++;
+    p->slave_was_opened = true;       /* latches once for EOF semantics */
+}
 void pty_slave_unref(pty_pair_t *p)  {
     if (!p) return;
     if (p->slave_refs > 0) p->slave_refs--;
@@ -240,9 +245,13 @@ int64_t pty_slave_write(pty_pair_t *p, const void *buf, size_t n) {
 int64_t pty_master_read(pty_pair_t *p, void *buf, size_t n) {
     if (!p || !buf) return -(int64_t)OSNOS_EFAULT;
     if (!p->used) return -(int64_t)OSNOS_EBADF;
-    /* Master sees raw bytes from s2m_buf. EOF when slave is closed
-     * AND buffer empty. */
-    if (p->slave_refs == 0 && p->s2m_level == 0) return 0;
+    /* Master sees raw bytes from s2m_buf. EOF only when the slave
+     * had been opened at some point AND is now fully closed AND
+     * the buffer is drained — `slave_was_opened` guards against the
+     * fork+exec race where the parent's select fires before the
+     * child reaches open(/dev/pts/N) (slave_refs still 0). */
+    if (p->slave_was_opened &&
+        p->slave_refs == 0 && p->s2m_level == 0) return 0;
     return ring_read(p->s2m_buf, &p->s2m_tail, &p->s2m_level,
                      PTY_BUF_SIZE, (uint8_t *)buf, n);
 }
@@ -250,8 +259,10 @@ int64_t pty_master_read(pty_pair_t *p, void *buf, size_t n) {
 bool pty_master_readable(pty_pair_t *p) {
     if (!p || !p->used) return false;
     if (p->s2m_level > 0) return true;
-    /* EOF counts as readable per POSIX (read returns 0). */
-    if (p->slave_refs == 0) return true;
+    /* EOF counts as readable per POSIX (read returns 0). Only
+     * report EOF once the slave has lived and died — pre-open
+     * state is "still waiting for the slave to start". */
+    if (p->slave_was_opened && p->slave_refs == 0) return true;
     return false;
 }
 
