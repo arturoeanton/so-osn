@@ -467,9 +467,19 @@ static uint64_t build_argv_block(uint64_t   *pml4,
 
     /*
      * Tokenize args on whitespace, honoring "..." and '...' as a
-     * single token whose body keeps spaces. No backslash escapes —
-     * the closing quote of the same kind ends the token.
+     * single token whose body keeps spaces. Inside double quotes,
+     * `\"` and `\\` are recognised as backslash escapes (so the
+     * literal `"` and `\` can be embedded). Single quotes are raw
+     * — no escape mechanism (matches POSIX shell semantics).
+     *
+     * Tokens are decoded IN PLACE into a small kernel-side scratch
+     * buffer (the per-task arg string came from copy_from_user so
+     * it's writable kernel memory). The output `tokens[i]` and
+     * `token_lens[i]` point into that buffer.
      */
+    static char decoded[ARGV_BLOCK_MAX];
+    size_t dec = 0;
+
     const char *p = args ? args : "";
     while (*p && argc < MAX_ARGV) {
         while (*p == ' ' || *p == '\t') p++;
@@ -478,17 +488,29 @@ static uint64_t build_argv_block(uint64_t   *pml4,
         char quote = 0;
         if (*p == '"' || *p == '\'') { quote = *p; p++; }
 
-        const char *start = p;
-        if (quote) {
-            while (*p && *p != quote) p++;
-            tokens[argc]     = start;
-            token_lens[argc] = (size_t)(p - start);
+        size_t tok_start = dec;
+        if (quote == '"') {
+            while (*p && *p != quote && dec < sizeof(decoded)) {
+                if (*p == '\\' && p[1] && (p[1] == '"' || p[1] == '\\')) {
+                    decoded[dec++] = p[1];
+                    p += 2;
+                } else {
+                    decoded[dec++] = *p++;
+                }
+            }
+            if (*p == quote) p++;
+        } else if (quote == '\'') {
+            while (*p && *p != quote && dec < sizeof(decoded)) {
+                decoded[dec++] = *p++;
+            }
             if (*p == quote) p++;
         } else {
-            while (*p && *p != ' ' && *p != '\t') p++;
-            tokens[argc]     = start;
-            token_lens[argc] = (size_t)(p - start);
+            while (*p && *p != ' ' && *p != '\t' && dec < sizeof(decoded)) {
+                decoded[dec++] = *p++;
+            }
         }
+        tokens[argc]     = &decoded[tok_start];
+        token_lens[argc] = dec - tok_start;
         argc++;
     }
 

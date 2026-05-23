@@ -317,15 +317,51 @@ static int read_line(char *out, size_t cap) {
 
 /* ---- argv split ---- */
 
+/* Tokenize `line` in-place, honoring `'...'` and `"..."` as single
+ * tokens whose body keeps spaces/semicolons/pipes verbatim. Backslash
+ * outside quotes escapes the next char. The quote chars themselves
+ * are STRIPPED from the resulting token (so `echo "hi"` makes
+ * argv[1] = `hi`, not `"hi"`). This matches what the kernel's
+ * build_argv_block does when re-tokenising args for external
+ * commands — making the contract uniform between builtins (which
+ * see argv directly from here) and externals.
+ *
+ * Tokens are written back into `line` in-place: the trailing-quote
+ * NUL terminator overlaps the original closing quote, and the loop
+ * shifts following bytes down by 1 to fill the gap of the opening
+ * quote.
+ */
 static int split_args(char *line, char **argv, int max) {
     int n = 0;
-    char *p = line;
-    while (*p && n < max - 1) {
-        while (*p == ' ' || *p == '\t') p++;
-        if (!*p) break;
-        argv[n++] = p;
-        while (*p && *p != ' ' && *p != '\t') p++;
-        if (*p) { *p = 0; p++; }
+    char *r = line;            /* read cursor  */
+    char *w = line;            /* write cursor */
+    while (*r && n < max - 1) {
+        while (*r == ' ' || *r == '\t') r++;
+        if (!*r) break;
+        argv[n++] = w;
+
+        int in_sq = 0, in_dq = 0;
+        while (*r) {
+            char c = *r;
+            if (!in_sq && !in_dq && c == '\\' && r[1]) {
+                *w++ = r[1];
+                r += 2;
+                continue;
+            }
+            if (!in_dq && c == '\'') { in_sq = !in_sq; r++; continue; }
+            if (!in_sq && c == '"')  { in_dq = !in_dq; r++; continue; }
+            if (!in_sq && !in_dq && (c == ' ' || c == '\t')) {
+                /* Advance past the boundary space BEFORE writing NUL.
+                 * `w` and `r` could be at the same position (no quote
+                 * stripping happened in this token), so writing NUL
+                 * at w would clobber the space r was about to skip. */
+                r++;
+                break;
+            }
+            *w++ = c;
+            r++;
+        }
+        *w++ = 0;
     }
     argv[n] = 0;
     return n;
@@ -1041,12 +1077,41 @@ static void resolve_cmd_path(const char *name, char *out, size_t cap) {
 
 /* Pack argv[1..argc-1] into a single space-separated args string
  * (proc_execve convention — single args blob). */
+/* Pack argv[1..argc-1] into a single space-separated string that the
+ * kernel's build_argv_block (src/proc/exec.c) re-tokenises back into
+ * argv on the child side.
+ *
+ * Each token gets wrapped in double quotes — and any literal `"` or
+ * `\` inside the token gets backslash-escaped — so the kernel's
+ * quote-aware tokeniser reconstructs the exact same boundaries the
+ * user typed. Without this, `jq '.tools | length'` arrives as the
+ * flat string `.tools | length`, which the kernel splits on
+ * whitespace into 3 args. After this we send `".tools | length"`
+ * which the kernel re-tokenises as a single arg.
+ *
+ * Tokens with no spaces / no special chars could skip the quotes,
+ * but always-quoting is simpler and the kernel handles both shapes.
+ */
 static void pack_args(stage_t *st, char *out, size_t cap) {
     out[0] = 0;
+    size_t pos = 0;
     for (int i = 1; i < st->argc; i++) {
-        if (i > 1) safe_cat(out, " ", cap);
-        safe_cat(out, st->argv[i], cap);
+        if (pos + 1 >= cap) break;
+        if (i > 1) out[pos++] = ' ';
+        if (pos + 1 >= cap) break;
+        out[pos++] = '"';
+        const char *s = st->argv[i];
+        while (*s && pos + 2 < cap) {
+            if (*s == '"' || *s == '\\') {
+                out[pos++] = '\\';
+                if (pos + 1 >= cap) break;
+            }
+            out[pos++] = *s++;
+        }
+        if (pos + 1 >= cap) break;
+        out[pos++] = '"';
     }
+    out[pos] = 0;
 }
 
 /* Build a flat envp blob ("KEY=VAL\0KEY=VAL\0\0") from the live
