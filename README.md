@@ -374,6 +374,7 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | **FASE 11.1 polish — FAT true append + offset-native VFS + caching**: O(N) RMW reemplazado con cluster-chain extend O(len); FAT-sector cache en fat_get_entry; BUFSIZ 512→4096. TCC compile time pasó de "tarda mucho" a **instantáneo**. `/bin/readelf -S` para sección headers. | ✅ |
 | **🎉 FASE 11.2 — Lua 5.4 self-host** (`/bin/lua` Lua 5.4.7 portado): segundo lenguaje en osnos. REPL interactivo + ejecución de scripts. `ovi script.lua && lua script.lua` end-to-end. Libc gap-fill: `locale.h`, `frexp`/`modf`/`asin`/`acos`/`sinh`/`cosh`/`tanh`, `clock`/`mktime`/`strftime`/`difftime`, `system` stub. | ✅ |
 | **🎉 FASE 11.3 — jq 1.7.1 self-host** (`/bin/jq` portado, WITHOUT_ONIG): tercer lenguaje en osnos. Filter + transformer de JSON. `cat data.json \| jq '.field'`, `jq '.list \| length'`, pipes funcionales, builtins. Libc gap-fill: `alloca.h`, `pthread.h` shim single-thread, `libgen.h`, `memmem`, `isnormal`, `realpath`, `rand/srand`. **Bug crítico fixed**: `malloc(0)` ahora retorna non-NULL (glibc-compat). `/home/test.json` seed para jugar. | ✅ |
+| **🖱️ FASE 11.4 — PS/2 mouse driver + `/dev/mouse0`**: driver polling PS/2 AUX en `src/drivers/mouse.{c,h}` (3-byte packets, sign extension, sync recovery via bit 3, dy invertido para screen coords), `mouse_server` cooperative kernel task (mirror del keyboard feeder) que pushea a un ring de 32 `mouse_event_t {int16 dx, dy; uint8 buttons}` en devfs. `/bin/mousetest` muestra eventos en vivo. Recon listo para línea gráfica (cursor overlay, file managers con click, eventual TinyX). PIC IRQ 12 sigue masked — polling consume ~1 inb/tick. | ✅ |
 | **18/18 tests automatizados** via `/bin/alltest` (kerntest, forktest, waittest, sigtest, sigchldtest, pgrouptest, spawntest, exectest, ofdtest, ptytest, fdedgetest, jobtest, termtest, serialtest, tcctest, luatest, jqtest, libctest) | ✅ |
 | **init-respawn watchdog** — consrv/kbdsrv/shellsrv auto-restart on death | ✅ |
 | Driver ATA PIO + FAT16 read/write + dir-chain extension + NT case-bits + persistencia | ✅ |
@@ -577,6 +578,19 @@ lejano y muy difícil de debuggear. Están repetidas en
 ## Roadmap
 
 Cerrado recientemente:
+
+- **FASE 11.4 — PS/2 mouse driver + `/dev/mouse0`** (cerrada):
+  driver polling PS/2 AUX en `src/drivers/mouse.{c,h}` (init via
+  0xA8 + 0xF6 + 0xF4 con ACK loop bounded; poll de 3-byte packets
+  con sign extension + sync recovery por bit 3 + dy invertido).
+  `mouse_server` cooperative kernel task pushea hasta 16 events/tick
+  a un ring de 32 `mouse_event_t` en devfs. `/dev/mouse0` char
+  device read-only (EROFS en write, EAGAIN en empty ring). Userland
+  ABI en `<sys/mouse.h>` (`mouse_event_t` + `MOUSE_BTN_LEFT/MIDDLE/
+  RIGHT`). `/bin/mousetest` muestra `dx/dy/buttons + abs(x,y)` en
+  vivo. **Habilita la línea gráfica futura** (cursor overlay,
+  window system, eventual TinyX); IRQ 12 sigue masked porque el PIC
+  está unwired global — polling cost ~1 inb por tick (imperceptible).
 
 - **FASE 11.2 — Lua 5.4 port** (cerrada): `/bin/lua` (Lua 5.4.7
   vendored a `vendor/lua/`) — REPL interactivo + script runner.
