@@ -577,6 +577,27 @@ Cerrado recientemente:
   y al volver, syscall retorna -1 + errno=EINTR. POSIX-compliant.
 - **ABI POSIX core 100% COMPLETO**: read/write/open/close/pipe/dup/
   fork/execve/exit/kill/wait/sigaction/sigreturn/EINTR.
+- **FASE 10.6 — Job control + OFD + PTY** (3 sesiones):
+  - **Sesión 1** (SIGCHLD + process groups): SIGCHLD automático al
+    child exit; task_t.pgid + sid + 6 syscalls Linux x86_64
+    (setpgid/getpgid/setsid/getsid/getpgrp/getppid); sys_kill
+    POSIX-completo (pid>0, pid==0 own pgid, pid==-1 broadcast,
+    pid<-1 target pgid); `/bin/alltest` runner consolidado.
+  - **Sesión 2** (OFD refactor + FD_CLOEXEC): nuevo `osnos_ofd_t`
+    en pool de 128, refcounted. `osnos_fd_slot_t` thin per-task
+    (12 B vs 150+ B antes). dup/dup2/fork comparten OFD =
+    shared offset POSIX-strict. fork ya no llama pipe_dup_*
+    (OFD refcount lo maneja). sys_spawn MOVE semantics.
+    proc_execve_replace cierra fds CLOEXEC. Backend cleanup
+    automatic via `ofd_unref`.
+  - **Sesión 3** (PTY pairs): `/dev/ptmx` + `/dev/pts/N` con
+    pool de 8 pty_pair_t; canon/raw mode con line accumulator;
+    ECHO + VERASE; EOF cuando master cierra; EPIPE cuando slave
+    escribe sin master. ioctls TIOCGPTN/TCGETS/TCSETS per-pair.
+    libc `posix_openpt`/`ptsname_r`/`grantpt`/`unlockpt`.
+  - Tests nuevos: `/bin/sigchldtest`, `/bin/pgrouptest`,
+    `/bin/ofdtest`, `/bin/ptytest`, `/bin/fdedgetest`,
+    `/bin/alltest`. **12/12 PASS** end-to-end.
 - **init-respawn watchdog**: kernel task que checkea cada ~100ms
   si consrv/kbdsrv/shellsrv siguen vivos; si murieron (e.g. exec
   /bin/top + Ctrl+C), los respawnea + re-registra SERVER_*.
