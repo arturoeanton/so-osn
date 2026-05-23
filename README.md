@@ -223,12 +223,16 @@ roadmap), mover los servidores debería ser mecánico.
 │  IPC: 1 cola, 64 slots, payload 1024B. ipc_send rewrite     │
 │       SID → pid; ring-3 receivers filtran por t->pid        │
 ├─────────────────────────────────────────────────────────────┤
-│  micro/ core: task (per-task fds[16] + fpu_state + saved    │
-│    iret/GPRs for nanosleep/fork/wait resume + parent_pid +  │
+│  micro/ core: task (per-task fds[16] slots {used, ofd_idx,  │
+│    fd_flags=CLOEXEC} + fpu_state + saved iret/GPRs for      │
+│    nanosleep/fork/wait resume + parent_pid + pgid + sid +   │
 │    sa_handler[32] + sig_pending + TASK_ZOMBIE state),       │
-│    pipe (+ refcount dup), scheduler (preempt @ CPL=3 +      │
-│    coop), ipc, gdt/idt/tss, pmm/vmm (address_space_clone    │
-│    para fork), kmalloc, syscall, uaccess, service           │
+│    ofd_pool[128] (shared OFDs, dup/fork share offset),      │
+│    pipe (+ refcount), pty (pool 8 pairs — /dev/ptmx +       │
+│    /dev/pts/N con canon/raw + ECHO), scheduler (preempt @   │
+│    CPL=3 + coop), ipc, gdt/idt/tss, pmm/vmm                 │
+│    (address_space_clone para fork), kmalloc, syscall,        │
+│    uaccess, service                                          │
 ├─────────────────────────────────────────────────────────────┤
 │  drivers/: PS/2, framebuffer + font 8x8 + VT100 CSI parser, │
 │            PIC, LAPIC, PIT, ATA PIO, RTL8139                │
