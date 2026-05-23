@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../drivers/keyboard.h"
+#include "../drivers/mouse.h"
 #include "vfs.h"
 
 /*
@@ -25,3 +26,8 @@ extern const vfs_ops_t devfs_vfs_ops;
  * server to ring 3, this becomes the only feeder.
  */
 void devfs_input_push(keyboard_event_t ev);
+
+/* Push one decoded mouse packet into the /dev/mouse0 ring. Same
+ * lifecycle as devfs_input_push: kernel mouse_server polls the PS/2
+ * controller each tick, decodes into mouse_event_t, calls this. */
+void devfs_mouse_push(mouse_event_t ev);

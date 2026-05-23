@@ -12,6 +12,7 @@
 #include "../drivers/serial.h"
 #include "../proc/exec.h"
 #include "../servers/keyboard_server.h"
+#include "../servers/mouse_server.h"
 #include "../servers/serial_input_server.h"
 #include "../micro/fpu.h"
 #include "../micro/gdt.h"
@@ -159,6 +160,12 @@ void kmain(void) {
     int keyboard_pid = task_create("keyboard", keyboard_server_tick);
     (void)keyboard_pid;
 
+    /* PS/2 mouse feeder (FASE 11.4): polls the AUX port each tick,
+     * decodes 3-byte packets, pushes mouse_event_t into the
+     * /dev/mouse0 devfs ring. Mirror of the keyboard pattern. */
+    int mouse_pid = task_create("mouse", mouse_server_tick);
+    (void)mouse_pid;
+
     /* Serial input feeder (FASE 10.7): pulls bytes off COM1's RX
      * register each tick and pushes them through tty_input(), the
      * same way kbdsrv does for PS/2. Means host-side serial input
@@ -201,6 +208,7 @@ void kmain(void) {
     task_create("init-respawn", server_respawn_tick);
 
     keyboard_server_init();
+    mouse_server_init();
 
     /*
      * Everything is set up — enable hardware interrupts. From this

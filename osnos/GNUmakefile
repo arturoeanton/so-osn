@@ -120,6 +120,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/tools/poweroff.c \
     elfs/tools/reboot.c \
     elfs/tools/readelf.c \
+    elfs/tools/mousetest.c \
     elfs/tools/head.c \
     elfs/tools/env.c \
     elfs/tools/wc.c \

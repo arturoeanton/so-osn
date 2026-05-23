@@ -51,6 +51,39 @@ static bool input_ring_pop(keyboard_event_t *out) {
     return true;
 }
 
+/* ------------------------------------------------------------------ */
+/* /dev/mouse0 event ring                                              */
+/* ------------------------------------------------------------------ */
+/* Same shape as input_ring but holds mouse_event_t. mouse_server
+ * pushes here from kernel-side polling; ring-3 readers (mousetest,
+ * eventual cursor demo) drain via /dev/mouse0 reads.
+ */
+#define DEVFS_MOUSE_RING 32
+static struct {
+    mouse_event_t buf[DEVFS_MOUSE_RING];
+    size_t head;
+    size_t tail;
+    size_t level;
+} mouse_ring;
+
+void devfs_mouse_push(mouse_event_t ev) {
+    if (mouse_ring.level >= DEVFS_MOUSE_RING) {
+        mouse_ring.tail = (mouse_ring.tail + 1) % DEVFS_MOUSE_RING;
+        mouse_ring.level--;
+    }
+    mouse_ring.buf[mouse_ring.head] = ev;
+    mouse_ring.head = (mouse_ring.head + 1) % DEVFS_MOUSE_RING;
+    mouse_ring.level++;
+}
+
+static bool mouse_ring_pop(mouse_event_t *out) {
+    if (mouse_ring.level == 0) return false;
+    *out = mouse_ring.buf[mouse_ring.tail];
+    mouse_ring.tail = (mouse_ring.tail + 1) % DEVFS_MOUSE_RING;
+    mouse_ring.level--;
+    return true;
+}
+
 /*
  * Each character device has its own read/write semantics. Stat / readdir /
  * the dir-level ops live in this file once; per-device behavior is in
@@ -135,6 +168,31 @@ static osnos_status_t input0_write(const char *buf, size_t buf_size) {
 }
 
 /*
+ * /dev/mouse0 — read-only stream of mouse_event_t (6 bytes each:
+ * 2× int16 dx/dy + 1 byte buttons + 1 byte padding). Non-blocking:
+ * returns EAGAIN when the ring is empty; libc loops with nanosleep.
+ * The kernel `mouse_server_tick` is the sole producer.
+ */
+static osnos_status_t mouse0_read(char *buf, size_t buf_size, size_t *out) {
+    mouse_event_t ev;
+    if (!mouse_ring_pop(&ev)) {
+        *out = 0;
+        return OSNOS_EAGAIN;
+    }
+    size_t n = sizeof(ev);
+    if (n > buf_size) n = buf_size;
+    const char *src = (const char *)&ev;
+    for (size_t i = 0; i < n; i++) buf[i] = src[i];
+    *out = n;
+    return OSNOS_OK;
+}
+
+static osnos_status_t mouse0_write(const char *buf, size_t buf_size) {
+    (void)buf; (void)buf_size;
+    return OSNOS_EROFS;
+}
+
+/*
  * /dev/ttyS0 — raw access to the UART. write goes straight to
  * serial_puts (one byte at a time, no termios cooking). read polls
  * serial_try_getc once per byte requested and returns EAGAIN if the
@@ -190,6 +248,7 @@ static const devfs_dev_t devices[] = {
     { "zero",   zero_read,    zero_write    },
     { "fb0",    fb0_read,     fb0_write     },
     { "input0", input0_read,  input0_write  },
+    { "mouse0", mouse0_read,  mouse0_write  },
     { "ttyS0",  ttyS0_read,   ttyS0_write   },
     { "tty",    tty_dev_read, tty_dev_write }
 };
