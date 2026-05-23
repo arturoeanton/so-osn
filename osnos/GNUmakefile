@@ -185,7 +185,9 @@ USER_ELF_LIBC_SRCS := \
     elfs/gui/oxnotepad.c \
     elfs/gui/oxcalc.c \
     elfs/gui/oxterm.c \
-    elfs/gui/oxsettings.c
+    elfs/gui/oxsettings.c \
+    elfs/gui/oxfiles.c \
+    elfs/tools/uxsh.c
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS)) \

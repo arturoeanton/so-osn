@@ -112,7 +112,9 @@ static void spawn_child(void) {
         if (s > 2) close(s);
         close(g_master);
         setsid();
-        char *argv[] = { "minishell", 0 };
+        char *argv[] = { "uxsh", 0 };
+        execve("/bin/uxsh", argv, environ);
+        /* Fallback if uxsh missing — minishell at least echoes. */
         execve("/bin/minishell", argv, environ);
         _exit(127);
     }

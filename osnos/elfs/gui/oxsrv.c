@@ -126,6 +126,7 @@ typedef struct {
 } menu_item_t;
 
 static const menu_item_t g_menu[] = {
+    { "Files",       "/bin/oxfiles",     0 },
     { "Notepad",     "/bin/oxnotepad",   0 },
     { "Calculator",  "/bin/oxcalc",      0 },
     { "Terminal",    "/bin/oxterm",      0 },

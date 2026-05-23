@@ -43,16 +43,30 @@ int main(int argc, char **argv) {
 
     /* Suspended while a GUI compositor (oxsrv) owns the framebuffer.
      * Writes are dropped (we still drain the IPC queue so senders
-     * don't pile up). RESUME via IPC_CONSOLE_RESUME re-enables. */
+     * don't pile up). RESUME via IPC_CONSOLE_RESUME re-enables.
+     *
+     * Watchdog: while suspended, periodically check that SERVER_OX
+     * is still registered. If oxsrv was killed -9 (no chance to
+     * send RESUME) the service vanishes → we auto-resume so the
+     * shell isn't permanently dead. */
     int suspended = 0;
+    int watchdog_counter = 0;
 
     for (;;) {
         ipc_msg_t msg;
         if (ipc_recv_block(&msg) != 0) {
-            /* Anything but EAGAIN propagated → unexpected. Restart
-             * the loop; the kernel respawn (FASE 10.3+) will catch
-             * a real crash. */
             continue;
+        }
+
+        /* Watchdog tick: every ~32 IPC msgs while suspended, see if
+         * oxsrv is still alive. ipc_service_lookup returns the pid
+         * or <0 with ENOENT. */
+        if (suspended && (++watchdog_counter & 0x1f) == 0) {
+            if (ipc_service_lookup(SERVER_OX) <= 0) {
+                suspended = 0;
+                /* Clear FB so the shell's next prompt redraws clean. */
+                write(fb, "\x1b[2J\x1b[H", 7);
+            }
         }
 
         switch (msg.type) {

@@ -61,8 +61,13 @@ int main(int argc, char **argv) {
     /* When a GUI grabs the keyboard (oxsrv sends SUSPEND), kbdsrv
      * stops draining /dev/input0 so events reach the GUI instead
      * of being cooked + forwarded to the TTY. RESUME restores the
-     * normal shell path. */
+     * normal shell path.
+     *
+     * Watchdog: while suspended, periodically check SERVER_OX. If
+     * oxsrv was killed -9, no RESUME message arrives — we'd lock
+     * the keyboard forever. So self-resume if the service is gone. */
     int suspended = 0;
+    int wd_tick = 0;
 
     for (;;) {
         /* IPC first — check for SUSPEND/RESUME or other control msgs. */
@@ -76,6 +81,13 @@ int main(int argc, char **argv) {
             /* Yield the keyboard ring entirely to whoever's reading
              * /dev/input0 directly (oxsrv). Don't even peek — any
              * read here would race-steal the event. */
+            if ((++wd_tick & 0x0f) == 0) {
+                /* ~16 × 30 ms = ~0.5 s between watchdog probes. */
+                if (ipc_service_lookup(SERVER_OX) <= 0) {
+                    suspended = 0;
+                    continue;
+                }
+            }
             struct timespec ts = { 0, 30 * 1000000 };   /* 30 ms */
             nanosleep(&ts, 0);
             continue;
