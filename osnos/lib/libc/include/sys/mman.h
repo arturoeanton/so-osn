@@ -31,3 +31,17 @@ int   munmap(void *addr, size_t length);
  * effectively RWX once mapped), so callers that want to mark JIT'd
  * pages executable get a successful no-op. Returns 0. */
 int   mprotect(void *addr, size_t length, int prot);
+
+/*
+ * POSIX shared memory.
+ *   shm_open(name, oflag, mode) → fd
+ *   shm_unlink(name)            → 0 / -1 + errno
+ *
+ * Después de shm_open, usar ftruncate(fd, size) para alocar páginas y
+ * mmap(NULL, size, PROT_*, MAP_SHARED, fd, 0) para mapear. Múltiples
+ * procesos que abren el mismo `name` (vía O_CREAT u open posterior)
+ * ven el mismo objeto subyacente — escribir desde uno aparece en el
+ * otro. POSIX: el objeto persiste hasta que shm_unlink + último close
+ * lo libera. */
+int shm_open  (const char *name, int oflag, mode_t mode);
+int shm_unlink(const char *name);

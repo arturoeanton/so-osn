@@ -137,6 +137,10 @@ off_t lseek(int fd, off_t off, int whence) {
         osnos_syscall3(SYS_LSEEK, fd, (long)off, whence));
 }
 
+int ftruncate(int fd, off_t length) {
+    return (int)set_errno(osnos_syscall2(SYS_FTRUNCATE, fd, (long)length));
+}
+
 int isatty(int fd) {
     long r = osnos_syscall1(SYS_ISATTY, fd);
     if (r < 0) { errno = (int)(-r); return 0; }

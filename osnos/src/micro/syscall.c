@@ -18,6 +18,7 @@
 #include "uaccess.h"
 #include "fd.h"
 #include "ipc.h"
+#include "shm.h"
 #include "unix_sock.h"
 #include "kmalloc.h"
 #include "pipe.h"
@@ -1587,16 +1588,120 @@ int64_t sys_clock_gettime(int clk_id, void *tp) {
 
 #define MMAP_MAP_FAILED ((int64_t)-1)
 
+/* ------------------------------------------------------------------ */
+/* sys_shm_open / sys_shm_unlink (#519, #520) — POSIX shm.            */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_shm_open(const char *u_name, int flags, uint32_t mode) {
+    (void)mode;
+    task_t *t = task_current();
+    if (!t || !t->pml4) return err(OSNOS_ESRCH);
+    if (!u_name) return err(OSNOS_EFAULT);
+
+    char name[OSNOS_SHM_NAME_MAX];
+    if (copy_string_from_user(name, u_name, sizeof(name)) != OSNOS_OK) {
+        return err(OSNOS_EFAULT);
+    }
+    /* POSIX permite que name empiece con "/"; lo strippeamos para que
+     * "/foo" y "foo" mapeen al mismo objeto. */
+    const char *use = name;
+    if (use[0] == '/') use++;
+    if (!use[0]) return err(OSNOS_EINVAL);
+
+    bool create = (flags & 0x40 /* O_CREAT */) != 0;
+    shm_obj_t *obj = shm_open(use, create);
+    if (!obj) return err(create ? OSNOS_ENFILE : OSNOS_ENOENT);
+
+    int fd = fd_alloc(t);
+    if (fd < 0) { shm_unref(obj); return err(OSNOS_EMFILE); }
+    osnos_fd_t *f = fd_get(t, fd);
+    f->is_shm  = true;
+    f->shm_ref = obj;
+    f->flags   = flags;
+    /* Path informativo para debugging — no crítico. */
+    size_t k = 0;
+    while (use[k] && k + 1 < OSNOS_PATH_MAX) { f->path[k] = use[k]; k++; }
+    f->path[k] = 0;
+    return (int64_t)fd;
+}
+
+int64_t sys_shm_unlink(const char *u_name) {
+    if (!u_name) return err(OSNOS_EFAULT);
+    char name[OSNOS_SHM_NAME_MAX];
+    if (copy_string_from_user(name, u_name, sizeof(name)) != OSNOS_OK) {
+        return err(OSNOS_EFAULT);
+    }
+    const char *use = name;
+    if (use[0] == '/') use++;
+    osnos_status_t s = shm_unlink(use);
+    if (s != OSNOS_OK) return err(s);
+    return 0;
+}
+
 int64_t sys_mmap(void *addr, size_t length, int prot, int flags,
                   int fd, int64_t offset) {
     (void)addr;   /* hint ignored (no MAP_FIXED) */
-    (void)offset;
 
     task_t *t = task_current();
     if (!t || !t->pml4) return -(int64_t)OSNOS_EPERM;
 
     if (length == 0) return -(int64_t)OSNOS_EINVAL;
-    /* File-backed mmap not yet implemented. */
+
+    /* MAP_SHARED + fd shm: mappear las páginas del shm_obj en la AS
+     * del caller. NO se aloca memoria nueva — share del physical pages
+     * ya alocado por ftruncate. munmap NO libera estas páginas (sólo
+     * el último shm_unref hace pmm_free_page). */
+    if (fd >= 0 && (flags & OSNOS_MAP_SHARED)) {
+        osnos_fd_t *f = fd_get(t, fd);
+        if (!f || !f->is_shm || !f->shm_ref) return -(int64_t)OSNOS_EBADF;
+        if (offset < 0 || (offset & (PAGE_SIZE - 1)) != 0) {
+            return -(int64_t)OSNOS_EINVAL;
+        }
+        size_t pages = (length + PAGE_SIZE - 1) / PAGE_SIZE;
+        size_t off_pages = (size_t)offset / PAGE_SIZE;
+        /* Validar que el shm_obj tiene esas páginas alocadas. */
+        if (shm_size(f->shm_ref) < (off_pages + pages) * PAGE_SIZE) {
+            return -(int64_t)OSNOS_EINVAL;
+        }
+        if (t->mmap_next == 0) t->mmap_next = USER_MMAP_BASE;
+        if (t->mmap_next + pages * PAGE_SIZE > USER_MMAP_LIMIT) {
+            return -(int64_t)OSNOS_ENOMEM;
+        }
+        int slot = -1;
+        for (int i = 0; i < TASK_MMAP_MAX; i++) {
+            if (t->mmap_regions[i].addr == 0) { slot = i; break; }
+        }
+        if (slot < 0) return -(int64_t)OSNOS_ENOMEM;
+
+        uint64_t pte_flags = PTE_U;
+        if (prot & OSNOS_PROT_WRITE) pte_flags |= PTE_W;
+
+        uint64_t base_va = t->mmap_next;
+        for (size_t i = 0; i < pages; i++) {
+            uint64_t phys = shm_phys_page(f->shm_ref, off_pages + i);
+            if (!phys) {
+                /* Unwind. */
+                for (size_t j = 0; j < i; j++) {
+                    vmm_unmap(t->pml4, base_va + j * PAGE_SIZE);
+                }
+                return -(int64_t)OSNOS_EINVAL;
+            }
+            if (!vmm_map(t->pml4, base_va + i * PAGE_SIZE, phys, pte_flags)) {
+                for (size_t j = 0; j < i; j++) {
+                    vmm_unmap(t->pml4, base_va + j * PAGE_SIZE);
+                }
+                return -(int64_t)OSNOS_ENOMEM;
+            }
+        }
+        t->mmap_regions[slot].addr       = base_va;
+        t->mmap_regions[slot].len        = pages * PAGE_SIZE;
+        t->mmap_regions[slot].shm_backed = 1;
+        t->mmap_next += pages * PAGE_SIZE;
+        return (int64_t)base_va;
+    }
+
+    (void)offset;
+    /* File-backed mmap (non-shm) not yet implemented. */
     if (fd != -1 || !(flags & OSNOS_MAP_ANONYMOUS)) {
         return -(int64_t)OSNOS_ENOSYS;
     }
@@ -1657,8 +1762,9 @@ int64_t sys_mmap(void *addr, size_t length, int prot, int flags,
         }
     }
 
-    t->mmap_regions[slot].addr = base_va;
-    t->mmap_regions[slot].len  = pages * PAGE_SIZE;
+    t->mmap_regions[slot].addr       = base_va;
+    t->mmap_regions[slot].len        = pages * PAGE_SIZE;
+    t->mmap_regions[slot].shm_backed = 0;   /* anónimo */
     t->mmap_next += pages * PAGE_SIZE;
     return (int64_t)base_va;
 }
@@ -1675,16 +1781,20 @@ int64_t sys_munmap(void *addr, size_t length) {
     for (int i = 0; i < TASK_MMAP_MAX; i++) {
         if (t->mmap_regions[i].addr != target) continue;
         uint64_t reg_len = t->mmap_regions[i].len;
+        int       shm_owned = t->mmap_regions[i].shm_backed;
         size_t pages = (reg_len + PAGE_SIZE - 1) / PAGE_SIZE;
         for (size_t p = 0; p < pages; p++) {
             uint64_t va  = target + p * PAGE_SIZE;
             uint64_t pte = vmm_lookup(t->pml4, va);
             uint64_t phys = pte & PTE_ADDR_MASK;
             vmm_unmap(t->pml4, va);
-            if (phys) pmm_free_page(phys);
+            /* shm_backed: las páginas son owned por el shm_obj,
+             * NO liberamos aquí — el último shm_unref lo hace. */
+            if (phys && !shm_owned) pmm_free_page(phys);
         }
-        t->mmap_regions[i].addr = 0;
-        t->mmap_regions[i].len  = 0;
+        t->mmap_regions[i].addr       = 0;
+        t->mmap_regions[i].len        = 0;
+        t->mmap_regions[i].shm_backed = 0;
         return 0;
     }
     return -(int64_t)OSNOS_EINVAL;
@@ -1965,6 +2075,31 @@ int64_t sys_fork(void) {
     for (int i = 0; i < TASK_MMAP_MAX; i++) {
         child->mmap_regions[i] = parent->mmap_regions[i];
     }
+
+    /* Fixup MAP_SHARED regions: address_space_clone hizo deep-copy
+     * de cada user page, pero las shm_backed deben COMPARTIR las
+     * mismas páginas físicas con el parent (semánticamente eso es
+     * "shared memory"). Liberar las copias y re-mappear al physical
+     * original del parent. Sin esto, fork rompe shared memory. */
+    for (int i = 0; i < TASK_MMAP_MAX; i++) {
+        if (!parent->mmap_regions[i].shm_backed) continue;
+        if (parent->mmap_regions[i].addr == 0)   continue;
+        uint64_t base = parent->mmap_regions[i].addr;
+        size_t pages = (parent->mmap_regions[i].len + PAGE_SIZE - 1) / PAGE_SIZE;
+        for (size_t p = 0; p < pages; p++) {
+            uint64_t va = base + p * PAGE_SIZE;
+            /* Liberar la copia que clone hizo en el child. */
+            uint64_t cloned_phys = vmm_lookup(child_pml4, va) & PTE_ADDR_MASK;
+            vmm_unmap(child_pml4, va);
+            if (cloned_phys) pmm_free_page(cloned_phys);
+            /* Re-mappear al physical original del parent (= shm). */
+            uint64_t orig_phys = vmm_lookup(parent->pml4, va) & PTE_ADDR_MASK;
+            if (orig_phys) {
+                vmm_map(child_pml4, va, orig_phys, PTE_U | PTE_W);
+            }
+        }
+    }
+
     for (int i = 0; i < (int)sizeof(child->fpu_state); i++) {
         child->fpu_state[i] = parent->fpu_state[i];
     }
@@ -3592,6 +3727,13 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
             uint64_t len = (uint64_t)frame->rsi;
             osnos_fd_t *f = fd_get(task_current(), fd);
             if (!f) return pack(-(int64_t)OSNOS_EBADF);
+            /* shm fd: redirect a shm_truncate. shm_open retornó fd con
+             * size=0; ftruncate aloca las páginas físicas que mmap()
+             * después mappea. */
+            if (f->is_shm && f->shm_ref) {
+                osnos_status_t s = shm_truncate(f->shm_ref, (size_t)len);
+                return pack(s == OSNOS_OK ? 0 : -(int64_t)s);
+            }
             if (f->is_dir) return pack(-(int64_t)OSNOS_EISDIR);
             if (f->is_special || f->is_pipe || f->is_pty || f->is_socket || f->is_chr)
                 return pack(-(int64_t)OSNOS_EINVAL);
@@ -3683,6 +3825,13 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
             return pack(sys_set_fg((uint64_t)frame->rdi));
         case SYS_RESUME:
             return pack(sys_resume((uint64_t)frame->rdi));
+        case SYS_SHM_OPEN:
+            return pack(sys_shm_open(
+                (const char *)frame->rdi,
+                (int)frame->rsi,
+                (uint32_t)frame->rdx));
+        case SYS_SHM_UNLINK:
+            return pack(sys_shm_unlink((const char *)frame->rdi));
         case SYS_TASKINFO:
             return pack(sys_taskinfo(
                 (size_t)frame->rdi,

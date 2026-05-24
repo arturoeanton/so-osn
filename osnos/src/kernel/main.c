@@ -144,6 +144,8 @@ void kmain(void) {
     pty_init();            /* /dev/ptmx + /dev/pts/N pool */
     extern void unix_sock_init(void);
     unix_sock_init();      /* AF_UNIX socket pool + bind table */
+    extern void shm_init(void);
+    shm_init();            /* POSIX shm pool (shm_open / mmap MAP_SHARED) */
     task_init();
     reaper_init();
     scheduler_init();

@@ -49,6 +49,7 @@
 
 struct pipe;
 struct pty_pair;
+struct shm_obj;
 
 /* The shared open file description. Refcounted. */
 typedef struct osnos_ofd {
@@ -62,9 +63,11 @@ typedef struct osnos_ofd {
     bool         is_pipe;             /* opened via sys_pipe / inherited */
     bool         is_chr;              /* character device */
     bool         is_pty;              /* /dev/ptmx or /dev/pts/N */
+    bool         is_shm;              /* shm_open() — shm_ref valido */
 
     int          sock_idx;            /* index into net/socket table */
     int          unix_idx;            /* index into unix_sock table */
+    struct shm_obj *shm_ref;          /* shared memory object handle */
     struct pipe *pipe_ref;            /* shared pipe object */
     int          pipe_side;           /* 0 = read end, 1 = write end */
 

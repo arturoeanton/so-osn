@@ -246,9 +246,23 @@ Trabajo:
 
 **Out of scope**: SOCK_DGRAM (datagrams), `SCM_RIGHTS` (fd passing entre procesos via UNIX), abstract namespace (`sun_path[0]==0` Linux extension), credentials passing. Para xeyes/X11 lo que tenemos alcanza.
 
-#### FASE 14.3 — POSIX SHM (pendiente)
-- ❌ `shm_open` + `mmap(MAP_SHARED, fd)`: shared file-backed mmap para pixmaps cliente↔server.
-- Hoy `mmap` es anonymous-only.
+#### FASE 14.3 — POSIX SHM — ✅ **CERRADA**
+
+`shm_open(name, O_CREAT|O_RDWR) + ftruncate(fd, size) + mmap(NULL, size, PROT_*, MAP_SHARED, fd, 0)` funciona end-to-end, incluyendo el caso crítico **shared memory across fork** — child y parent ven las MISMAS páginas físicas, no copias snapshot.
+
+Trabajo:
+
+- ✅ **`src/include/osnos_shm_abi.h`** + **`lib/libc/include/sys/mman.h`** extendida: constantes `MAP_SHARED=0x01`, `PROT_*`, `SHM_NAME_MAX=64`, declaraciones `shm_open`/`shm_unlink`.
+- ✅ **`src/micro/shm.{c,h}`** (~170 LOC): pool fijo de 16 named shm objects, cada uno hasta 256 páginas = 1 MiB. Estados con `refcount + unlinked` flag (POSIX: objeto persiste hasta `shm_unlink + último close`). Operaciones: `shm_open(name, create?)`, `shm_unlink(name)`, `shm_truncate(obj, bytes)` alloca/free pages, `shm_phys_page(obj, page_off)` devuelve dir física, `shm_unref(obj)` decrementa refcount + free si zero+unlinked.
+- ✅ **OFD extendido** (`src/micro/fd.h`): `is_shm + shm_ref` paralelos a is_socket. `ofd_clear` los inicializa, `ofd_unref` llama `shm_unref` al close.
+- ✅ **Nuevos syscalls** (`src/micro/syscall.c` + `syscall.h`): `SYS_SHM_OPEN=519`, `SYS_SHM_UNLINK=520`. `sys_shm_open` strippea leading `/` (POSIX `/foo` == `foo`), bumps refcount, retorna fd. `sys_shm_unlink` marca el name unlinked. Strict POSIX path (Linux's `shm_open` libc también es un shim sobre open de `/dev/shm/NAME` — equivalent semantics).
+- ✅ **`sys_ftruncate` dispatchea a shm**: si `f->is_shm`, llama `shm_truncate`. Sino, comportamiento legacy (vfs).
+- ✅ **`sys_mmap` con MAP_SHARED fd-backed** (~50 LOC nuevos): si `flags & MAP_SHARED && fd >= 0 && is_shm`, vmm_map las páginas físicas del shm_obj en la AS del caller sin pmm_alloc. Track `shm_backed=1` en `mmap_regions` para que `sys_munmap` haga solo vmm_unmap (sin pmm_free).
+- ✅ **🔥 Fix crítico en `sys_fork`**: `address_space_clone` hace deep-copy de páginas. Para regiones `shm_backed=1`, el child queda con COPIAS, no con las páginas compartidas. Fix: después del clone, walk `mmap_regions`; para cada shm region, liberar las copias del child y re-mappear al physical original del parent (= `shm_obj`'s pages). Sin esto, write del child no era visible al parent.
+- ✅ **mini-libc gap-fill**: agregada `ftruncate` declaration en `<unistd.h>` + wrapper en `unistd.c` (era pendiente — sólo musl la tenía). `shm_open`/`shm_unlink` wrappers en `mman.c`. `SYS_FTRUNCATE=77` + `SYS_SHM_OPEN/UNLINK` declarados en `lib/libc/syscall.h`.
+- ✅ **`elfs/tests/shmtest.c`**: parent shm_open + ftruncate + mmap + escribe "HELLO FROM PARENT" + fork; child mmap heredado, verifica leer el string, sobreescribe con "CHILD WAS HERE", _exit; parent waitpid + verifica ver el string del child. Verificado: `child: read parent's data OK / parent: saw child's write OK ('CHILD WAS HERE') / shmtest: OK`.
+
+**Out of scope**: file-backed (non-shm) mmap de archivos regulares en disco (futuro: necesario para programas que mmappean ELFs). PROT_EXEC enforcement vía NX bit (todo mmap hoy es efectivamente RWX). Resize después de mmap (changing un shm que ya tiene mappers vivos rompe; requiere notificación a clientes via signals).
 
 #### FASE 14.4 — Dynamic linking (.so) (pendiente)
 - ❌ ELF dynamic loader (`ld-musl.so`), PT_INTERP, PT_DYNAMIC, GOT/PLT, lazy resolve.

@@ -16,6 +16,7 @@ ssize_t write(int fd, const void *buf, size_t n);
 int     close(int fd);
 off_t   lseek(int fd, off_t off, int whence);
 int     isatty(int fd);
+int     ftruncate(int fd, off_t length);
 
 /* getopt(3) — POSIX command-line option parsing. */
 extern char *optarg;

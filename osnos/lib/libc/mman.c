@@ -26,3 +26,16 @@ int mprotect(void *addr, size_t length, int prot) {
     (void)addr; (void)length; (void)prot;
     return 0;
 }
+
+/* POSIX shm_open / shm_unlink wrap nuestros syscalls custom. */
+int shm_open(const char *name, int oflag, mode_t mode) {
+    long r = osnos_syscall3(SYS_SHM_OPEN, (long)name, (long)oflag, (long)mode);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return (int)r;
+}
+
+int shm_unlink(const char *name) {
+    long r = osnos_syscall1(SYS_SHM_UNLINK, (long)name);
+    if (r < 0) { errno = (int)(-r); return -1; }
+    return 0;
+}

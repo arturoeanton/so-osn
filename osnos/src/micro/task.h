@@ -291,6 +291,10 @@ typedef struct task {
     struct {
         uint64_t addr;       /* 0 = empty slot */
         uint64_t len;
+        /* shm-backed flag: si != 0, las páginas son owned por un
+         * shm_obj (MAP_SHARED + fd shm). munmap sólo hace vmm_unmap;
+         * no toca pmm. Si 0, región anónima: pmm_free al unmap. */
+        int      shm_backed;
     } mmap_regions[TASK_MMAP_MAX];
 
     /*

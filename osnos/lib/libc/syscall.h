@@ -68,6 +68,9 @@
 #define SYS_BIND       49
 #define SYS_LISTEN     50
 #define SYS_SETSOCKOPT 54
+#define SYS_FTRUNCATE  77
+#define SYS_SHM_OPEN   519
+#define SYS_SHM_UNLINK 520
 
 static inline long osnos_syscall0(long n) {
     long r;

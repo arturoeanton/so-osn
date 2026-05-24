@@ -120,6 +120,8 @@ typedef struct task task_t;
 #define SYS_SPAWN             516
 #define SYS_SET_FG            517
 #define SYS_RESUME            518
+#define SYS_SHM_OPEN          519
+#define SYS_SHM_UNLINK        520
 
 /* Linux fileops at-flavors that musl uses. SYS_NEWFSTATAT (262) is
  * what musl `stat()` on x86_64 ultimately invokes. */

@@ -32,8 +32,10 @@ static void ofd_clear(osnos_ofd_t *o) {
     o->is_pipe    = false;
     o->is_chr     = false;
     o->is_pty     = false;
+    o->is_shm     = false;
     o->sock_idx   = -1;
     o->unix_idx   = -1;
+    o->shm_ref    = 0;
     o->pipe_ref   = 0;
     o->pipe_side  = 0;
     o->pty_ref    = 0;
@@ -89,6 +91,10 @@ void ofd_unref(int idx) {
     if (o->is_unix_socket && o->unix_idx >= 0) {
         extern void unix_sock_close(int idx);
         unix_sock_close(o->unix_idx);
+    }
+    if (o->is_shm && o->shm_ref) {
+        extern void shm_unref(struct shm_obj *o);
+        shm_unref(o->shm_ref);
     }
     if (o->is_pty && o->pty_ref) {
         if (o->pty_side == 0) pty_master_unref(o->pty_ref);
