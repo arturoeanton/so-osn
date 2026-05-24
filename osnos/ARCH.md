@@ -8,6 +8,21 @@ spawnea los 3 servers y entra al scheduler. fs_server fue eliminado
 propio address space y entran al kernel vía `syscall` (preferido) o
 `int 0x80` (legacy compat).
 
+**Post-FASE 12**: además de los 3 servers core, un **window-system
+server llamado Ox** (`/bin/oxsrv`) puede levantarse a demanda — es
+opt-in (`oxsrv &` desde el shell), no autostart. Cuando corre toma
+posesión exclusiva del framebuffer (vía ioctls nuevos `FBIOGET_
+VSCREENINFO` + `FBIO_BLIT`) y del ring de keyboard (vía nuevos
+opcodes `IPC_CONSOLE_SUSPEND` + `IPC_KEYBOARD_SUSPEND`). Apps GUI
+hablan con oxsrv vía IPC opcodes en el rango `0x60-0x7F`.
+
+**Post-FASE 13**: musl 1.2.5 disponible como **segunda libc opt-in**
+(`USER_ELF_MUSL_SRCS` en GNUmakefile). Coexiste con la mini-libc:
+programs simples siguen usándola (footprint chico), apps que necesitan
+stdio/`%f`/locale/pthread completos usan musl. Tres syscalls nuevos
+de bootstrap: `SYS_WRITEV=20` (musl stdio), `SYS_ARCH_PRCTL=158`
+(`wrmsr MSR_FS_BASE` para TLS), `SYS_SET_TID_ADDRESS=218` (stub).
+
 Scheduler preemptivo timer-driven (50 ms quantum, sólo CPL=3) sobre
 un loop cooperativo en ring 0. **ABI POSIX core 100% COMPLETO**:
 `fork(2)` (SYS_FORK=57) + `execve(2)` (SYS_EXECVE=59) + `wait(2)/
@@ -19,35 +34,64 @@ en blocking syscalls. También `osn_spawn` (SYS_SPAWN=266, fork+exec
 atómico estilo posix_spawn con fd inheritance MOVE-semantics) para
 casos donde fork+exec sería overkill.
 
-**Disk-resident** (Fase 2): sd.img se popula al build con todos
-los ELFs (~64) via mtools. El kernel solo embebe consrv/kbdsrv/
-shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
+**Disk-resident** (Fase 2): sd.img (32 MiB FAT16) se popula al build
+con todos los ELFs (~95) + wallpapers + headers libc + sysroot TCC,
+via mtools. El kernel solo embebe consrv/kbdsrv/shellsrv/banner +
+**oxsrv** como ROM recovery. Kernel binary ~1.5 MB.
 
-## Capas (post-FASE 10)
+## Capas (post-FASE 13)
 
 ```
 +----------------------------------------------------------------+
+| ring-3 GUI apps (FASE 12 — Ox) — clients de oxsrv via IPC     |
+|   oxnotepad  — text editor (Ctrl+S, abre argv[1] path)         |
+|   oxcalc     — 4-función calculator (grid 4x5)                 |
+|   oxterm     — PTY + uxsh sub-shell, parser ANSI completo      |
+|   oxfiles    — file browser (.ppm → wallpaper, otros → notepad)|
+|   oxsettings — wallpaper picker → /home/.oxrc + RELOAD IPC     |
++----------------------------------------------------------------+
+| ring-3 Ox window server (FASE 12) — ELF en elfs/gui/oxsrv.c   |
+|   - posee cursor + z-order + dirty flag                        |
+|   - lee /dev/mouse0 + /dev/input0 (O_NONBLOCK)                 |
+|   - dispatch eventos al cliente focused (IPC 0x60-0x7F)        |
+|   - composite wallpaper + windows + cursor → FBIO_BLIT ioctl   |
+|   - menú root estilo Openbox (right-click sobre wallpaper)     |
+|   - SUSPEND consrv + kbdsrv al arrancar; RESUME al exit        |
+|     (signal handler + watchdog en consrv/kbdsrv para safety)   |
++----------------------------------------------------------------+
 | ring-3 servers (FASE 10) — ELFs en elfs/osn-server/            |
 |   consrv   — IPC_CONSOLE_WRITE / CLEAR → /dev/fb0              |
+|              (FASE 12: + IPC_CONSOLE_SUSPEND/RESUME +          |
+|               watchdog auto-resume si SERVER_OX desaparece)    |
 |   kbdsrv   — /dev/input0 → sys_tty_input (POSIX termios)       |
+|              (FASE 12: + IPC_KEYBOARD_SUSPEND/RESUME +         |
+|               O_NONBLOCK read + watchdog auto-resume)          |
 |   shellsrv — line editor + history + pipes/redirects + jobs   |
 |              (registra SERVER_SHELL, ES EL shell del OS)       |
 +----------------------------------------------------------------+
-| ring-3 user tasks ~80 ELFs en /bin (coreutils + net + tests)   |
+| ring-3 user tasks ~95 ELFs en /bin (coreutils + net + tests +  |
+|   GUI + uxsh + hello_musl):                                    |
 |   ls cat cp mv rm mkdir touch echo head tail wc grep sort      |
 |   uniq cut tr seq yes tee env pwd which printf date uname      |
 |   basename dirname clear tree banner calc top kill sleep ovi   |
-|   less readelf poweroff reboot hello hello_libc — httpd        |
-|   selectserver echotcp tcpclient — term minishell (PTY demo)   |
-|   tcc (TinyCC 0.9.27 port — self-hosting C, FASE 11.0)        |
-|   lua (Lua 5.4.7 port    — segundo lenguaje self-host, 11.2)  |
+|   less readelf poweroff reboot hello hello_libc hello_musl —   |
+|   httpd selectserver echotcp tcpclient — term minishell uxsh   |
+|   tcc (TinyCC 0.9.27 — self-hosting C, FASE 11.0)             |
+|   lua (Lua 5.4.7    — segundo lenguaje self-host, FASE 11.2)  |
+|   jq  (jq 1.7.1     — JSON filter, FASE 11.3)                  |
 +----------------------------------------------------------------+
-|                 lib/libc — osnos mini-libc                      |
+|        lib/libc — osnos mini-libc (DEFAULT)                     |
 |   stdio (FILE*, printf, fopen, fread/fwrite, fgets, snprintf), |
 |   stdlib (malloc/free, qsort, atoi/strtol, atexit, setjmp),    |
 |   string (mem*, str*, strdup, strstr, strtok_r), unistd (read, |
 |   write, open, close, pipe, dup, dup2, fcntl, mmap, ...),      |
 |   sys/socket (TCP/UDP/select), arpa/inet, time, errno, crt0    |
+|   ox.h + ox.c (FASE 12 — Ox client wire protocol)              |
++----------------------------------------------------------------+
+|        vendor/musl 1.2.5 — segunda libc OPT-IN (FASE 13)       |
+|   USER_ELF_MUSL_SRCS en GNUmakefile. crt1.o + libc.a + crti +  |
+|   crtn linkeado contra musl.lds (preserva PT_TLS + init_array).|
+|   Acceso a printf %f real, full snprintf, locale, pthread shim |
 |              ↓                                                   |
 |             syscall (via inline asm in syscall.h)               |
 +----------------------------------------------------------------+
@@ -58,13 +102,25 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 |   unlink/ioctl/getdents64/gettimeofday/time/kill/exit/         |
 |   fork (#57) execve (#59) wait4 (#61) — POSIX core              |
 |   rt_sigaction (#13) rt_sigprocmask (#14) rt_sigreturn (#15)   |
+|   writev (#20) — musl stdio (FASE 13)                          |
 |   setpgid (#109) getppid (#110) getpgrp (#111) setsid (#112)   |
 |   getpgid (#121) getsid (#124) — job control                   |
+|   arch_prctl (#158) — ARCH_SET_FS = wrmsr MSR_FS_BASE = TLS    |
+|     (FASE 13 — musl bootstrap)                                 |
 |   reboot (#169) — ACPI S5 + 8042 reset (poweroff/restart)      |
+|   set_tid_address (#218) — musl bootstrap stub                 |
 |                                                                 |
 |   osnos: IPC_SEND (260) IPC_RECV (261) SERVICE_REGISTER (262)  |
 |   SERVICE_LOOKUP (263) TTY_INPUT (264) TASKINFO (265)          |
 |   SPAWN (266) SET_FG (267) RESUME (268)                        |
+|                                                                 |
+| Framebuffer ioctls (FASE 12 — Ox needs raw pixel access):      |
+|   FBIOGET_VSCREENINFO = 0x4600 (Linux-compat) → fb_var_        |
+|     screeninfo { xres, yres, bits_per_pixel, line_length,      |
+|     RGBA offsets }                                              |
+|   FBIO_BLIT = 0x4680 (osnos-specific) → fb_blit_req { x, y,    |
+|     w, h, src, src_pitch } — copy_from_user row-by-row +        |
+|     framebuffer_blit_kernel. Detección por path "/dev/fb0".    |
 |                                                                 |
 |       int 0x80 (IDT[0x80] DPL=3)      syscall  (LSTAR=entry)   |
 |              int80_entry asm                    syscall_entry  |
@@ -80,9 +136,19 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 +----------------------------------------------------------------+
 | IPC layer:                                                      |
 |   ipc_send / ipc_recv (cola compartida 64 × 1 KB)              |
-|   ipc_send rewrite msg.to: SID → pid (receivers filtran        |
-|     por su propio pid via sys_ipc_recv → ipc_recv(t->pid))     |
-|   service_register / service_lookup (SERVER_* SIDs)            |
+|   ipc_send routing two-step (FASE 12 — Ox needed direct-pid):  |
+|     1) try service_get_pid(to)  — covers SERVER_* clients     |
+|     2) si no, treat `to` as literal pid, check task_by_pid()   |
+|     → permite que oxsrv mande events back a client tasks       |
+|       sin que cada client tenga que registrar un SID propio    |
+|   service_register / service_lookup (SERVER_* SIDs:            |
+|     KEYBOARD=1 SHELL=2 CONSOLE=3 FS=4 OX=5 — FASE 12 agregó OX)|
+|   IPC opcode ranges:                                            |
+|     0x00-0x0F system (incl CONSOLE/KEYBOARD SUSPEND/RESUME)    |
+|     0x10-0x1F console, 0x20-0x3F fs/vfs                         |
+|     0x40-0x5F process lifecycle (PROC_EXITED/STOPPED/CONTINUED)|
+|     0x60-0x7F Ox window-system (FASE 12 — CONNECT/WINDOW_*/   |
+|                                  DRAW_*/EVENT_*/RELOAD_SETTINGS)|
 +----------------------------------------------------------------+
 | net/ stack (FASE 8.5):                                          |
 |   socket (UDP + full TCP state machine, accept queue, retx RTO)|
@@ -118,9 +184,15 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 +----------------------------------------------------------------+
 | drivers/:                                                       |
 |   keyboard (PS/2; scancodes + Shift + Ctrl + ext + arrows)     |
+|     **FASE 12 fix**: check STAT_AUX_DATA, skip mouse bytes     |
+|     (sin esto bytes del AUX se leían como scancodes random)    |
+|   mouse (PS/2 AUX poll, 3-byte packets, sign extension,        |
+|     sync recovery, dy invertido) — FASE 11.4                   |
 |   framebuffer (linear FB + 8x8 font + VT100 CSI parser:        |
 |     ESC[2J/H/r;cH/K/m/7m + SGR truecolor 38;2;R;G;B; tees       |
-|     every write to serial_puts → dual-console always on)        |
+|     every write to serial_puts → dual-console always on;        |
+|     FASE 12: + framebuffer_get_info + framebuffer_blit_kernel  |
+|     para los nuevos ioctls FBIOGET_VSCREENINFO + FBIO_BLIT)    |
 |   serial (UART 16550 COM1 0x3F8, polling-only, 38400 8N1 +      |
 |     FIFO; serial_putc spin LSR THRE + CRLF expand, try_getc     |
 |     non-blocking RX poll)                                       |
@@ -128,16 +200,19 @@ shellsrv/banner como ROM recovery. Kernel binary: 7.6 MB → 1.1 MB.
 |   block_ata (ATA PIO over IDE primary master, LBA28)           |
 |   pic / lapic / timer (PIT @ 100 Hz for preempt)                |
 +----------------------------------------------------------------+
-| Kernel-side cooperative tasks (NO servers, tres helpers):      |
+| Kernel-side cooperative tasks (NO servers, helpers):           |
 |   keyboard feeder — keyboard_poll → devfs_input_push           |
 |     (no toca políticas TTY — eso vive en ring 3 kbdsrv)         |
+|   mouse feeder    — mouse_poll → devfs_mouse_push              |
+|     (alimenta /dev/mouse0, leído por oxsrv y/o mousetest)      |
 |   serial-in feeder (FASE 10.7) — serial_try_getc loop ×64/tick |
 |     → tty_input(b) directo. \\r → \\n para Enter de host.        |
 |     Resultado: bytes COM1 RX llegan a shellsrv fd 0 como un     |
 |     keystroke PS/2 cualquiera. Habilita headless boot.          |
 |   init-respawn — cada ~100ms verifica que consrv/kbdsrv/       |
 |     shellsrv sigan vivos; respawnea si murieron (cubre el      |
-|     post-exec gap). Sleep via state=BLOCKED + wakeup_at_ms.    |
+|     post-exec gap). NO respawnea oxsrv (opt-in: si murió,      |
+|     queda muerto). Sleep via state=BLOCKED + wakeup_at_ms.     |
 +----------------------------------------------------------------+
 |                       Limine bootloader                         |
 +----------------------------------------------------------------+
@@ -1245,3 +1320,159 @@ devfs lo ignora porque sus streams no tienen offset). Hay también
 access. Esto reemplazó al esquema viejo de "leer file entero a
 scratch + slicear" que tenía un cap silencioso de 1 KiB en sys_read
 — eso fue lo que TCC's port destapó como el primer big bug.
+
+## Flujo Ox — un click del mouse abre una app (FASE 12)
+
+Ejemplo: usuario tipea `oxsrv &`, después right-click sobre el
+wallpaper, después click en "Notepad" del menú.
+
+```
+   user mueve el mouse / hace click
+        |
+        v
+   PS/2 AUX port → byte llega a 0x60 con STAT_AUX_DATA bit
+        |
+        v
+   [ring 0] mouse_server_tick (cooperative kernel task)
+        |  mouse_poll() lee byte, ensambla packet 3-byte
+        |  decode dx/dy/buttons → mouse_event_t
+        |  devfs_mouse_push(ev) — al ring de /dev/mouse0 (32 slots)
+        v
+   scheduler dispatches oxsrv
+        |
+        v
+   [ring 3] oxsrv main loop (33 ms tick)
+        |  read(/dev/mouse0) drain to EAGAIN (O_NONBLOCK)
+        |  process_mouse_event: cx,cy += dx,dy; clamp screen bounds
+        |  edge-detect right-button down sobre wallpaper:
+        |    g_menu_visible = 1; g_menu_x = cx; g_menu_y = cy
+        |  g_dirty = 1
+        v
+   composite_and_flush()
+        |  memcpy(g_back, g_wp_scaled, w*h*4)        — wallpaper
+        |  draw windows back-to-front (frame+body+title+close [x])
+        |  draw_menu (if visible)                    — 5 entries
+        |  draw_cursor                               — 12x17 sprite
+        |  ioctl(fb_fd, FBIO_BLIT, &req)             — syscall
+        v
+   [ring 0] sys_ioctl detecta /dev/fb0 → FBIO_BLIT case
+        |  copy_from_user(&req, arg, sizeof(req))
+        |  kmalloc(row_bytes)  — scratch para 1 row
+        |  loop h rows: copy_from_user(scratch, src_row, row_bytes)
+        |              + framebuffer_blit_kernel(...)
+        |  kfree(scratch)
+        v
+   pixels visibles en el framebuffer
+```
+
+Usuario click sobre "Notepad" del menú:
+
+```
+   left-button-down sobre y = g_menu_y + idx*MENU_ITEM_H
+        |
+        v
+   [ring 3] oxsrv: g_menu[idx].path = "/bin/oxnotepad"
+        |  g_menu_visible = 0
+        |  spawn_app("/bin/oxnotepad")
+        |     → osn_spawn(path, "", envp_flat, -1, -1)
+        v
+   [ring 0] sys_spawn (#266)
+        |  proc_execve("/bin/oxnotepad", "", envp_flat)
+        |  ELF loader maps PT_LOADs en address space nuevo
+        |  build_argv_block: argc=1, argv[0]="oxnotepad", envp + auxv
+        |  task_create_user_elf → state=READY
+        v
+   scheduler dispatches oxnotepad
+        |
+        v
+   [ring 3] oxnotepad main()
+        |  ox_init() → ipc_service_lookup(SERVER_OX) → server pid
+        |  ox_window_create(600, 400, "Notepad")
+        |    → IPC_OX_WINDOW_CREATE msg con arg0=(w<<16)|h, data=title
+        |    → ipc_send (to=SERVER_OX, kernel routea a oxsrv pid)
+        |    → wait for IPC_OX_RESPONSE (with arg1 = win_id)
+        v
+   [ring 3] oxsrv handle_ipc(IPC_OX_WINDOW_CREATE)
+        |  alloc_window(from=oxnotepad_pid, w, h, "Notepad")
+        |  malloc(w*h*4) backing buffer + push to z-stack
+        |  send_response(from, OK, win_id) with retry-on-EAGAIN
+        v
+   [ring 3] oxnotepad recibe RESPONSE
+        |  load_file() del path (argv[1] o default /home/notepad.txt)
+        |  render() → secuencia de ox_draw_rect + ox_draw_text
+        |    cada uno = IPC_OX_DRAW_RECT/TEXT al oxsrv
+        |  ox_present(win) → IPC_OX_PRESENT marca window dirty
+        |  ox_wait_event(&ev) — loop de event delivery
+```
+
+**Cambios clave que FASE 12 introdujo en el resto del sistema**:
+
+- `keyboard.c` ahora skip bytes con STAT_AUX_DATA del 8042 — sin
+  esto bytes del mouse contaminaban el TTY (números random al
+  mover el mouse).
+- `consrv.c` agrega flag `suspended` + watchdog que chequea
+  `ipc_service_lookup(SERVER_OX)` cada ~32 msgs IPC: si oxsrv
+  desapareció (kill -9 / crash), auto-RESUME y `\x1b[2J\x1b[H` al
+  FB para canvas limpio.
+- `kbdsrv.c` mismo patrón pero con `O_NONBLOCK` en `/dev/input0`
+  (necesario para poder multiplexar IPC polling con read).
+- `ipc.c` `ipc_send` ahora hace **two-step routing**: primero
+  `service_get_pid(msg->to)`; si retorna 0, fallback a treat `to`
+  como pid literal + `task_by_pid(pid)` para validar. Esto permite
+  que oxsrv mande events a clients (que no tienen SID propio).
+- `exec.c` `build_argv_block` ahora deja **auxv** después de envp
+  NULL — sin esto musl `__init_libc` lee bytes random como aux
+  keys y crashea o setea libc.page_size = nonsense.
+
+## Flujo musl — hello_musl bootstrapping (FASE 13)
+
+```
+   user tipea: hello_musl alpha beta
+        |
+        v
+   shellsrv → osn_spawn("/bin/hello_musl", "alpha beta", ...)
+        |
+        v
+   [ring 0] sys_spawn → proc_execve
+        |  elf_load: parsea PT_LOAD, mapea páginas con PTE_U
+        |  build_argv_block escribe en el user stack:
+        |    [argc=3] [argv: hello_musl, alpha, beta, NULL]
+        |    [envp: PATH=/bin, HOME=/home, ..., NULL]
+        |    [auxv: {AT_PAGESZ=6, 4096}, {AT_NULL=0, 0}]
+        |  iretq al entry point (crt1.o de musl)
+        v
+   [ring 3] musl crt1.o `_start` (arch/x86_64/crt_arch.h)
+        |  xor %rbp,%rbp        — clear frame pointer
+        |  mov %rsp,%rdi        — pass SP block as 1st arg
+        |  call _start_c
+        v
+   _start_c → __libc_start_main(main, argc, argv, ...)
+        |
+        v
+   __init_libc(envp, pn)
+        |  walk envp hasta NULL → auxv = envp + i + 1
+        |  for (i=0; auxv[i]; i+=2) cache aux entries
+        |    → libc.page_size = aux[AT_PAGESZ] = 4096   ✓
+        |    → AT_RANDOM = 0 (no SSP entropy, SSP off OK)
+        |  __init_tls(aux) → static_init_tls
+        |    → __init_tp(__copy_tls(builtin_tls))
+        |    → __set_thread_area asm:
+        |        movl $0x1002,%edi  ; ARCH_SET_FS
+        |        movl $158,%eax     ; SYS_arch_prctl
+        |        syscall
+        v
+   [ring 0] sys_arch_prctl(0x1002, fs_base)
+        |  wrmsr MSR_FS_BASE = fs_base
+        |  → desde ahora cualquier acceso %fs:* funciona (errno, TLS)
+        v
+   __libc_start_init() — __init_array + DT_INIT (vacío en static)
+        |
+        v
+   main(argc=3, argv) corre con TLS válido
+        |  printf / write llaman a sys_write o sys_writev
+        |  sys_writev itera iov, reusa sys_write para cada uno
+        |  texto sale por consrv → /dev/fb0
+        v
+   main returns → __funcs_on_exit + fflush → SYS_EXIT
+```
+

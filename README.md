@@ -2,8 +2,11 @@
 
 Sistema operativo hobby x86_64, estilo microkernel, escrito en C desde
 cero. Bootea con Limine, corre en QEMU, y trae un shell interactivo,
-filesystem virtual, syscalls compatibles con Linux x86_64 y una
-mini-libc propia para programas de usuario en ring 3.
+filesystem virtual, syscalls compatibles con Linux x86_64, una
+mini-libc propia para programas de usuario en ring 3, **musl 1.2.5
+vendoreado como segunda libc opt-in (FASE 13)** y un **mini-X window
+system propio llamado Ox (FASE 12)** con server, file browser,
+notepad, calculadora, terminal y settings.
 
 ```
    osnos x86_64 — shellsrv (ring 3, post-FASE 10 + Fase 2 disk-resident)
@@ -69,6 +72,26 @@ mini-libc propia para programas de usuario en ring 3.
    lua
    jq
    ovi
+   shellsrv:/$ oxsrv &               # ¡FASE 12 — mini-X GUI! 🪟
+   [1] pid=12 &
+   # consola desaparece, sale wallpaper samurai, cursor osnos visible.
+   # right-click sobre wallpaper → menú estilo Openbox:
+   #   Files  Notepad  Calculator  Terminal  Settings  Reboot
+   # Click "Notepad"   → ventana de notepad (Ctrl+S guarda)
+   # Click "Terminal"  → oxterm con uxsh (PTY: ls, cat, ovi, todo Unix)
+   # Click "Settings"  → cambiar wallpaper (samurai ↔ girl) en vivo
+   # Click "Files"     → file browser; .ppm en /home/wallpapers/ →
+   #                     setea wallpaper; click .txt → abre Notepad
+   #                     con ese archivo
+   # kill <pid-oxsrv>  → consrv + kbdsrv auto-resumen, shell vuelve
+   shellsrv:/$ hello_musl                # ¡FASE 13 — musl libc opcional!
+   ============================================
+     hello from musl libc on osnos
+   ============================================
+   argv[0] = hello_musl
+   pi (musl %f) = 3.1415926536          # printf %f real (la mini-libc no)
+   hex: deadbeef  decimal:        -42
+   end of musl smoke test — all good
 ```
 
 > **TL;DR para reentrar al proyecto después de meses:** instalar Limine
@@ -156,10 +179,16 @@ máquina host y el script lo levanta de ahí.
 | Clang + lld  | `brew install llvm`     | `sudo dnf install clang lld`        | `sudo apt install clang lld`       | `sudo pacman -S clang lld` |
 | mtools       | `brew install mtools`   | `sudo dnf install mtools`           | `sudo apt install mtools`          | `sudo pacman -S mtools`    |
 
-`mtools` (mformat + mcopy) se usa para crear `sd.img` — la imagen FAT16
-de 16 MiB que el kernel monta en `/sd`. No requiere sudo ni loopback
-mount. Si no necesitás disco real podés ignorar la dependencia y borrar
-el target `sd.img` del `GNUmakefile`, pero entonces `/sd` no aparece.
+`mtools` (mformat + mcopy + mmd) se usa para crear `sd.img` — la
+imagen FAT16 de 32 MiB que el kernel monta en `/sd` (con `mformat
+-c 8` para que el cluster count se quede dentro del límite FAT16).
+Sin sudo ni loopback mount. Pobladx por el build con `/bin/<ELFs>`,
+`/home/`, `/home/wallpapers/{samurai,girl}.ppm`, `/home/.oxrc`,
+`/lib/` (TCC sysroot: crt + libc.a + libtcc1.a) y `/usr/include/`
+(headers libc + freestanding). Si no necesitás disco real podés
+ignorar la dependencia y borrar el target `sd.img` del `GNUmakefile`,
+pero entonces `/sd`, `/home`, `/bin`, `/lib`, `/usr` desaparecen
+salvo el `binfs` fallback con el ROM recovery set (4 ELFs).
 
 Los headers de build (`cc-runtime`, `freestnd-c-hdrs`,
 `limine-protocol`, `linker-scripts`) **sí** están vendoreados bajo
@@ -195,32 +224,58 @@ fijos definidos en el script).
     │   ├── lib/            #   helpers freestanding (memcpy, strlcpy, printf)
     │   └── include/        #   headers públicos (osnos_status, osnos_keys, ...)
     │
-    ├── lib/libc/           # === libc de usuario (ring 3) ===
+    ├── lib/libc/           # === mini-libc osnos (ring 3, default) ===
     │   ├── crt0.S          #   _start → main → _exit
-    │   ├── include/        #   stdio.h, stdlib.h, string.h, unistd.h, ...
+    │   ├── include/        #   stdio.h, stdlib.h, string.h, unistd.h,
+    │   │                   #     ox.h (Ox client API), linux/fb.h, ...
+    │   ├── ox.c            #   Ox client wire protocol (IPC 0x60-0x7F)
+    │   ├── ox_font.c       #   8x8 bitmap font copy para clients
     │   └── *.c             #   wrappers de syscalls + stdio + malloc
     │
-    ├── elfs/               # programas user-mode (60+ ELFs ring 3)
+    ├── vendor/             # === third-party vendoreado ===
+    │   ├── tinycc/         #   TinyCC 0.9.27 (self-hosting C)
+    │   ├── lua/            #   Lua 5.4.7 (self-host interpreter)
+    │   ├── jq/             #   jq 1.7.1 (JSON filter)
+    │   └── musl/           #   musl 1.2.5 (segunda libc OPT-IN, FASE 13)
+    │       └── build-osnos/lib/{libc.a,crt1.o,crti.o,crtn.o}
+    │
+    ├── tools/              # === host-side helpers ===
+    │   ├── gen_placeholder.c  # genera PPM 1280x800 procedural
+    │   └── gen_wallpapers.sh  # PNG via convert OR placeholder
+    │
+    ├── res/wallpapers/source/ # opcional: drop samurai.png / girl.png
+    │
+    ├── elfs/               # programas user-mode (95+ ELFs ring 3)
     │   ├── shell/          #   osh (mini script interpreter)
     │   ├── tools/          #   coreutils completos: ls cat cp mv rm
     │   │                   #     mkdir rmdir touch echo head tail wc
     │   │                   #     grep sort uniq cut tr seq yes tee
     │   │                   #     env pwd which printf date uname
     │   │                   #     basename dirname clear tree banner
-    │   │                   #     calc top kill sleep ovi tcc hello
+    │   │                   #     calc top kill sleep ovi tcc lua jq
+    │   │                   #     less reboot poweroff readelf
+    │   │                   #     mousetest minishell term uxsh
     │   ├── net/            #   tcpclient httpd selectserver udptest
     │   │                   #     echotcp selecttest
-    │   ├── tests/          #   libctest ttytest fptest mmaptest
-    │   │                   #     pipetest fbtest inputtest kerntest
-    │   │                   #     spawntest envtest user_hello (bare)
+    │   ├── tests/          #   libctest ttytest fptest mmaptest pipetest
+    │   │                   #     forktest waittest sigtest sigchldtest
+    │   │                   #     pgrouptest ptytest jobtest tcctest
+    │   │                   #     luatest jqtest alltest user_hello (bare)
+    │   │                   #     hello_musl (linkeado contra musl libc)
     │   ├── osn-server/     #   FASE 10 servers ring 3:
     │   │                   #     consrv (console), kbdsrv (keyboard),
     │   │                   #     shellsrv (shell de verdad)
-    │   └── libc.lds        #   linker script compartido
+    │   ├── gui/            #   FASE 12 — Ox window system:
+    │   │                   #     oxsrv (server), oxnotepad, oxcalc,
+    │   │                   #     oxterm, oxfiles, oxsettings
+    │   ├── libc.lds        #   linker script compartido (libc-linked)
+    │   └── musl.lds        #   linker script para ELFs linkeados a musl
     │                       # objcopy strippea el dir; ELFs accesibles
     │                       # como /bin/<basename> sin importar carpeta
     │
+    ├── kernel-deps/        # cc-runtime, freestnd-c-hdrs, limine-protocol
     ├── build/              # outputs (gitignored)
+    ├── sd.img              # 32 MiB FAT16 — /bin /home /lib /usr /home/wallpapers
     │
     ├── ARCH.md             # diagrama de capas + flujos IPC
     ├── STATUS.md           # qué funciona, qué no, por fase
@@ -245,31 +300,55 @@ roadmap), mover los servidores debería ser mecánico.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
+│ ring-3 GUI apps (FASE 12 — Ox mini-X):                      │
+│   oxnotepad oxcalc oxterm oxfiles oxsettings — clients      │
+│   talk to oxsrv via IPC opcodes 0x60-0x7F                   │
+├─────────────────────────────────────────────────────────────┤
+│ ring-3 Ox window server (FASE 12):                          │
+│   oxsrv  — owns /dev/fb0 (FBIO_BLIT ioctl), cursor, z-order │
+│            menu (Openbox-style), wallpaper loader (PPM),    │
+│            settings via /home/.oxrc;                        │
+│            SUSPENDs consrv + kbdsrv (auto-RESUME watchdog)  │
+├─────────────────────────────────────────────────────────────┤
 │ ring-3 servers (FASE 10):                                   │
-│   consrv  — IPC_CONSOLE_WRITE → /dev/fb0                    │
-│   kbdsrv  — /dev/input0 → sys_tty_input + IPC_KEY_EVENT     │
+│   consrv  — IPC_CONSOLE_WRITE → /dev/fb0 (SUSPEND/RESUME)   │
+│   kbdsrv  — /dev/input0 → sys_tty_input (SUSPEND/RESUME)    │
 │   shellsrv — line editor + dispatch + pipes/redirs/jobs     │
 │              (registra SERVER_SHELL, ES EL shell del OS)    │
 ├─────────────────────────────────────────────────────────────┤
-│ ring-3 user tasks: ~60 ELFs en /bin (coreutils + net + ...) │
+│ ring-3 user tasks: ~95 ELFs en /bin (coreutils + net +     │
+│   tests + GUI apps + uxsh shell para oxterm)               │
 ├─────────────────────────────────────────────────────────────┤
-│             lib/libc — mini-libc osnos                      │
-│       printf, malloc, fopen, ... → syscall                  │
+│  lib/libc — mini-libc osnos                                 │
+│       printf, malloc, fopen, ox.h GUI client, ... → syscall │
+│  vendor/musl — musl 1.2.5 OPT-IN (USER_ELF_MUSL_SRCS):      │
+│       %f, locale, pthread shim, full snprintf, TLS          │
 ├─────────────────────────────────────────────────────────────┤
 │  Syscall ABI Linux x86_64 (read/write/open/pipe/dup/...):   │
 │   SYS_FORK (57) + SYS_EXECVE (59) + SYS_WAIT4 (61) +        │
 │   SYS_RT_SIGACTION (13) / SIGRETURN (15) → POSIX core ✅     │
 │   SETPGID (109) GETPPID (110) GETPGRP (111) SETSID (112)    │
 │   GETPGID (121) GETSID (124) → job control ✅                │
+│   SYS_WRITEV (20) SYS_ARCH_PRCTL (158) SYS_SET_TID_ADDRESS  │
+│   (218) → musl bootstrap ✅                                  │
 │   osnos-specific (≥ 250):                                    │
 │   SYS_IPC_SEND/RECV (260/261), SERVICE_* (262/263),         │
 │   SYS_TTY_INPUT (264), SYS_TASKINFO (265),                  │
 │   SYS_SPAWN (266), SYS_SET_FG (267), SYS_RESUME (268)       │
 │   int 0x80 + syscall (LSTAR) → syscall_dispatch(frame)      │
 ├─────────────────────────────────────────────────────────────┤
+│ Framebuffer ioctls (FASE 12): FBIOGET_VSCREENINFO (0x4600)  │
+│   FBIO_BLIT (0x4680) — rect blit user buffer → FB.          │
+│ IPC opcode ranges:                                          │
+│   0x00-0x0F system (incl. CONSOLE/KEYBOARD SUSPEND/RESUME)  │
+│   0x10-0x1F console, 0x20-0x3F fs/vfs,                      │
+│   0x40-0x5F process lifecycle, 0x60-0x7F Ox window-system   │
+├─────────────────────────────────────────────────────────────┤
 │ VFS: ramfs (/) │ sysfs (/sys) │ devfs (/dev: null/zero/fb0/ │
-│                │                  input0/ptmx + pts/N)      │
-│      aliasfs (/home → /sd/home, /bin → /sd/bin)             │
+│                │                  input0/mouse0/ttyS0/tty/  │
+│                │                  ptmx + pts/N)             │
+│      aliasfs (/home → /sd/home, /bin → /sd/bin,             │
+│               /lib → /sd/lib, /usr → /sd/usr)               │
 │      binfs (/bin fallback diskless) │ fat16 (/sd, sd.img)   │
 ├─────────────────────────────────────────────────────────────┤
 │  IPC: 1 cola, 64 slots, payload 1024B. ipc_send rewrite     │
@@ -286,10 +365,17 @@ roadmap), mover los servidores debería ser mecánico.
 │    (address_space_clone para fork), kmalloc, syscall,        │
 │    uaccess, service                                          │
 ├─────────────────────────────────────────────────────────────┤
-│  drivers/: PS/2, framebuffer + font 8x8 + VT100 CSI parser, │
+│  drivers/: PS/2 keyboard (AUX-aware: skip mouse bytes),    │
+│            PS/2 mouse (AUX poll, 3-byte packets → events), │
+│            framebuffer + font 8x8 + VT100 CSI parser +     │
+│            FBIOGET_VSCREENINFO + FBIO_BLIT ioctls (FASE 12),│
+│            UART 16550 (COM1, serial console),               │
 │            PIC, LAPIC, PIT, ATA PIO, RTL8139                │
-│  kernel-side servers/: keyboard feeder (poll → ring buffer  │
-│            de /dev/input0 — único server kernel-side)       │
+│  kernel-side cooperative tasks:                             │
+│    keyboard feeder (PS/2 → /dev/input0 ring)               │
+│    mouse feeder    (PS/2 AUX → /dev/mouse0 ring)            │
+│    serial-in feeder (COM1 → tty_input)                      │
+│    init-respawn watchdog (consrv/kbdsrv/shellsrv)           │
 ├─────────────────────────────────────────────────────────────┤
 │                    Limine bootloader                         │
 └─────────────────────────────────────────────────────────────┘
@@ -374,7 +460,10 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | **FASE 11.1 polish — FAT true append + offset-native VFS + caching**: O(N) RMW reemplazado con cluster-chain extend O(len); FAT-sector cache en fat_get_entry; BUFSIZ 512→4096. TCC compile time pasó de "tarda mucho" a **instantáneo**. `/bin/readelf -S` para sección headers. | ✅ |
 | **🎉 FASE 11.2 — Lua 5.4 self-host** (`/bin/lua` Lua 5.4.7 portado): segundo lenguaje en osnos. REPL interactivo + ejecución de scripts. `ovi script.lua && lua script.lua` end-to-end. Libc gap-fill: `locale.h`, `frexp`/`modf`/`asin`/`acos`/`sinh`/`cosh`/`tanh`, `clock`/`mktime`/`strftime`/`difftime`, `system` stub. | ✅ |
 | **🎉 FASE 11.3 — jq 1.7.1 self-host** (`/bin/jq` portado, WITHOUT_ONIG): tercer lenguaje en osnos. Filter + transformer de JSON. `cat data.json \| jq '.field'`, `jq '.list \| length'`, pipes funcionales, builtins. Libc gap-fill: `alloca.h`, `pthread.h` shim single-thread, `libgen.h`, `memmem`, `isnormal`, `realpath`, `rand/srand`. **Bug crítico fixed**: `malloc(0)` ahora retorna non-NULL (glibc-compat). `/home/test.json` seed para jugar. | ✅ |
-| **🖱️ FASE 11.4 — PS/2 mouse driver + `/dev/mouse0`**: driver polling PS/2 AUX en `src/drivers/mouse.{c,h}` (3-byte packets, sign extension, sync recovery via bit 3, dy invertido para screen coords), `mouse_server` cooperative kernel task (mirror del keyboard feeder) que pushea a un ring de 32 `mouse_event_t {int16 dx, dy; uint8 buttons}` en devfs. `/bin/mousetest` muestra eventos en vivo. Recon listo para línea gráfica (cursor overlay, file managers con click, eventual TinyX). PIC IRQ 12 sigue masked — polling consume ~1 inb/tick. | ✅ |
+| **🖱️ FASE 11.4 — PS/2 mouse driver + `/dev/mouse0`**: driver polling PS/2 AUX en `src/drivers/mouse.{c,h}` (3-byte packets, sign extension, sync recovery via bit 3, dy invertido para screen coords), `mouse_server` cooperative kernel task (mirror del keyboard feeder) que pushea a un ring de 32 `mouse_event_t {int16 dx, dy; uint8 buttons}` en devfs. `/bin/mousetest` muestra eventos en vivo. Habilitó la línea gráfica (cursor overlay, file managers con click, eventual TinyX). PIC IRQ 12 sigue masked — polling consume ~1 inb/tick. | ✅ |
+| **🪟 FASE 12.0 — Ox mini-X window system**: ring-3 server `/bin/oxsrv` (~700 LOC) owns el framebuffer vía ioctls nuevos `FBIOGET_VSCREENINFO`/`FBIO_BLIT`. Cliente API en `lib/libc/ox.{c,h}` con `ox_init/window_create/draw_rect/draw_text/draw_image/present/poll_event` estilo mini-Xlib. Wire protocol IPC opcodes `0x60-0x7F` (`IPC_OX_CONNECT/WINDOW_CREATE/DRAW_*/EVENT_KEY/MOUSE/EXPOSE/CLOSE/RELOAD_SETTINGS`). 5 apps GUI iniciales: **oxfiles** (file browser con click-to-open), **oxnotepad** (text editor que abre arbitrary path via argv), **oxcalc** (calculadora 4-función), **oxterm** (PTY + uxsh sub-shell, parser ANSI completo: SGR truecolor, cursor positioning, erase), **oxsettings** (wallpaper picker). Wallpapers PPM P6 generados al build (host C + sh script con fallback procedural para samurai/girl si no hay PNGs en `res/wallpapers/source/`). Root menu estilo Openbox via right-click. Coexistencia con consrv/kbdsrv via opcodes nuevos `IPC_CONSOLE_SUSPEND/RESUME` + `IPC_KEYBOARD_SUSPEND/RESUME`: oxsrv los suspende al arrancar, signal handler SIGTERM/SIGINT los resume al exit, watchdog en consrv/kbdsrv auto-resume si `SERVER_OX` desaparece (defensa contra `kill -9`). **Bug crítico fixed** en el camino: `keyboard.c` no chequeaba `STAT_AUX_DATA` del 8042 → bytes del mouse se interpretaban como scancodes (= números random aparecían en apps cuando se movía el mouse). Fix: skip AUX bytes en keyboard_poll. `kbdsrv` opens `/dev/input0` con `O_NONBLOCK`. `ipc_send` ahora rutea SID OR pid directo (server→client events). `sd.img` bumpado 16→32 MiB (wallpapers + GUI ELFs). | ✅ |
+| **📝 FASE 12.1 — Polish UX GUI**: (1) `/bin/uxsh` (~140 LOC) mini-shell para oxterm — builtins `cd pwd clear help exit` + fork/execve para todo lo demás, PATH=/bin auto. (2) oxnotepad acepta path via `argv[1]` — file browser ya pasa el path al click. (3) Parser ANSI completo en oxterm: state machine ESC→CSI→final; soporta `ESC[H/f`, `ESC[A/B/C/D` cursor, `ESC[J/K` erase, `ESC[m` SGR (reset, reverse, 30-37/40-47/90-97/100-107, truecolor 38;2;R;G;B). (4) libc stdio `drain_write` retry on EAGAIN (~200 ms backoff) → output largo (TCC compilando, `cat big.txt`) no se trunca silente. (5) Watchdog auto-resume en consrv/kbdsrv. (6) `oxsrv` coalesce mouse MOVE events a 1/frame para no inundar IPC bajo storm. | ✅ |
+| **🧬 FASE 13.0 — musl libc opt-in (segunda libc)**: musl 1.2.5 vendoreado en `vendor/musl/` (~140K LOC), compila clean con nuestra toolchain (zero patches al árbol upstream). Outputs en `vendor/musl/build-osnos/lib/{libc.a, crt1.o, crti.o, crtn.o}`. **Kernel gaps cerrados**: `SYS_WRITEV=20` (musl stdio escribe exclusivamente vía writev), `SYS_ARCH_PRCTL=158` (code `0x1002` ARCH_SET_FS → `wrmsr MSR_FS_BASE` = TLS pointer, sin esto cualquier acceso a errno crashea), `SYS_SET_TID_ADDRESS=218` (stub). `build_argv_block` extendido con auxv mínimo `[{AT_PAGESZ=6, 4096}, {AT_NULL=0, 0}]` (sin auxv musl lee bytes random como aux keys). Nuevo `elfs/musl.lds` que preserva `.init_array/.fini_array` + agrega PT_TLS. `elfs/tests/hello_musl.c` smoke test: 6/6 lines correctas end-to-end (auxv parse, TLS wrmsr, argv, snprintf con `%f` que la mini-libc no soporta, `%x` width/padding, exit limpio). Apps opt-in vía `USER_ELF_MUSL_SRCS` en GNUmakefile. **Pendiente**: `printf` / `puts` via FILE* layer retorna -1 — la cadena `__ofl_lock` o init lazy de stdout falla; `snprintf + write` directo funcionan perfecto. | ✅ |
 | **18/18 tests automatizados** via `/bin/alltest` (kerntest, forktest, waittest, sigtest, sigchldtest, pgrouptest, spawntest, exectest, ofdtest, ptytest, fdedgetest, jobtest, termtest, serialtest, tcctest, luatest, jqtest, libctest) | ✅ |
 | **init-respawn watchdog** — consrv/kbdsrv/shellsrv auto-restart on death | ✅ |
 | Driver ATA PIO + FAT16 read/write + dir-chain extension + NT case-bits + persistencia | ✅ |
@@ -579,6 +668,62 @@ lejano y muy difícil de debuggear. Están repetidas en
 
 Cerrado recientemente:
 
+- **FASE 13.0 — musl libc opt-in** (cerrada): musl 1.2.5 vendoreado
+  en `vendor/musl/` y compilado clean con nuestra toolchain. Kernel
+  agrega 3 syscalls bootstrap (`SYS_WRITEV=20`, `SYS_ARCH_PRCTL=158`
+  con ARCH_SET_FS para TLS via wrmsr MSR_FS_BASE, `SYS_SET_TID_ADDRESS=
+  218`). `build_argv_block` extendido con auxv mínimo {AT_PAGESZ,
+  AT_NULL} — sin esto musl `__init_libc` lee bytes random como
+  aux keys. Nuevo linker script `elfs/musl.lds` que preserva
+  `.init_array/.fini_array` + PT_TLS. `elfs/tests/hello_musl.c`
+  smoke verifica end-to-end: auxv parse, TLS via wrmsr, argv pass-
+  through, `snprintf("%f")` (que la mini-libc no soporta), `%x`
+  width/padding, exit limpio. Apps opt-in vía `USER_ELF_MUSL_SRCS`
+  en `GNUmakefile`. Coexiste con la mini-libc: programs chicos
+  siguen usándola (footprint reducido), apps que necesitan
+  stdio/printf-%f/locale/pthread reales usan musl. **Limitación
+  pendiente**: `printf`/`puts` via FILE* retorna -1 (la cadena
+  `__ofl_lock` o init lazy de stdout falla; `snprintf` + raw
+  `write(2)` funcionan).
+
+- **FASE 12.1 — Polish UX GUI** (cerrada): (1) `/bin/uxsh` mini-shell
+  (~140 LOC) para oxterm: builtins cd/pwd/clear/exit/help + fork-
+  execve para todo lo demás con PATH=/bin lookup. (2) oxnotepad
+  acepta path via `argv[1]` (file browser pasa el path al click).
+  (3) Parser ANSI completo en oxterm: state machine ESC→CSI→final,
+  soporta cursor positioning (`ESC[H/A/B/C/D`), erase (`ESC[J/K`),
+  SGR (reset, reverse, 30-37/40-47/90-97/100-107, **truecolor 38;2;
+  R;G;B + 48;2;...**). (4) libc stdio `drain_write` retry on EAGAIN
+  (~200ms cap) — output largo no se trunca silente (TCC compilando,
+  `cat big.txt`). (5) Watchdog en consrv + kbdsrv: chequea
+  `service_lookup(SERVER_OX)` cada ~500ms; si oxsrv desapareció
+  (`kill -9`, crash) auto-RESUME. (6) `oxsrv` coalesce mouse MOVE
+  events a 1/frame (no IPC storm).
+
+- **FASE 12.0 — Ox mini-X window system** (cerrada): server `/bin/
+  oxsrv` (~700 LOC) owns el framebuffer vía 2 ioctls nuevos del
+  driver (`FBIOGET_VSCREENINFO=0x4600`, `FBIO_BLIT=0x4680`).
+  Cliente libc en `lib/libc/ox.{c,h}` con API estilo mini-Xlib
+  (`ox_init/window_create/draw_rect/draw_text/draw_image/present/
+  poll_event/wait_event`). Wire protocol IPC opcodes `0x60-0x7F`
+  (CONNECT/WINDOW_CREATE/DESTROY/DRAW_*/PRESENT/SET_TITLE/EVENT_KEY/
+  MOUSE/EXPOSE/CLOSE/RELOAD_SETTINGS/RESPONSE). 5 apps GUI: **oxfiles**
+  (file browser), **oxnotepad** (text editor con argv[1] path),
+  **oxcalc** (calculadora), **oxterm** (PTY + uxsh, parser ANSI),
+  **oxsettings** (wallpaper picker). Wallpapers PPM P6 generados al
+  build via `tools/gen_wallpapers.sh` (ImageMagick si está, sino
+  placeholder procedural samurai/girl en `tools/gen_placeholder.c`,
+  zero intervención). Menú estilo Openbox vía right-click. Nuevos
+  opcodes `IPC_CONSOLE_SUSPEND/RESUME` + `IPC_KEYBOARD_SUSPEND/
+  RESUME` permiten que oxsrv tome posesión exclusiva del FB + ring
+  de keyboard sin pelearse con consrv/kbdsrv. Signal handler SIGTERM/
+  SIGINT envía RESUME al exit. `ipc_send` ahora rutea SID O pid
+  directo (server→client events). **Bug crítico fixed** en el
+  camino: `keyboard.c` no chequeaba `STAT_AUX_DATA` del 8042 →
+  bytes del mouse se interpretaban como scancodes (números random
+  aparecían en apps al mover mouse). `sd.img` bumpado 16→32 MiB
+  con `mformat -c 8` para que cluster count siga ≤65525 (FAT16).
+
 - **FASE 11.4 — PS/2 mouse driver + `/dev/mouse0`** (cerrada):
   driver polling PS/2 AUX en `src/drivers/mouse.{c,h}` (init via
   0xA8 + 0xF6 + 0xF4 con ACK loop bounded; poll de 3-byte packets
@@ -744,14 +889,24 @@ Cerrado recientemente:
 
 Las próximas fases grandes:
 
-1. **FASE 11 — Drivers a ring 3**: PS/2, framebuffer, ATA, RTL8139
+1. **FASE 13.1 — musl printf path fix**: arreglar `__ofl_lock` /
+   stdout init lazy de musl para que `printf` via FILE* funcione.
+   Una vez listo, migrar oxnotepad / oxterm / oxfiles a musl
+   (acceso a wide chars, locale, regex serio).
+2. **FASE 14 — Dirty regions en oxsrv**: blit solo los rects que
+   cambiaron (cursor anterior + nuevo + window dirty) en vez de full-
+   screen blit por frame. Mata la vibración del cursor + baja CPU/MMIO
+   ~95%. ~200 LOC en `oxsrv.c`.
+3. **FASE 15 — Drivers a ring 3**: PS/2, framebuffer, ATA, RTL8139
    como ELFs en `elfs/osn-driver/`. Requiere IRQ delegation, MMIO
    mapping per-task, port-IO syscall, DMA bouncing.
-2. **FASE 12 — TUI potente**: mini Norton Commander, viewer, syntax
-   highlighting en ovi, multi-pane.
-3. **FASE 13 — Gráfico**: window server + terminal en ventana + mouse.
-4. **SMP** (mucho después).
-5. **Copy-on-write fork** — hoy fork hace full page copy. Con COW
+4. **FASE 16 — Window mgmt avanzado**: resize/drag de ventanas,
+   minimize/maximize, taskbar, multi-monitor.
+5. **FASE 17 — tinyX / X11 port**: aprovechar que ya tenemos auxv +
+   TLS + ioctls FB + IPC client/server protocol — tinyX puede portar
+   contra `<linux/fb.h>` que ya exponemos.
+6. **SMP** (mucho después).
+7. **Copy-on-write fork** — hoy fork hace full page copy. Con COW
    se ahorra RAM hasta el primer write.
 
 Detalle en `osnos/PLAN.md` y `osnos/STATUS.md`.

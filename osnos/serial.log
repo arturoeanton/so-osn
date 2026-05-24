@@ -12,17 +12,71 @@ type 'help' for commands
   Build: FASE 11.3 (tcc + lua + jq self-host)
   Type 'help' for a list of shell builtins.
 [39m
+[38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39m
+[38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39m
+[38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39m
 [38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mx[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mo[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mox[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxs[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxsr[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxsrv[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39moxsrv
 oxsrv: starting
 oxsrv: fb 1280x800 bpp=32 pitch=5120
 oxsrv: entered main loop
 oxsrv: wallpaper 'samurai' ready, entering loop
 oxsrv: frame 0 cur=(640,400) wins=0
-oxsrv: frame 60 cur=(640,400) wins=0
-oxsrv: frame 120 cur=(640,400) wins=0
-oxsrv: frame 180 cur=(560,376) wins=0
-oxsrv: frame 240 cur=(407,259) wins=0
-oxsrv: frame 300 cur=(417,254) wins=0
-oxsrv: frame 360 cur=(263,167) wins=1
-oxsrv: frame 420 cur=(707,189) wins=1
-oxsrv: frame 480 cur=(750,275) wins=2
+oxsrv: frame 60 cur=(538,492) wins=0
+oxsrv: frame 120 cur=(183,182) wins=1
+oxsrv: frame 180 cur=(281,171) wins=2
+oxsrv: frame 240 cur=(714,24) wins=2
+oxsrv: frame 300 cur=(789,124) wins=2
+oxsrv: frame 360 cur=(242,259) wins=3
+oxsrv: frame 420 cur=(398,456) wins=3
+oxsrv: frame 480 cur=(414,422) wins=3
+oxsrv: frame 540 cur=(1109,68) wins=3
+oxsrv: frame 600 cur=(330,712) wins=3
+oxsrv: frame 660 cur=(485,389) wins=4
+oxsrv: frame 720 cur=(1127,75) wins=3
+oxsrv: frame 780 cur=(991,95) wins=1
+oxsrv: frame 840 cur=(429,190) wins=1
+oxsrv: frame 900 cur=(567,92) wins=0
+oxsrv: frame 960 cur=(583,121) wins=1
+oxsrv: frame 1020 cur=(583,121) wins=1
+oxsrv: frame 1080 cur=(583,121) wins=1
+oxsrv: frame 1140 cur=(583,121) wins=1
+oxsrv: frame 1200 cur=(583,121) wins=1
+oxsrv: frame 1260 cur=(583,121) wins=1
+oxsrv: frame 1320 cur=(583,121) wins=1
+oxsrv: frame 1380 cur=(583,121) wins=1
+oxsrv: frame 1440 cur=(583,121) wins=1
+oxsrv: frame 1500 cur=(583,121) wins=1
+oxsrv: frame 1560 cur=(583,121) wins=1
+oxsrv: frame 1620 cur=(583,121) wins=1
+oxsrv: frame 1680 cur=(583,121) wins=1
+oxsrv: frame 1740 cur=(583,121) wins=1
+oxsrv: frame 1800 cur=(583,121) wins=1
+oxsrv: frame 1860 cur=(583,121) wins=1
+oxsrv: frame 1920 cur=(583,121) wins=1
+oxsrv: frame 1980 cur=(583,121) wins=1
+oxsrv: frame 2040 cur=(583,121) wins=1
+oxsrv: frame 2100 cur=(583,121) wins=1
+oxsrv: frame 2160 cur=(1123,63) wins=1
+oxsrv: frame 2220 cur=(729,177) wins=0
+
+shellsrv: ring-3 shell (FASE 10.4)
+type 'help' for commands
+
+[38;2;0;255;102m  ___  ____         ___  ____  
+ / _ \/ ___| _ __  / _ \/ ___| 
+| | | \___ \| '_ \| | | \___ \ 
+| |_| |___) | | | | |_| |___) |
+ \___/|____/|_| |_|\___/|____/ 
+[39m
+[38;2;255;200;100m  osnos — x86_64 microkernel hobby OS
+  Build: FASE 11.3 (tcc + lua + jq self-host)
+  Type 'help' for a list of shell builtins.
+[39m
+[38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mj[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mjq[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mjq
+jq - commandline JSON processor [version 1.7.1-osnos]
+
+Usage:	jq [options[38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39m
+[38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39m
+[38;2;0;255;102mshellsrv:/$ [39m[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mt[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mtc[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mtcc[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mtcc [7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mtcc -[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mtcc -v[7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mtcc -v [7m [27m[K[38;2;0;255;102mshellsrv:/$ [39mtcc -v 
+tcc version 0.9.27-osnos (x86_64 OSnOS)
+[38;2;0;255;102mshellsrv:/$ [39m[7m [27m

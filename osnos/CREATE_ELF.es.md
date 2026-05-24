@@ -3,33 +3,59 @@
 Una guía paso a paso para escribir un programa C, compilarlo en Linux
 como ELF64, embedderlo en el kernel y correrlo en ring 3 sobre osnos.
 
-> **Nota de organización (post-FASE 10)**: este doc fue escrito cuando
-> los ELFs vivían en `tests/`. Ese directorio se renombró a `elfs/` con
-> subcategorías:
+> **Nota de organización (post-FASE 10 + 12 + 13)**: este doc fue escrito
+> cuando los ELFs vivían en `tests/`. Ese directorio se renombró a `elfs/`
+> con subcategorías:
 >   - `elfs/shell/` — osh (script interpreter)
->   - `elfs/tools/` — coreutils ELFs (~40+ comandos)
->   - `elfs/net/` — sockets (tcpclient, httpd, ...)
+>   - `elfs/tools/` — coreutils ELFs (~50+ comandos: ls cat cp mv rm
+>     mkdir touch echo head tail wc grep sort uniq cut tr seq yes tee
+>     env pwd which printf date uname basename dirname clear tree
+>     banner calc top kill sleep ovi less reboot poweroff readelf
+>     mousetest tcc lua jq minishell term **uxsh**)
+>   - `elfs/net/` — sockets (tcpclient, httpd, selectserver, ...)
 >   - `elfs/tests/` — libc + ABI smoke tests (kerntest, pipetest,
->     spawntest, libctest, fptest, mmaptest, user_hello bare)
+>     spawntest, libctest, fptest, mmaptest, user_hello bare,
+>     forktest, waittest, sigtest, sigchldtest, pgrouptest, ptytest,
+>     fdedgetest, jobtest, termtest, tcctest, luatest, jqtest, alltest,
+>     **hello_musl**)
 >   - `elfs/osn-server/` — servers ring-3 de FASE 10 (consrv, kbdsrv,
 >     shellsrv).
+>   - **`elfs/gui/` (FASE 12)** — Ox window system: `oxsrv` (server),
+>     `oxnotepad`, `oxcalc`, `oxterm`, `oxfiles`, `oxsettings`.
 >
-> El linker script compartido es `elfs/libc.lds`. Donde el tutorial dice
-> "`tests/`", leer "`elfs/<categoría>/`". El resto del flujo es idéntico.
+> Linker scripts disponibles:
+>   - `elfs/libc.lds` — default para mini-libc (la mayoría de los
+>     ELFs).
+>   - `elfs/musl.lds` — para ELFs linkeados a musl (preserva
+>     `.init_array/.fini_array` + PT_TLS).
+>   - `elfs/tests/user_hello.lds` — template para bare ELFs.
+>
+> Donde el tutorial dice "`tests/`", leer "`elfs/<categoría>/`". El
+> resto del flujo es idéntico.
 
-Hay **dos formas** de escribir un ELF en osnos:
+Hay **tres formas** de escribir un ELF en osnos:
 
-1. **Libc-linked (lo normal)** — escribís `int main(int argc, char **argv)`
-   y linkeás contra `libosnos_c.a`. Tenés `printf`, `malloc`, `fopen`,
-   `qsort`, `setjmp`, todo lo del Tier 1 de la libc. Es lo que usan los
-   ~40 ELFs de `elfs/tools/` y `elfs/net/`.
-2. **Bare ELF (edge case)** — escribís tu propio `_start`, ningún
+1. **Mini-libc linked (default)** — escribís `int main(int argc, char **argv)`
+   y linkeás contra `libosnos_c.a`. Tenés `printf` (sin %f), `malloc`,
+   `fopen`, `qsort`, `setjmp`, todo lo del Tier 1 de la libc artesanal.
+   Es lo que usan los ~80 ELFs de `elfs/tools/` / `elfs/net/` / `elfs/gui/`.
+   Variable Make: **`USER_ELF_LIBC_SRCS`**.
+2. **musl linked (FASE 13, opt-in)** — mismo `int main(...)`, pero
+   linkeás contra `vendor/musl/build-osnos/lib/{libc.a, crt1.o, crti.o,
+   crtn.o}`. Ganás: full `printf` con `%f` real, `snprintf` completo,
+   locale, pthread shim, wide chars, regex. Costo: ~120 KB de footprint
+   por ELF (vs ~20 KB con mini-libc). Útil cuando vas a portear código
+   POSIX existente o necesitás stdio robusto. Variable Make:
+   **`USER_ELF_MUSL_SRCS`**. Ejemplo: `elfs/tests/hello_musl.c`.
+3. **Bare ELF (edge case)** — escribís tu propio `_start`, ningún
    linkeo, syscall wrappers a mano. Se usa para casos especiales:
    binarios de prueba del loader, tools que prueban una syscall sin
    indirección de libc. El único ejemplo vivo es
-   `elfs/tests/user_hello.c`.
+   `elfs/tests/user_hello.c`. Variable Make: **`USER_ELF_SRCS`**.
 
-Esta guía lleva la libc-linked por defecto. La bare está al final.
+Esta guía lleva la mini-libc por defecto. La sección "Ejemplo 3 —
+musl" está al final con el patrón completo. La bare está justo
+después.
 
 > Compañero de este tutorial: `CREATE_BUILTINS.es.md` (builtins
 > kernel-mode que también viven en `/bin/`). La diferencia es que un
@@ -212,6 +238,7 @@ Números de syscall que existen hoy (ver `src/micro/syscall.h`):
 |   3 | `close`       | `(int fd)`                                        |
 |   5 | `fstat`       | `(int fd, struct stat *out)`                      |
 |   8 | `lseek`       | `(int fd, off_t off, int whence)`                 |
+|  20 | `writev`      | `(int fd, const struct iovec*, int iovcnt)` *(FASE 13 — musl stdio)* |
 |   9 | `mmap`        | `(void *addr, size_t len, int prot, int flags, int fd, off_t)` |
 |  11 | `munmap`      | `(void *addr, size_t len)`                        |
 |  12 | `brk`         | `(uintptr_t new_brk)` — base de `malloc`          |
@@ -246,9 +273,12 @@ Números de syscall que existen hoy (ver `src/micro/syscall.h`):
 |  84 | `rmdir`       | `(const char *path)`                              |
 |  87 | `unlink`      | `(const char *path)`                              |
 |  96 | `gettimeofday`| `(struct timeval*, struct timezone*)`             |
-|  16 | `ioctl`       | `(int fd, unsigned long req, ...)` (termios+TIOC) |
+|  16 | `ioctl`       | `(int fd, unsigned long req, ...)` (termios+TIOC+ **FBIOGET_VSCREENINFO 0x4600** + **FBIO_BLIT 0x4680** sobre `/dev/fb0`) |
+| 158 | `arch_prctl`  | `(int code, unsigned long addr)` *(FASE 13 — musl TLS; code 0x1002 ARCH_SET_FS = wrmsr MSR_FS_BASE)* |
+| 169 | `reboot`      | `(unsigned int cmd)` — RB_AUTOBOOT / RB_POWER_OFF / RB_HALT_SYSTEM |
 | 201 | `time`        | `(time_t*)` *(actually `time` in Linux too)*      |
 | 217 | `getdents64`  | `(int fd, void *buf, size_t n)`                   |
+| 218 | `set_tid_address` | `(int *tidptr)` *(FASE 13 — musl init stub)*  |
 
 **osnos-specific** (≥ 250, no chocan con Linux):
 
@@ -415,6 +445,79 @@ End-to-end: tu C → ELF64 → embed (objcopy) → primer boot lo dumpea a
 /sd/bin/<name> → exec.c lo lee via VFS (FAT) → elf_load + mapeo de
 páginas → iretq a ring 3 → libc → syscall → IPC_CONSOLE_WRITE →
 consrv ring-3 → /dev/fb0 → framebuffer.
+
+---
+
+## Ejemplo 3 — Hello world contra musl (FASE 13, opt-in)
+
+Cuando necesitás stdio robusto, `printf %f` real, locale, regex, o
+estás portando código POSIX que asume musl/glibc, linkeás contra
+**musl 1.2.5** vendoreado en `vendor/musl/build-osnos/lib/`. La
+mini-libc nuestra sigue siendo el default por footprint, pero musl
+es una sola línea de Makefile.
+
+### `elfs/tests/hello_musl.c`
+
+```c
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+    char buf[80];
+    /* musl snprintf con %f — la mini-libc NO lo soporta. */
+    double pi = 3.14159265358979;
+    int n = snprintf(buf, sizeof(buf), "pi = %.10f\n", pi);
+    write(1, buf, n);
+    n = snprintf(buf, sizeof(buf), "argc=%d argv[0]=%s\n", argc, argv[0]);
+    write(1, buf, n);
+    return 0;
+}
+```
+
+### Listarlo en el Makefile
+
+Agregalo a **`USER_ELF_MUSL_SRCS`** (NO a `USER_ELF_LIBC_SRCS`):
+
+```make
+USER_ELF_MUSL_SRCS := elfs/tests/hello_musl.c \
+                      elfs/tools/mi_app_grande.c
+```
+
+La regla pattern `$(BUILD)/elfs/tests/hello_musl.elf` está en
+`GNUmakefile` (compila con `MUSL_CFLAGS` + `-isystem` sobre los
+headers de musl, linkea con `crt1.o + crti.o + libc.a + crtn.o`
+usando `elfs/musl.lds`).
+
+### Limitaciones conocidas en musl-on-osnos
+
+- **`printf` / `puts` via `FILE*`** retornan -1 actualmente (la
+  cadena `__ofl_lock` o init lazy de stdout falla antes de llegar
+  a `writev`). **Workaround**: usar `snprintf` + `write(1, buf, n)`
+  directo. `snprintf` SÍ funciona perfecto (incluyendo `%f / %x /
+  %d` con width / padding / truecolor).
+- **pthread** está stub'd (single-thread shim): mutex no-op, TLS
+  por slot global, `pthread_once` con flag. Suficiente para apps
+  que asumen pthread linkado pero corren single-thread.
+- **mmap file-backed** no implementado — solo anonymous. Si tu app
+  hace `mmap(file)`, falla con ENOSYS.
+- **arch_prctl(ARCH_SET_FS)** SÍ funciona — TLS está OK. Cualquier
+  app que use `__thread`, `errno`, `pthread_key_create` ahora tiene
+  el `%fs:` register cargado correctamente.
+
+### Auxv que musl recibe
+
+El kernel `build_argv_block` (en `src/proc/exec.c`) deja en el user
+stack, después del envp NULL:
+
+```
+{AT_PAGESZ = 6, 4096}
+{AT_NULL   = 0, 0  }
+```
+
+Si necesitás más entries (AT_RANDOM para SSP, AT_EXECFN, AT_PHDR
+para dlopen, etc.) hay que extender `build_argv_block`. Por ahora
+PAGESZ + NULL es lo que musl mínimo necesita para no leer basura.
 
 ---
 
@@ -736,6 +839,61 @@ int main(void) {
 [ ] ./build_and_run.sh
 [ ] shellsrv:/$ <nombre>
 ```
+
+### musl-linked:
+
+```
+[ ] elfs/<categoría>/<nombre>.c    — int main(argc, argv) normal
+[ ] GNUmakefile                    — agregar a USER_ELF_MUSL_SRCS
+                                     (NO a USER_ELF_LIBC_SRCS)
+[ ] elfs/musl.lds ya existe — no toques nada más
+[ ] ./build_and_run.sh
+[ ] shellsrv:/$ <nombre>          — corre con musl libc
+```
+
+### Ox GUI app (FASE 12):
+
+Para escribir una app gráfica que viva como ventana en Ox:
+
+```
+[ ] elfs/gui/<nombre>.c            — usa ox.h client API
+[ ] GNUmakefile                    — agregar a USER_ELF_LIBC_SRCS
+[ ] (opcional) editar el menú root en elfs/gui/oxsrv.c → g_menu[]
+[ ] ./build_and_run.sh
+[ ] osnos$ oxsrv &
+[ ] osnos$ <nombre>                — abre ventana
+```
+
+Skeleton mínimo de app GUI:
+
+```c
+#include <ox.h>
+#include <stdlib.h>
+
+int main(int argc, char **argv) {
+    (void)argc; (void)argv;
+    if (ox_init() < 0) return 1;
+    ox_win_t w = ox_window_create(400, 300, "Mi App");
+    if (w < 0) return 1;
+    for (;;) {
+        /* Pintar. */
+        ox_draw_rect(w, 0, 0, 400, 300, OX_RGB(240, 240, 240));
+        ox_draw_text(w, 10, 10, "Hola Ox!", OX_RGB(20, 20, 80));
+        ox_present(w);
+        /* Esperar eventos. */
+        ox_event_t ev;
+        if (!ox_wait_event(&ev)) continue;
+        if (ev.type == OX_EV_CLOSE) break;
+        /* OX_EV_KEY: ev.ascii + ev.keycode + ev.mods             */
+        /* OX_EV_MOUSE: ev.x + ev.y + ev.buttons + ev.mouse_kind  */
+    }
+    ox_window_destroy(w);
+    return 0;
+}
+```
+
+API completa en `lib/libc/include/ox.h`. Wire protocol IPC opcodes
+`0x60-0x7F` (definidos en `src/include/osnos_ipc_abi.h`).
 
 Cuando termines, `cat /bin/<nombre>` te muestra los bytes del ELF,
 `ls /bin/` lo lista, y `<nombre>` o `/bin/<nombre>` lo ejecuta

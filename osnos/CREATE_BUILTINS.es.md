@@ -1,24 +1,50 @@
 # Builtins en osnos: ELFs y blobs
 
-Esta guía explica las dos formas de poner algo en `/bin/` en osnos.
-El modelo viejo de **builtin kernel-mode** (función C compilada en el
+Esta guía explica las formas de poner algo en `/bin/` en osnos. El
+modelo viejo de **builtin kernel-mode** (función C compilada en el
 kernel, expuesta como `bn_xxx`) **fue eliminado en FASE 7.5**: el
 macro `KERN`, el campo `main` del `builtin_t` y `builtin_trampoline`
 ya no existen. Todo en `/bin/` corre en ring 3.
 
-Los dos modos vivos hoy:
+Los modos vivos hoy:
 
-1. **USERELF** — el modo por defecto. Tu programa es un ELF libc-linked
-   (`int main(int argc, char **argv)`). Es lo que usan los ~25 tools
-   en `elfs/{shell,tools,net,tests}/`. Documentado en detalle en
-   **`CREATE_ELF.es.md`** — esta doc no lo repite.
-2. **USER** — un blob de asm "flat" embebido en el kernel. Sin libc,
+1. **USERELF (mini-libc, default)** — tu programa es un ELF libc-linked
+   (`int main(int argc, char **argv)`). Es lo que usan los ~80 tools
+   en `elfs/{shell,tools,net,tests,gui,osn-server}/`. Documentado en
+   detalle en **`CREATE_ELF.es.md`** — esta doc no lo repite.
+2. **USERELF (musl, opt-in, FASE 13)** — mismo `int main(...)` pero
+   linkeado contra musl 1.2.5 vendoreado. Variable Makefile
+   **`USER_ELF_MUSL_SRCS`** + linker script `elfs/musl.lds`. Útil
+   cuando necesitás `printf %f` real, full snprintf, locale, pthread
+   shim, o estás portando POSIX code que asume musl/glibc. Ver
+   `elfs/tests/hello_musl.c` como ejemplo + sección "Ejemplo 3" de
+   CREATE_ELF.es.md.
+3. **USER** — un blob de asm "flat" embebido en el kernel. Sin libc,
    sin crt0, sin linker script. Se usa sólo para probar el path
    end-to-end de la ABI: `ring3hello`, `ring3int80`, `ring3fault`.
 
-Si vas a escribir una herramienta o un comando, **usá USERELF**
-(`CREATE_ELF.es.md`). Si estás depurando el flujo bajo (SYSCALL vs
-`int 0x80`, fault recovery, etc.), seguí leyendo acá.
+Si vas a escribir una herramienta o un comando, **usá USERELF
+mini-libc** (`CREATE_ELF.es.md`). Si necesitás stdio robusto o
+features POSIX completas, **musl**. Si estás depurando el flujo bajo
+(SYSCALL vs `int 0x80`, fault recovery, etc.), USER blob — seguí
+leyendo acá.
+
+## Ya está embebido en el ROM del kernel (recovery)
+
+Cinco ELFs van **siempre** dentro del kernel (variable Make
+`USER_ELF_ROM_SRCS`) como recovery si el disco está vacío o
+corrupto:
+
+- `consrv`, `kbdsrv`, `shellsrv` — los 3 servers que kmain spawnea
+  para que el sistema arranque (FASE 10).
+- `banner` — `/bin/banner` para el `.oshrc` default.
+- **`oxsrv` (FASE 12)** — server del window system Ox. Opt-in:
+  no autostartea, pero está embebido para que `oxsrv` siempre exista
+  aún sin disco.
+
+Cualquier otro ELF (~90 más) vive **solo en `/sd/bin/`** (disco
+FAT16 poblado al build via mtools). El kernel binary se mantiene
+~1.5 MB en vez de 7+ MB.
 
 ---
 
