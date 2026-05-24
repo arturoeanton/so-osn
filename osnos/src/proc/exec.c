@@ -450,6 +450,36 @@ static int64_t task_create_user(
  *
  * Returns the new RSP (argc address), or 0 if the block doesn't fit.
  */
+/* Forward decl — implementación más abajo. */
+static uint64_t build_argv_block_tokens(uint64_t *pml4,
+                                         uint64_t user_stack_top,
+                                         const char **tokens,
+                                         const size_t *token_lens,
+                                         int argc,
+                                         const char *const *envp);
+
+/* build_argv_block_argv — variante que toma argv como ARRAY pre-parsed.
+ * Necesario para sys_execve (Linux argv[]): preserva boundaries que
+ * la build_argv_block string-version destruye al re-tokenizar.
+ * `argv[0]` se respeta tal como viene; no se sustituye por basename. */
+static uint64_t build_argv_block_argv(uint64_t   *pml4,
+                                      uint64_t    user_stack_top,
+                                      const char *const *argv,
+                                      const char *const *envp)
+{
+    const char *tokens[MAX_ARGV];
+    size_t      token_lens[MAX_ARGV];
+    int         argc = 0;
+    if (argv) {
+        while (argv[argc] && argc < MAX_ARGV) {
+            tokens[argc]     = argv[argc];
+            token_lens[argc] = os_strlen(argv[argc]);
+            argc++;
+        }
+    }
+    return build_argv_block_tokens(pml4, user_stack_top, tokens, token_lens, argc, envp);
+}
+
 static uint64_t build_argv_block(uint64_t   *pml4,
                                  uint64_t    user_stack_top,
                                  const char *prog_name,
@@ -514,6 +544,19 @@ static uint64_t build_argv_block(uint64_t   *pml4,
         argc++;
     }
 
+    return build_argv_block_tokens(pml4, user_stack_top, tokens, token_lens, argc, envp);
+}
+
+/* build_argv_block_tokens — código común post-tokenizado. Recibe
+ * arrays paralelos de strings + sus longitudes; serializa al stack
+ * SysV-init (argc | argv[] | envp[] | aux | strings). */
+static uint64_t build_argv_block_tokens(uint64_t *pml4,
+                                         uint64_t user_stack_top,
+                                         const char **tokens,
+                                         const size_t *token_lens,
+                                         int argc,
+                                         const char *const *envp)
+{
     /* Snapshot envp[] pointers + lengths. envp may be NULL. */
     const char *envs[MAX_ENVP];
     size_t      env_lens[MAX_ENVP];
@@ -724,16 +767,24 @@ static int64_t task_create_user_elf(
      * needs sane bytes, not whatever the BSS happens to hold. */
     fpu_state_init(t->fpu_state);
 
-    /* Seed cwd from envp's PWD entry, falling back to "/". Lets the
-     * child resolve relative paths via getcwd() without the libc
-     * having to consult $PWD. */
-    os_strlcpy(t->cwd, "/", OSNOS_PATH_MAX);
-    if (envp) {
-        for (int i = 0; envp[i]; i++) {
-            const char *e = envp[i];
-            if (os_strncmp(e, "PWD=", 4) == 0) {
-                os_strlcpy(t->cwd, e + 4, OSNOS_PATH_MAX);
-                break;
+    /* Seed cwd:
+     *   - Si el task ya tiene cwd (caso normal: viene de fork+exec),
+     *     PRESERVAR. POSIX dice cwd se hereda a través de exec.
+     *   - Si está vacío (spawn directo desde kernel), tomar PWD del
+     *     envp como hint, o "/" como fallback.
+     *
+     * Antes resetábamos siempre a "/" y reconstruíamos desde PWD —
+     * eso rompía `cd /home; make hello` porque ash no exporta PWD al
+     * envp del child de manera consistente. */
+    if (!t->cwd[0]) {
+        os_strlcpy(t->cwd, "/", OSNOS_PATH_MAX);
+        if (envp) {
+            for (int i = 0; envp[i]; i++) {
+                const char *e = envp[i];
+                if (os_strncmp(e, "PWD=", 4) == 0) {
+                    os_strlcpy(t->cwd, e + 4, OSNOS_PATH_MAX);
+                    break;
+                }
             }
         }
     }
@@ -909,7 +960,23 @@ void proc_exit_current_user(int exit_code) {
         (uint64_t)vmm_kernel_pml4() - pmm_hhdm_offset();
     __asm__ volatile ("mov %0, %%cr3" :: "r"(kpml4_phys) : "memory");
 
-    address_space_destroy(user_pml4);
+    /* CLONE_VM: si todavía hay otro task vivo apuntando al mismo
+     * pml4 (parent suspendido en vfork, o sibling clone), NO liberar
+     * el AS — el último usuario en salir hará el destroy. */
+    if (task_pml4_other_users(user_pml4, t->pid) == 0) {
+        address_space_destroy(user_pml4);
+    }
+
+    /* CLONE_VFORK release: child salió sin execve. Despertar al
+     * parent suspendido (clone() le devuelve mi pid igual). */
+    if (t->vfork_waiter_pid) {
+        task_t *waiter = task_by_pid(t->vfork_waiter_pid);
+        if (waiter && waiter->state == TASK_BLOCKED) {
+            waiter->saved_rax = t->pid;
+            waiter->state     = TASK_READY;
+        }
+        t->vfork_waiter_pid = 0;
+    }
 
     /*
      * Hand the per-task kernel stack to the reaper — we cannot kfree
@@ -1176,6 +1243,24 @@ int64_t proc_execve_replace(const char *path, const char *args,
         }
     }
 
+    /* POSIX execve(2): signals que estaban CAUGHT (handler ≠ DFL ≠ IGN)
+     * se resetean a SIG_DFL en la nueva imagen — los punteros viejos
+     * apuntan al text del binario anterior, que ya no está mapeado.
+     * Mantener SIG_IGN (excepto SIGCHLD que en POSIX puede reset-
+     * earse, pero por simplicidad y compat con Linux mantenemos).
+     *
+     * Sin esto, un fork+exec donde el parent tenía handlers (ej. ash
+     * con job control) le pasa los punteros al child; al primer signal
+     * el kernel iretq a memoria no mapeada → page fault. Confirmado
+     * con `make hello`: SIGCHLD venía con handler=ash signal_handler
+     * en busybox text. */
+    for (int i = 0; i < 32; i++) {
+        if (t->sa_handler[i] != 1 /* SIG_IGN */) {
+            t->sa_handler [i] = 0;   /* SIG_DFL */
+            t->sa_restorer[i] = 0;
+        }
+    }
+
     /* Refresh task name from the new image's basename. */
     size_t bn = 0;
     while (base[bn] && bn + 1 < OSNOS_TASK_NAME_MAX) {
@@ -1186,18 +1271,141 @@ int64_t proc_execve_replace(const char *path, const char *args,
 
     fpu_state_init(t->fpu_state);
 
-    /* 5. Free the abandoned address space. Kernel high-half stays
-     *    valid in CR3 (we read kernel code/data from kernel_pml4),
-     *    so destroying the old user low-half here is safe even
-     *    though `current` CR3 still points at it — by the time we
-     *    return to user space we'll be on new_pml4 via the
-     *    trampoline's CR3 reload. */
-    address_space_destroy(old_pml4);
+    /* 5. Free the abandoned address space (si soy el último usuario).
+     *    CLONE_VM: el parent suspendido en vfork sigue apuntando al
+     *    mismo pml4 — no liberarlo, ese parent va a re-tomar control
+     *    en la AS original cuando lo despertemos abajo. Kernel high-
+     *    half stays valid in CR3; old user low-half se destruye sólo
+     *    si nadie más lo referencia. */
+    if (task_pml4_other_users(old_pml4, t->pid) == 0) {
+        address_space_destroy(old_pml4);
+    }
+    /* execve corta CLONE_VM: el child arranca su propio AS limpio. */
+    t->pml4_shared = 0;
+
+    /* 5b. CLONE_VFORK release: si soy un vfork-child, despertar al
+     *     parent ahora que ya cargué la nueva imagen y solté el AS
+     *     compartido. */
+    if (t->vfork_waiter_pid) {
+        task_t *waiter = task_by_pid(t->vfork_waiter_pid);
+        if (waiter && waiter->state == TASK_BLOCKED) {
+            waiter->saved_rax = t->pid;   /* clone() devuelve pid al parent */
+            waiter->state     = TASK_READY;
+        }
+        t->vfork_waiter_pid = 0;
+    }
 
     /* 6. Long-jump back to scheduler. Next dispatch enters
      *    user_task_trampoline → saved_valid=0 path → iretq with the
      *    new RIP/RSP. The current syscall stack frame is abandoned;
      *    the per-task kstack base is reused on next dispatch. */
+    sched_resume_jump();
+    /* unreachable */
+}
+
+/* proc_execve_replace_argv — fork de proc_execve_replace que toma
+ * argv[] como ARRAY en vez de string aplanado. Necesario para
+ * sys_execve preserve boundaries (apps que pasan "echo HELLO" como
+ * UN argv element no quieren que se rompa en dos).
+ *
+ * Implementación: copia-paste de proc_execve_replace con el path
+ * único `build_argv_block_argv` en vez de `build_argv_block`. NO se
+ * refactoreó en helper común para evitar tocar el old path estable. */
+int64_t proc_execve_replace_argv(const char *path,
+                                  const char *const *argv,
+                                  const char *const *envp)
+{
+    task_t *t = task_current();
+    if (!t || !t->pml4) return -(int64_t)OSNOS_ESRCH;
+    if (!path)          return -(int64_t)OSNOS_EFAULT;
+
+    const uint8_t *blob = 0;
+    size_t blob_size = 0;
+    uint8_t *blob_owned = 0;
+    osnos_status_t s = resolve_executable(path, &blob, &blob_size, &blob_owned);
+    if (s != OSNOS_OK) return -(int64_t)s;
+
+    uint64_t *new_pml4 = 0;
+    uint64_t  new_entry = 0;
+    uint64_t  new_stack_top = 0;
+    s = elf_load(blob, blob_size, &new_pml4, &new_entry, &new_stack_top);
+    if (blob_owned) kfree(blob_owned);
+    if (s != OSNOS_OK) return -(int64_t)s;
+
+    /* basename para task name. */
+    const char *base = path;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/') base = p + 1;
+    }
+
+    uint64_t init_rsp = build_argv_block_argv(new_pml4, new_stack_top, argv, envp);
+    if (init_rsp == 0) {
+        address_space_destroy(new_pml4);
+        return -(int64_t)OSNOS_E2BIG;
+    }
+
+    uint64_t *old_pml4 = t->pml4;
+    t->pml4              = new_pml4;
+    t->user_entry        = new_entry;
+    t->user_stack_top    = init_rsp;
+    t->heap_start        = USER_HEAP_BASE;
+    t->heap_brk          = USER_HEAP_BASE;
+    t->saved_valid       = 0;
+    t->kill_pending      = 0;
+    t->stop_pending      = 0;
+    t->fs_base           = 0;
+    extern void tty_reset_to_defaults(void);
+    tty_reset_to_defaults();
+    t->mmap_next         = 0;
+    for (int i = 0; i < TASK_MMAP_MAX; i++) {
+        t->mmap_regions[i].addr = 0;
+        t->mmap_regions[i].len  = 0;
+    }
+    t->stdin_redir [0]   = 0;
+    t->stdout_redir[0]   = 0;
+    t->stdout_append     = 0;
+    t->stdin_redir_off   = 0;
+    t->stdout_redir_off  = 0;
+
+    for (int fd = 3; fd < OSNOS_MAX_FDS; fd++) {
+        if (!t->fds[fd].used) continue;
+        if (t->fds[fd].fd_flags & OSNOS_FD_CLOEXEC) {
+            fd_free(t, fd);
+        }
+    }
+
+    /* POSIX execve(2): reset CAUGHT signal handlers a SIG_DFL (los
+     * punteros apuntan al text del binario viejo). Mantener SIG_IGN. */
+    for (int i = 0; i < 32; i++) {
+        if (t->sa_handler[i] != 1) {
+            t->sa_handler [i] = 0;
+            t->sa_restorer[i] = 0;
+        }
+    }
+
+    size_t bn = 0;
+    while (base[bn] && bn + 1 < OSNOS_TASK_NAME_MAX) {
+        t->name[bn] = base[bn];
+        bn++;
+    }
+    t->name[bn] = 0;
+
+    fpu_state_init(t->fpu_state);
+
+    if (task_pml4_other_users(old_pml4, t->pid) == 0) {
+        address_space_destroy(old_pml4);
+    }
+    t->pml4_shared = 0;
+
+    if (t->vfork_waiter_pid) {
+        task_t *waiter = task_by_pid(t->vfork_waiter_pid);
+        if (waiter && waiter->state == TASK_BLOCKED) {
+            waiter->saved_rax = t->pid;
+            waiter->state     = TASK_READY;
+        }
+        t->vfork_waiter_pid = 0;
+    }
+
     sched_resume_jump();
     /* unreachable */
 }

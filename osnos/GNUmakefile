@@ -199,7 +199,8 @@ USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(BUILD)/elfs/tools/tcc.elf \
                  $(BUILD)/elfs/tools/lua.elf \
                  $(BUILD)/elfs/tools/jq.elf \
-                 $(BUILD)/elfs/tools/sqlite3.elf
+                 $(BUILD)/elfs/tools/sqlite3.elf \
+                 $(BUILD)/elfs/tools/make.elf
 
 # ---------------------------------------------------------------------------
 # Fase 2 disk-resident: split the embedded set into ROM (small, kept inside
@@ -324,6 +325,10 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBTCC1_A) $(CRTI_O) $(CRTN
 	mcopy -i $@ $(SD_TMP)/.oshrc      ::/home/.oshrc
 	mcopy -i $@ $(SD_TMP)/hello.c     ::/home/hello.c
 	mcopy -i $@ $(SD_TMP)/test.json   ::/home/test.json
+	@# Seed a Makefile for the make+tcc self-hosting workflow:
+	@#   cd /home && make hello && ./hello
+	printf '# osnos demo Makefile — try `make hello` then `./hello`\n# Build the C compiler self-hosting story: tcc + pdpmake inside osnos.\nCC = tcc\nCFLAGS = -static\n\nhello: hello.c\n\t$$(CC) $$(CFLAGS) hello.c -o hello\n\nclean:\n\trm -f hello\n\n.PHONY: clean\n' > $(SD_TMP)/Makefile
+	mcopy -i $@ $(SD_TMP)/Makefile     ::/home/Makefile
 	@# Default .oxrc — oxsrv reads this at boot. /bin/oxsettings rewrites
 	@# it from the GUI. If left absent, oxsrv falls back to "samurai".
 	printf 'current_wallpaper=samurai\n' > $(SD_TMP)/.oxrc
@@ -359,6 +364,15 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBTCC1_A) $(CRTI_O) $(CRTN
 	@if [ -f vendor/busybox/busybox_unstripped ]; then \
 	    mcopy -i $@ -o vendor/busybox/busybox_unstripped ::/bin/busybox; \
 	    echo "  COPY    /bin/busybox"; \
+	fi
+	@# /bin/sh — copia de busybox (FAT16 no soporta symlinks). BusyBox
+	@# dispatcha por argv[0]: cuando lo invocás como "/bin/sh" toma el
+	@# applet sh (ash). Necesario para que `system("...")` de musl (que
+	@# hace `execl("/bin/sh", "sh", "-c", cmd)`) funcione — pdpmake,
+	@# popen, posix_spawn, todos pasan por ahí.
+	@if [ -f vendor/busybox/busybox_unstripped ]; then \
+	    mcopy -i $@ -o vendor/busybox/busybox_unstripped ::/bin/sh; \
+	    echo "  COPY    /bin/sh   (busybox dispatch)"; \
 	fi
 	@# /etc — minimal passwd + group para que BusyBox getpwuid etc.
 	@# anden. Sin esto `ls -l` y otros applets se cuelgan en lookups.
@@ -563,6 +577,29 @@ $(BUILD)/elfs/tools/sqlite3.elf: $(BUILD)/$(SQLITE_DIR)/sqlite3.c.o $(BUILD)/$(S
 	$(LD) $(MUSL_LDFLAGS) -T elfs/musl.lds \
 	    $(MUSL_CRT1) $(MUSL_CRTI) $(BUILD)/$(SQLITE_DIR)/sqlite3.c.o $(BUILD)/$(SQLITE_DIR)/shell.c.o \
 	    $(MUSL_LIB) $(MUSL_CRTN) -o $@
+
+# --------------------------------------------------------------------------
+# pdpmake (Public Domain POSIX make) — FASE 14.1. Vendor 1.4.1 (~3.4K LOC).
+# Linkeado contra **mini-libc** (NO musl) — la razón: musl `system()` usa
+# `posix_spawn` que llama `clone(CLONE_VM|CLONE_VFORK)`, y nuestra
+# implementación de SYS_CLONE (alias de fork) no maneja correctamente la
+# semántica vfork-style que musl espera. Con mini-libc, system() es
+# fork+execve directo (en lib/libc/stdlib.c), y todo funciona limpio.
+# Stubs en mini-libc: <glob.h> retorna GLOB_NOMATCH (suficiente para
+# Makefile use), <ar.h> tiene la struct pero no se usa en práctica.
+# --------------------------------------------------------------------------
+PDPMAKE_DIR  := vendor/pdpmake
+PDPMAKE_SRCS := check.c input.c macro.c main.c make.c modtime.c rules.c target.c utils.c
+PDPMAKE_OBJS := $(addprefix $(BUILD)/$(PDPMAKE_DIR)/, $(PDPMAKE_SRCS:.c=.o))
+
+$(BUILD)/$(PDPMAKE_DIR)/%.o: $(PDPMAKE_DIR)/%.c $(PDPMAKE_DIR)/make.h
+	mkdir -p "$(dir $@)"
+	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include -I$(PDPMAKE_DIR) -w -c $< -o $@
+
+$(BUILD)/elfs/tools/make.elf: $(PDPMAKE_OBJS) elfs/libc.lds $(LIBC_A) $(LIBC_CRT0)
+	mkdir -p "$(dir $@)"
+	$(LD) $(USER_LDFLAGS) -T elfs/libc.lds \
+	    $(LIBC_CRT0) $(PDPMAKE_OBJS) $(LIBC_A) -o $@
 
 # --------------------------------------------------------------------------
 # TinyCC port — FASE 11.0. Vendor tree at vendor/tinycc/ (release 0.9.27).

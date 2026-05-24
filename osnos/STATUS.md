@@ -204,7 +204,51 @@ y bugs notables encontrados.
 
 ## Roadmap futuro
 
-### FASE 14 — Quality of life (corta)
+### FASE 14 — Self-hosting completo (plan en curso)
+
+Objetivo: poder `cd /home && make hello && ./hello` desde adentro,
+luego construir el resto incrementalmente.
+
+#### FASE 14.1 — Port `make` (pdpmake) — ✅ **CERRADA — self-hosting build funciona end-to-end**
+
+`cd /home && make hello && /home/hello` compila y corre tcc-generated ELF
+desde adentro de osnos. Verificado: output `hello from tcc on osnos!`.
+
+Trabajo (~6 cambios cascading, todos críticos):
+
+- ✅ **`vendor/pdpmake/`** — pdpmake 1.4.1 (POSIX make, public domain, ~3.4K LOC) vendoreado y compilado contra mini-libc → `/bin/make`.
+- ✅ **Mini-libc gap-fill** (`lib/libc/posix_extras.c` + headers): `getopt/optarg/optind/opterr/optopt`, `stpcpy`, `popen/pclose`, `utimensat` (stub), nuevos headers `<strings.h>`, `<glob.h>` (stub `GLOB_NOMATCH`), `<ar.h>`, extensiones a `<fcntl.h>` (AT_FDCWD, UTIME_NOW, UTIME_OMIT) + `<sys/stat.h>` rediseñada a `st_atim/mtim/ctim` (struct timespec) con macros legacy `st_atime` → `st_atim.tv_sec` (layout binario intacto, compat Linux).
+- ✅ **`resolve_path`** helper en `sys_open` + `sys_stat/access/mkdir/rmdir/unlink/rename/chdir` — relative paths se resuelven contra `task->cwd`. Antes el kernel rechazaba paths sin `/` inicial con EINVAL, rompiendo `fopen("Makefile")` desde pdpmake/tcc.
+- ✅ **Fix exec preserva cwd** (`src/proc/exec.c`): antes `proc_execve` reseteaba `t->cwd = "/"` y leía PWD del envp. Pero busybox ash no exporta PWD consistente al envp del child → `cd /home && make hello` terminaba con cwd=`/`. Fix: si `t->cwd` ya está seteado (caso normal de fork+exec), preservar. Sólo seedear cuando viene vacío (spawn directo del kernel).
+- ✅ **Fix getopt convención GNU libc** (`lib/libc/posix_extras.c`): pdpmake hace `optind = 0` para resetear getopt entre llamadas (`GETOPT_RESET()`). Convención GNU dice "0 = reset + arrancar en argv[1]". Mi getopt tomaba 0 literal y consumía argv[0]. Sin este fix `make hello` decía `make: don't know how to make make` (target = nombre del programa).
+- ✅ **`/bin/sh` = copia de `/bin/busybox`** (FAT16 no tiene symlinks; busybox dispatcha por argv[0]). pdpmake's `system()` invoca `/bin/sh -c "..."`.
+- ✅ **`/home/Makefile` + `/home/hello.c`** seeded al sd.img como demo del workflow `make hello`.
+- ✅ **🔥 Bug crítico — sys_execve aplanaba argv en string + re-tokenizaba**: `sys_execve` concatenaba `argv[1..N]` en `args_kbuf` separados por espacio, luego `proc_execve_replace → build_argv_block` re-tokenizaba ese string por whitespace. Resultado: `execve("/bin/sh", ["sh","-c","echo HELLO"])` se convertía en argv=`["sh","-c","echo","HELLO"]` y `sh -c echo` corría echo con `HELLO` como `$0` (no como arg) → output vacío. Esto rompía TODA recipe de make que pasara comandos con args via `system()`. Fix: nueva `proc_execve_replace_argv(path, argv[], envp)` + `build_argv_block_argv` que consumen argv ARRAY sin tokenizar; `sys_execve` lo usa directamente preservando boundaries. (`build_argv_block` string-version sigue para callers internos que pasan strings ya tokenizables — `proc_execve` desde kmain.)
+- ✅ **`SYS_CLONE` real con `CLONE_VM` + `CLONE_VFORK`** (`src/micro/syscall.c` + `src/proc/exec.c` + `src/micro/task.{c,h}`): para musl `posix_spawn`. Cuando `flags & CLONE_VM`, el child comparte `pml4` con el parent (refcount via lookup en `task_pml4_other_users`); `user_stack_top = child_stack`. Cuando además `CLONE_VFORK`, parent se marca `TASK_BLOCKED` con snapshot del syscall context, child arranca primero; al `proc_execve_replace_argv` o `proc_exit_current_user` del child, parent se despierta (saved_rax = child pid). `address_space_destroy` en exit/exec se skip-ea si todavía hay otros tasks usando ese pml4. Sin flags `CLONE_VM`, alias trivial de `sys_fork`. **Sin esto, posix_spawn (que musl usa para `system()`) corrompía el address space del parent al compartir AS sin refcounting**.
+
+- ✅ **🔥 Bug crítico — execve no reseteaba sa_handler[] (POSIX violation)**: `proc_execve_replace[_argv]` no reseteaba los signal handlers caught a `SIG_DFL`. Cuando ash forkeaba para `make hello`, make heredaba la sa_handler[] tabla — incluido el `SIGCHLD` handler de busybox apuntando a `signal_handler` en el text segment de busybox (0x235787). Cuando sh exec'd terminaba, kernel mandaba SIGCHLD a make; iretq jumped a 0x235787 que NO está mapeado en el address space de make → page fault. Fix: en execve, iterar 32 slots y resetear cualquier handler distinto de SIG_IGN a SIG_DFL (`t->sa_handler[i] = 0; t->sa_restorer[i] = 0`). Diagnosis via dump del user stack en el page fault handler (vimos rip=0x235787, restorer=0x25a179=`__restore_rt` en busybox via `llvm-objdump`).
+
+Verificación end-to-end: `sh -c "echo a b c"` → `a b c`; `cd /home && make hello` → tcc compila SIN SEGFAULT; `/home/hello` → "hello from tcc on osnos!"; `make clean` ejecuta la recipe limpia. Único item pendiente cosmético: mini-libc `/bin/rm` no soporta `-f` flag (independiente, no bloquea FASE 14.1).
+
+#### FASE 14.2 — AF_UNIX sockets (pendiente)
+- ❌ Familia `AF_UNIX` en `sys_socket` + `bind`/`connect`/`accept` con namespace de paths (`/tmp/X11-unix/X0` etc.).
+- Necesario para X11 wire protocol (xeyes habla AF_UNIX al server).
+
+#### FASE 14.3 — POSIX SHM (pendiente)
+- ❌ `shm_open` + `mmap(MAP_SHARED, fd)`: shared file-backed mmap para pixmaps cliente↔server.
+- Hoy `mmap` es anonymous-only.
+
+#### FASE 14.4 — Dynamic linking (.so) (pendiente)
+- ❌ ELF dynamic loader (`ld-musl.so`), PT_INTERP, PT_DYNAMIC, GOT/PLT, lazy resolve.
+- Habilita ejecutables Linux unmodified que asuman dynamic libc.
+
+#### FASE 14.5 — Ox extendido + Ox-as-X11 (pendiente)
+- ❌ Ox compite con nano-X (botones reales, widget tree, propiedades).
+- ❌ Capa de traducción protocol X11-wire ↔ IPC Ox (analogía: "Ox a X11 como osnos a Linux ABI").
+
+#### FASE 14.6 — `xeyes` (test del camino completo)
+
+### FASE 14-misc — Quality of life menores
 - ❌ Per-PTY termios real (cada shell/REPL su propio termios, no global)
 - ❌ Fix de argv passing en sqlite3 (debug por qué SQL en argv se trunca)
 - ❌ Fix de page fault en musl atexit (sqlite3 sale limpio cosmético)

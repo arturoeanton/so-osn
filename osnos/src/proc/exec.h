@@ -100,3 +100,18 @@ void proc_exit_current_user(int exit_code);
  */
 int64_t proc_execve_replace(const char *path, const char *args,
                               const char *const *envp);
+
+/*
+ * proc_execve_replace_argv — variante de proc_execve_replace que
+ * recibe argv como ARRAY de strings (no string aplanado), preservando
+ * exactamente los boundaries que entregó la app. Usado por sys_execve
+ * (Linux execve(2) entrega argv[]); sin esto, una arg como "echo X"
+ * se rompía en dos tokens al re-tokenizar el string aplanado.
+ *
+ *   argv : array NULL-terminated. argv[0] es el program name; el resto
+ *          son las args. Cada elemento es un string crudo (no quoting).
+ *   envp : igual que proc_execve_replace.
+ */
+int64_t proc_execve_replace_argv(const char *path,
+                                  const char *const *argv,
+                                  const char *const *envp);

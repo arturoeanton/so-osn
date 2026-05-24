@@ -171,6 +171,19 @@ task_t *task_by_pid(uint64_t pid) {
     return 0;
 }
 
+int task_pml4_other_users(uint64_t *pml4, uint64_t self_pid) {
+    if (!pml4) return 0;
+    int count = 0;
+    for (int i = 0; i < MAX_TASKS; i++) {
+        task_t *t = &tasks[i];
+        if (t->state == TASK_UNUSED) continue;
+        if (t->state == TASK_DEAD) continue;
+        if (t->pid == self_pid) continue;
+        if (t->pml4 == pml4) count++;
+    }
+    return count;
+}
+
 /*
  * Grace counter per slot. When a task hits TASK_DEAD, we wait at
  * least REAP_GRACE_PASSES calls to task_reap_dead before actually

@@ -175,14 +175,33 @@ int rand(void) {
     return (int)((rand_state >> 1) & RAND_MAX);
 }
 
-/* system: osnos has no shell-exec for ring-3. Apps that want a
- * subprocess go via fork+execve directly. Returning -1 for any
- * non-NULL command and 0 for the "is a command processor
- * available?" probe (cmd==NULL) lets ISO C callers proceed
- * gracefully. */
+/* system: fork + execve("/bin/sh", ["sh", "-c", cmd]) + wait.
+ * /bin/sh es un copy de /bin/busybox (BusyBox dispatcha por argv[0]).
+ * Esto destrabea pdpmake recipes, popen, y cualquier ISO C app que
+ * use system(). Sin esto, system() retornaba -1 siempre.
+ *
+ * Retorna el status del child (WIFEXITED → WEXITSTATUS shifted), o -1
+ * si fork/execve fallan. cmd==NULL retorna 1 (hay shell disponible). */
 int system(const char *cmd) {
-    if (!cmd) return 0;
-    return -1;
+    extern int fork(void);
+    extern int execve(const char *path, char *const argv[], char *const envp[]);
+    extern int waitpid(int pid, int *status, int options);
+    extern char **environ;
+    if (!cmd) return 1;
+    int pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        char *argv[4];
+        argv[0] = (char *)"sh";
+        argv[1] = (char *)"-c";
+        argv[2] = (char *)cmd;
+        argv[3] = (char *)0;
+        execve("/bin/sh", argv, environ);
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    return status;
 }
 
 /* realpath: lexical path normalization since osnos has no symlinks.

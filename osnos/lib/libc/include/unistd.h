@@ -17,6 +17,11 @@ int     close(int fd);
 off_t   lseek(int fd, off_t off, int whence);
 int     isatty(int fd);
 
+/* getopt(3) — POSIX command-line option parsing. */
+extern char *optarg;
+extern int   optind, opterr, optopt;
+int getopt(int argc, char *const argv[], const char *optstring);
+
 int     unlink(const char *path);
 int     rmdir (const char *path);
 int     mkdir (const char *path, mode_t mode);

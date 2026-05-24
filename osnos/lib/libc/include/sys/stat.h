@@ -8,6 +8,17 @@
  * layout as anything `osnos_stat_t` points at, so kernel writes flow
  * straight back to user without reinterpretation.
  */
+/* struct timespec — Linux layout. tv_nsec is `long` (64-bit en x86_64)
+ * para que el total sean 16 bytes y coincida con los pares
+ * <time_t, uint64_t> del kernel `osnos_stat_t`. */
+#ifndef _STRUCT_TIMESPEC_DEFINED
+#define _STRUCT_TIMESPEC_DEFINED
+struct timespec {
+    time_t tv_sec;
+    long   tv_nsec;
+};
+#endif
+
 struct stat {
     dev_t     st_dev;
     ino_t     st_ino;
@@ -20,14 +31,17 @@ struct stat {
     off_t     st_size;
     blksize_t st_blksize;
     blkcnt_t  st_blocks;
-    time_t    st_atime;
-    uint64_t  st_atime_nsec;
-    time_t    st_mtime;
-    uint64_t  st_mtime_nsec;
-    time_t    st_ctime;
-    uint64_t  st_ctime_nsec;
+    struct timespec st_atim;
+    struct timespec st_mtim;
+    struct timespec st_ctim;
     int64_t   __unused[3];
 };
+
+/* POSIX.1-2001 legacy member names — Linux uses macros para que código
+ * viejo (`st_mtime`) y nuevo (`st_mtim.tv_sec`) coexistan sin friction. */
+#define st_atime st_atim.tv_sec
+#define st_mtime st_mtim.tv_sec
+#define st_ctime st_ctim.tv_sec
 
 #define S_IFMT   0170000
 #define S_IFREG  0100000
@@ -53,3 +67,8 @@ int fstat(int fd, struct stat *out);
  * doesn't exist, EFAULT on bad pointer).
  */
 int stat(const char *path, struct stat *out);
+
+/* utimensat(2) — set file timestamps. osnos no track atime/mtime,
+ * stub retorna 0 sin efecto. Declaramos con `void *` en vez de
+ * `struct timespec*` para no requerir el include de <time.h> acá. */
+int utimensat(int dirfd, const char *path, const void *times, int flags);

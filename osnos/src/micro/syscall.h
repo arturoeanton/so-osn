@@ -44,6 +44,7 @@ typedef struct task task_t;
 #define SYS_FCNTL    72
 #define SYS_GETPID   39
 #define SYS_FORK     57
+#define SYS_CLONE    56   /* musl posix_spawn lo usa; alias de fork (ignora stack/flags) */
 #define SYS_EXECVE   59
 #define SYS_EXIT     60
 #define SYS_WAIT4    61

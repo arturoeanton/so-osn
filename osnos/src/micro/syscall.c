@@ -122,6 +122,41 @@ static int64_t try_open_pty(const char *path, int flags) {
     return -1;     /* not a PTY path */
 }
 
+/*
+ * resolve_path — convierte path relativo a absoluto usando task->cwd.
+ * Si path ya empieza con '/', copia tal cual. Si no, prepend cwd + '/'.
+ * Devuelve OSNOS_OK o ENAMETOOLONG.
+ *
+ * Necesario para que apps como pdpmake (`fopen("Makefile")`) o
+ * tcc (`open("hello.c")`) funcionen — antes el kernel rechazaba
+ * cualquier path sin '/' inicial con EINVAL (check_path).
+ */
+static osnos_status_t resolve_path(const char *path, char *out, size_t out_sz) {
+    if (!path || !out) return OSNOS_EFAULT;
+    if (path[0] == '/') {
+        size_t l = 0;
+        while (path[l] && l < out_sz - 1) { out[l] = path[l]; l++; }
+        out[l] = 0;
+        if (path[l]) return OSNOS_ENAMETOOLONG;
+        return OSNOS_OK;
+    }
+    /* Relative — prepend cwd. */
+    task_t *t = task_current();
+    const char *cwd = (t && t->cwd[0]) ? t->cwd : "/";
+    size_t p = 0;
+    while (cwd[p] && p < out_sz - 1) { out[p] = cwd[p]; p++; }
+    /* Add slash separator unless cwd is already "/". */
+    if (p == 0 || out[p-1] != '/') {
+        if (p >= out_sz - 1) return OSNOS_ENAMETOOLONG;
+        out[p++] = '/';
+    }
+    size_t q = 0;
+    while (path[q] && p < out_sz - 1) { out[p++] = path[q++]; }
+    out[p] = 0;
+    if (path[q]) return OSNOS_ENAMETOOLONG;
+    return OSNOS_OK;
+}
+
 int64_t sys_open(const char *path, int flags, uint32_t mode) {
     (void)mode;  /* permission bits not enforced yet */
 
@@ -130,6 +165,13 @@ int64_t sys_open(const char *path, int flags, uint32_t mode) {
     /* PTY special-case: handled by the dedicated layer, not VFS. */
     int64_t pty_rc = try_open_pty(path, flags);
     if (pty_rc != -1) return pty_rc;
+
+    /* Resolve path al absoluto si es relativo. VFS espera paths
+     * absolutos (check_path requires '/'). */
+    char abspath[OSNOS_PATH_MAX];
+    osnos_status_t rs = resolve_path(path, abspath, sizeof(abspath));
+    if (rs != OSNOS_OK) return err(rs);
+    path = abspath;
 
     vfs_stat_t st;
     osnos_status_t s = vfs_stat(path, &st);
@@ -1030,24 +1072,38 @@ int64_t sys_setsid(void) {
 /* ------------------------------------------------------------------ */
 
 int64_t sys_mkdir(const char *path, uint32_t mode) {
-    (void)mode;  /* permission bits not enforced yet */
+    (void)mode;
     if (!path) return err(OSNOS_EFAULT);
-    return err(vfs_mkdir(path));
+    char abspath[OSNOS_PATH_MAX];
+    osnos_status_t rs = resolve_path(path, abspath, sizeof(abspath));
+    if (rs != OSNOS_OK) return err(rs);
+    return err(vfs_mkdir(abspath));
 }
 
 int64_t sys_rmdir(const char *path) {
     if (!path) return err(OSNOS_EFAULT);
-    return err(vfs_rmdir(path));
+    char abspath[OSNOS_PATH_MAX];
+    osnos_status_t rs = resolve_path(path, abspath, sizeof(abspath));
+    if (rs != OSNOS_OK) return err(rs);
+    return err(vfs_rmdir(abspath));
 }
 
 int64_t sys_unlink(const char *path) {
     if (!path) return err(OSNOS_EFAULT);
-    return err(vfs_unlink(path));
+    char abspath[OSNOS_PATH_MAX];
+    osnos_status_t rs = resolve_path(path, abspath, sizeof(abspath));
+    if (rs != OSNOS_OK) return err(rs);
+    return err(vfs_unlink(abspath));
 }
 
 int64_t sys_rename(const char *oldpath, const char *newpath) {
     if (!oldpath || !newpath) return err(OSNOS_EFAULT);
-    return err(vfs_move(oldpath, newpath));
+    char absold[OSNOS_PATH_MAX], absnew[OSNOS_PATH_MAX];
+    osnos_status_t rs = resolve_path(oldpath, absold, sizeof(absold));
+    if (rs != OSNOS_OK) return err(rs);
+    rs = resolve_path(newpath, absnew, sizeof(absnew));
+    if (rs != OSNOS_OK) return err(rs);
+    return err(vfs_move(absold, absnew));
 }
 
 /* ------------------------------------------------------------------ */
@@ -1287,17 +1343,27 @@ int64_t sys_chdir(const char *path) {
     if (!path) return err(OSNOS_EFAULT);
 
     char kpath[OSNOS_PATH_MAX];
-    if (copy_from_user(kpath, path, OSNOS_PATH_MAX) != OSNOS_OK) {
-        return err(OSNOS_EFAULT);
+    size_t i = 0;
+    for (; i < OSNOS_PATH_MAX - 1; i++) {
+        char c;
+        if (copy_from_user(&c, path + i, 1) != OSNOS_OK)
+            return err(OSNOS_EFAULT);
+        kpath[i] = c;
+        if (c == 0) break;
     }
-    kpath[OSNOS_PATH_MAX - 1] = 0;
+    kpath[i] = 0;
+
+    /* Resolver relative paths via cwd actual. */
+    char abspath[OSNOS_PATH_MAX];
+    osnos_status_t rs = resolve_path(kpath, abspath, sizeof(abspath));
+    if (rs != OSNOS_OK) return err(rs);
 
     vfs_stat_t st;
-    osnos_status_t s = vfs_stat(kpath, &st);
+    osnos_status_t s = vfs_stat(abspath, &st);
     if (s != OSNOS_OK) return err(s);
     if (st.type != VFS_NODE_DIR) return err(OSNOS_ENOTDIR);
 
-    os_strlcpy(t->cwd, kpath, OSNOS_PATH_MAX);
+    os_strlcpy(t->cwd, abspath, OSNOS_PATH_MAX);
     return 0;
 }
 
@@ -1328,8 +1394,13 @@ int64_t sys_stat(const char *path, void *out) {
     }
     kpath[i] = 0;
 
+    /* Resolver relative paths via cwd. */
+    char abspath[OSNOS_PATH_MAX];
+    osnos_status_t rs = resolve_path(kpath, abspath, sizeof(abspath));
+    if (rs != OSNOS_OK) return err(rs);
+
     vfs_stat_t st;
-    osnos_status_t s = vfs_stat(kpath, &st);
+    osnos_status_t s = vfs_stat(abspath, &st);
     if (s != OSNOS_OK) return err(s);
 
     osnos_stat_t kout;
@@ -1357,10 +1428,21 @@ int64_t sys_access(const char *path, int mode) {
     if (!path) return err(OSNOS_EFAULT);
 
     char kpath[OSNOS_PATH_MAX];
-    if (copy_from_user(kpath, path, OSNOS_PATH_MAX) != OSNOS_OK) {
-        return err(OSNOS_EFAULT);
+    size_t i = 0;
+    for (; i < OSNOS_PATH_MAX - 1; i++) {
+        char c;
+        if (copy_from_user(&c, path + i, 1) != OSNOS_OK)
+            return err(OSNOS_EFAULT);
+        kpath[i] = c;
+        if (c == 0) break;
     }
-    kpath[OSNOS_PATH_MAX - 1] = 0;
+    kpath[i] = 0;
+
+    /* Resolver relative paths via cwd. */
+    char abspath[OSNOS_PATH_MAX];
+    osnos_status_t rs = resolve_path(kpath, abspath, sizeof(abspath));
+    if (rs != OSNOS_OK) return err(rs);
+    os_strlcpy(kpath, abspath, OSNOS_PATH_MAX);
 
     vfs_stat_t st;
     osnos_status_t s = vfs_stat(kpath, &st);
@@ -1686,6 +1768,13 @@ int64_t sys_resume(uint64_t pid) {
 
 #define USER_KSTACK_BYTES 16384
 
+/* Linux clone(2) flags relevantes para posix_spawn. */
+#define OSNOS_CLONE_VM    0x00000100u
+#define OSNOS_CLONE_VFORK 0x00004000u
+
+static int64_t sys_clone(uint64_t flags, uint64_t child_stack,
+                          uint64_t ptid, uint64_t ctid, uint64_t tls);
+
 int64_t sys_fork(void) {
     task_t *parent = task_current();
     if (!parent || !parent->pml4 || !parent->kernel_stack_top) {
@@ -1853,6 +1942,182 @@ int64_t sys_fork(void) {
     /* 8. Parent returns the child's pid. The child wakes up via
      *    user_task_trampoline's saved_valid path with rax=0. Both
      *    execute the instruction right after the `syscall`. */
+    return (int64_t)child->pid;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_clone (#56) — Linux clone(2). Soporta:                         */
+/*   - flags=SIGCHLD (alias de fork — caso musl `fork()`).            */
+/*   - flags=CLONE_VM|CLONE_VFORK|SIGCHLD (caso musl posix_spawn):    */
+/*     child comparte pml4 + arranca con `child_stack` como RSP +     */
+/*     parent suspende hasta exec/exit del child.                     */
+/* ptid/ctid/tls se aceptan pero no se usan (single-threaded sin TLS  */
+/* per-task hoy; el TLS del parent vía CLONE_VM ya se hereda por      */
+/* compartir el AS).                                                  */
+/* ------------------------------------------------------------------ */
+
+static int64_t sys_clone(uint64_t flags, uint64_t child_stack,
+                          uint64_t ptid, uint64_t ctid, uint64_t tls) {
+    (void)ptid; (void)ctid; (void)tls;
+
+    /* Sin CLONE_VM: fork plain. child_stack se ignora (POSIX fork
+     * usa el stack del parent, copia incluida). */
+    if (!(flags & OSNOS_CLONE_VM)) {
+        return sys_fork();
+    }
+
+    /* CLONE_VM requiere child_stack: el child debe arrancar en un
+     * stack DISTINTO al del parent (musl __clone push'ea fn+arg ahí
+     * antes del syscall). Sin stack válido el child clobbers el del
+     * parent y crashea cualquier cosa que ambos estén corriendo. */
+    if (!child_stack) return err(OSNOS_EINVAL);
+
+    task_t *parent = task_current();
+    if (!parent || !parent->pml4 || !parent->kernel_stack_top) {
+        return err(OSNOS_ESRCH);
+    }
+
+    /* 1. Alloc child kstack (NO clonar AS — compartido). */
+    void *child_kstack = kmalloc(USER_KSTACK_BYTES);
+    if (!child_kstack) return err(OSNOS_ENOMEM);
+
+    int child_pid_int = task_create(parent->name, parent->entry);
+    if (child_pid_int < 0) {
+        kfree(child_kstack);
+        return err(OSNOS_EMFILE);
+    }
+
+    task_t *child = task_by_pid((uint64_t)child_pid_int);
+    if (!child) {
+        kfree(child_kstack);
+        return err(OSNOS_ESRCH);
+    }
+
+    /* 2. Share parent's pml4. pml4_shared marca que NO somos dueños
+     *    exclusivos: exec/exit usan task_pml4_other_users para no
+     *    liberarlo prematuramente. */
+    child->pml4              = parent->pml4;
+    child->pml4_shared       = 1;
+    parent->pml4_shared      = 1;   /* parent también comparte ahora */
+    child->kernel_stack_top  = (uint64_t)child_kstack + USER_KSTACK_BYTES;
+    child->kernel_stack_base = child_kstack;
+
+    child->parent_pid        = parent->pid;
+    child->pgid              = parent->pgid;
+    child->sid               = parent->sid;
+    child->waiting_for_pid   = 0;
+    for (int i = 0; i < 32; i++) {
+        child->sa_handler [i] = parent->sa_handler [i];
+        child->sa_restorer[i] = parent->sa_restorer[i];
+    }
+    child->sig_pending = 0;
+
+    /* 3. fd table: igual que fork — child hereda todos los fds del
+     *    parent (con OFD refcount bump). POSIX clone con CLONE_VM
+     *    pero SIN CLONE_FILES copia fds; estamos en ese caso. */
+    for (int fd = 0; fd < OSNOS_MAX_FDS; fd++) {
+        if (child->fds[fd].used) {
+            int old = child->fds[fd].ofd_idx;
+            child->fds[fd].used     = false;
+            child->fds[fd].ofd_idx  = -1;
+            child->fds[fd].fd_flags = 0;
+            if (old >= 0) ofd_unref(old);
+        }
+        if (!parent->fds[fd].used) continue;
+        child->fds[fd] = parent->fds[fd];
+        if (parent->fds[fd].ofd_idx >= 0) {
+            ofd_ref(parent->fds[fd].ofd_idx);
+        }
+    }
+
+    /* 4. Copy cwd, brk, mmap, fpu, fs_base — todo igual que fork. */
+    for (int i = 0; i < OSNOS_PATH_MAX; i++) child->cwd[i] = parent->cwd[i];
+    child->heap_start     = parent->heap_start;
+    child->heap_brk       = parent->heap_brk;
+    child->user_entry     = parent->user_entry;
+    child->user_stack_top = child_stack;   /* CLONE_VM: stack nuevo */
+    child->mmap_next      = parent->mmap_next;
+    for (int i = 0; i < TASK_MMAP_MAX; i++) child->mmap_regions[i] = parent->mmap_regions[i];
+    for (int i = 0; i < (int)sizeof(child->fpu_state); i++) child->fpu_state[i] = parent->fpu_state[i];
+    child->fs_base = parent->fs_base;
+    child->kill_pending = 0;
+    child->stop_pending = 0;
+
+    /* 5. Snapshot syscall context del parent → child saved_*. Igual
+     *    que fork PERO con saved_iret_rsp = child_stack (override). */
+    uint64_t *iret = (uint64_t *)(parent->kernel_stack_top - 40);
+    child->saved_iret_rip    = iret[0];
+    child->saved_iret_cs     = iret[1];
+    child->saved_iret_rflags = iret[2];
+    child->saved_iret_rsp    = child_stack;  /* ← override del fork */
+    child->saved_iret_ss     = iret[4];
+
+    syscall_frame_t *sf =
+        (syscall_frame_t *)(parent->kernel_stack_top - 40 - sizeof(*sf));
+    child->saved_rax = 0;                /* clone() devuelve 0 en child */
+    child->saved_rbx = sf->rbx;
+    child->saved_rcx = sf->rcx;
+    child->saved_rdx = sf->rdx;
+    child->saved_rsi = sf->rsi;
+    child->saved_rdi = sf->rdi;
+    child->saved_rbp = sf->rbp;
+    child->saved_r8  = sf->r8;
+    child->saved_r9  = sf->r9;
+    child->saved_r10 = sf->r10;
+    child->saved_r11 = sf->r11;
+    child->saved_r12 = sf->r12;
+    child->saved_r13 = sf->r13;
+    child->saved_r14 = sf->r14;
+    child->saved_r15 = sf->r15;
+
+    child->saved_valid = 1;
+    child->state       = TASK_READY;
+
+    /* 6. CLONE_VFORK: parent se suspende hasta que child llame
+     *    execve o _exit. Al despertar, proc_execve_replace o
+     *    proc_exit_current_user setean parent->saved_rax = child_pid. */
+    if (flags & OSNOS_CLONE_VFORK) {
+        child->vfork_waiter_pid = parent->pid;
+        parent->state           = TASK_BLOCKED;
+        parent->wakeup_at_ms    = 0;   /* sin timeout */
+
+        /* Snapshot del parent también — al dispatchearlo de vuelta,
+         * user_task_trampoline ve saved_valid=1 y retoma con rax=
+         * child pid (lo escribe proc_execve_replace/proc_exit). Por
+         * ahora seedeamos rax con child->pid; si el child sale antes
+         * que termine el snapshot, ese valor se sobrescribe. */
+        uint64_t *piret = (uint64_t *)(parent->kernel_stack_top - 40);
+        parent->saved_iret_rip    = piret[0];
+        parent->saved_iret_cs     = piret[1];
+        parent->saved_iret_rflags = piret[2];
+        parent->saved_iret_rsp    = piret[3];
+        parent->saved_iret_ss     = piret[4];
+
+        syscall_frame_t *psf =
+            (syscall_frame_t *)(parent->kernel_stack_top - 40 - sizeof(*psf));
+        parent->saved_rax = (uint64_t)child->pid;   /* clone returns child pid */
+        parent->saved_rbx = psf->rbx;
+        parent->saved_rcx = psf->rcx;
+        parent->saved_rdx = psf->rdx;
+        parent->saved_rsi = psf->rsi;
+        parent->saved_rdi = psf->rdi;
+        parent->saved_rbp = psf->rbp;
+        parent->saved_r8  = psf->r8;
+        parent->saved_r9  = psf->r9;
+        parent->saved_r10 = psf->r10;
+        parent->saved_r11 = psf->r11;
+        parent->saved_r12 = psf->r12;
+        parent->saved_r13 = psf->r13;
+        parent->saved_r14 = psf->r14;
+        parent->saved_r15 = psf->r15;
+        parent->saved_valid = 1;
+
+        sched_resume_jump();
+        /* unreachable — scheduler dispatcheará child primero, parent
+         * espera bloqueado hasta wake. */
+    }
+
+    /* Sin VFORK: parent retorna child pid inmediato. */
     return (int64_t)child->pid;
 }
 
@@ -2211,12 +2476,16 @@ int64_t sys_execve(const char *u_path,
         return err(OSNOS_EFAULT);
     }
 
-    /* Walk argv: build a single space-separated args string from
-     * argv[1..N]. argv[0] is the program name — proc_execve_replace
-     * derives that from the path basename anyway. */
-    static char args_kbuf[SYS_EXECVE_ARGS_BUF];
-    args_kbuf[0] = 0;
-    size_t args_pos = 0;
+    /* Walk argv: copy cada string al staging buffer y armar un array
+     * NULL-terminated. NO concatenamos en un solo string con espacios
+     * — eso rompía argv elements que contenían espacios (e.g. busybox
+     * `sh -c "echo HELLO"` mandaba argv[2]="echo HELLO" como un único
+     * elemento; al re-tokenizar build_argv_block lo partía en dos).
+     * Esto se entrega tal cual a proc_execve_replace_argv. */
+    static char        argv_buf[SYS_EXECVE_ARGS_BUF];
+    static const char *argv_arr[SYS_EXECVE_MAX_ARGV + 1];
+    int    argc = 0;
+    size_t argv_pos = 0;
     if (u_argv) {
         for (int i = 0; i < SYS_EXECVE_MAX_ARGV; i++) {
             char *p_user = 0;
@@ -2224,27 +2493,30 @@ int64_t sys_execve(const char *u_path,
                 return err(OSNOS_EFAULT);
             }
             if (!p_user) break;
-            if (i == 0) continue;       /* skip argv[0] (program name) */
-
-            /* Copy this arg string into a small staging buffer. Use
-             * the string-aware copy so short strings near a page
-             * boundary don't trigger spurious EFAULT. */
-            char arg[128];
+            char arg[256];
             if (copy_string_from_user(arg, p_user, sizeof(arg)) != OSNOS_OK) {
                 return err(OSNOS_EFAULT);
             }
-
             size_t arg_len = 0;
             while (arg[arg_len]) arg_len++;
-            if (args_pos > 0) {
-                if (args_pos + 1 >= sizeof(args_kbuf)) return err(OSNOS_E2BIG);
-                args_kbuf[args_pos++] = ' ';
-            }
-            if (args_pos + arg_len + 1 > sizeof(args_kbuf)) return err(OSNOS_E2BIG);
-            for (size_t k = 0; k < arg_len; k++) args_kbuf[args_pos++] = arg[k];
-            args_kbuf[args_pos] = 0;
+            if (argv_pos + arg_len + 1 > sizeof(argv_buf)) return err(OSNOS_E2BIG);
+            argv_arr[argc] = argv_buf + argv_pos;
+            for (size_t k = 0; k <= arg_len; k++) argv_buf[argv_pos++] = arg[k];
+            argc++;
         }
     }
+    /* Si app pasó argv vacío, sintetizar argv[0] = basename(path). */
+    if (argc == 0) {
+        const char *base = kpath;
+        for (const char *p = kpath; *p; p++) if (*p == '/') base = p + 1;
+        size_t bl = 0;
+        while (base[bl]) bl++;
+        if (argv_pos + bl + 1 > sizeof(argv_buf)) return err(OSNOS_E2BIG);
+        argv_arr[0] = argv_buf + argv_pos;
+        for (size_t k = 0; k <= bl; k++) argv_buf[argv_pos++] = base[k];
+        argc = 1;
+    }
+    argv_arr[argc] = 0;
 
     /* Walk envp: copy pointer + each string into a buffer, build a
      * NULL-terminated kernel array pointing into it. */
@@ -2277,10 +2549,11 @@ int64_t sys_execve(const char *u_path,
     envp_arr[envc] = 0;
 
     /* All inputs in kernel memory — safe to tear down the user image
-     * inside proc_execve_replace without losing our args/envp. On
-     * success, that function never returns. */
-    int64_t rc = proc_execve_replace(kpath, args_kbuf,
-                                       envc > 0 ? envp_arr : 0);
+     * inside proc_execve_replace_argv without losing our args/envp.
+     * Usa la variante _argv que respeta boundaries; el path string
+     * tradicional aplanaba+re-tokenizaba (rompe `sh -c "echo X"`). */
+    int64_t rc = proc_execve_replace_argv(kpath, argv_arr,
+                                            envc > 0 ? envp_arr : 0);
     return rc;     /* only reached on failure */
 }
 
@@ -3049,6 +3322,19 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
             return pack(sys_kill(frame->rdi, (int)frame->rsi));
         case SYS_FORK:
             return pack(sys_fork());
+        case SYS_CLONE: {
+            /* Linux x86_64 ABI: rdi=flags, rsi=child_stack,
+             * rdx=ptid, r10=ctid, r8=tls. Si flags incluyen
+             * CLONE_VM|CLONE_VFORK (caso musl posix_spawn),
+             * sharing del AS + suspension del parent hasta exec/exit.
+             * Sino, delega a fork (musl `fork()` es clone(SIGCHLD,0)). */
+            return pack(sys_clone(
+                (uint64_t)frame->rdi,
+                (uint64_t)frame->rsi,
+                (uint64_t)frame->rdx,
+                (uint64_t)frame->r10,
+                (uint64_t)frame->r8));
+        }
         case SYS_SETPGID:
             return pack(sys_setpgid((uint64_t)frame->rdi, (uint64_t)frame->rsi));
         case SYS_GETPPID:

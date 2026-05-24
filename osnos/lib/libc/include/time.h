@@ -6,10 +6,13 @@
  * struct timespec — layout matches Linux x86_64 + osnos kernel
  * (osnos_timespec_t). Both fields are 8 bytes signed.
  */
+#ifndef _STRUCT_TIMESPEC_DEFINED
+#define _STRUCT_TIMESPEC_DEFINED
 struct timespec {
     time_t tv_sec;
     long   tv_nsec;
 };
+#endif
 
 int nanosleep(const struct timespec *req, struct timespec *rem);
 

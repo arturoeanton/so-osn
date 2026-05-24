@@ -17,6 +17,12 @@
 #define O_APPEND    0x0400
 #define O_NONBLOCK  0x0800
 
+/* *at(2) family — dirfd values + UTIME_NOW/OMIT para utimensat(). */
+#define AT_FDCWD          (-100)
+#define AT_SYMLINK_NOFOLLOW 0x100
+#define UTIME_NOW         ((1L << 30) - 1L)
+#define UTIME_OMIT        ((1L << 30) - 2L)
+
 int open(const char *path, int flags, ...);
 
 /*

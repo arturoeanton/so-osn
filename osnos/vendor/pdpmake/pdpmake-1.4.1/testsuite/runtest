@@ -1,0 +1,67 @@
+#!/bin/sh
+# Usage:
+# runtest [-v]
+
+. ./testing.sh
+
+total_failed=0
+
+lcwd=$(pwd)
+[ x"$tsdir" != x"" ] || tsdir="$lcwd"
+[ x"$bindir" != x"" ] || bindir="${lcwd%/*}" # one directory up from $lcwd
+
+if [ x"$VERBOSE" = x ]; then
+	export VERBOSE=
+fi
+
+if [ x"$1" = x"-v" ]; then
+	export VERBOSE=1
+	shift
+fi
+
+# Test whether the binary has non-POSIX extensions enabled.
+# Specifically, test whether double-colon rules are supported.
+unset PDPMAKE_POSIXLY_CORRECT
+export OPTIONFLAGS=":"
+if ../make -f - 2>/dev/null <<EOF
+target::
+	@:
+target::
+	@:
+EOF
+then
+	OPTIONFLAGS="${OPTIONFLAGS}FEATURE_MAKE_EXTENSIONS:"
+fi
+
+# Test whether the binary has POSIX 202X features enabled.
+# Specifically, test whether pattern macro expansion is supported.
+OBJ=$(../make -f - 2>/dev/null <<EOF
+SRC = src/util.c
+tatget:
+	@echo \$(SRC:src/%.c=obj/%.o)
+EOF
+)
+if [ "$OBJ" = "obj/util.o" ]
+then
+	OPTIONFLAGS="${OPTIONFLAGS}FEATURE_MAKE_POSIX_202X:"
+fi
+
+if [ "${OPTIONFLAGS}" = ":" ]
+then
+	OPTIONFLAGS="::"
+fi
+
+# The feature tests above required PDPMAKE_POSIXLY_CORRECT to be
+# unset.  To run the tests in POSIX mode uncomment the following.
+# export PDPMAKE_POSIXLY_CORRECT=1
+status=0
+PATH="$tsdir:$bindir:$PATH" \
+	"$tsdir/make.tests"
+rc=$?
+total_failed=$((total_failed + rc))
+test $rc -ne 0 && status=1
+
+if [ $status -ne 0 ] && [ x"$VERBOSE" = x ]; then
+	echo "$total_failed failure(s) detected; running with -v (verbose) will give more info"
+fi
+exit $status

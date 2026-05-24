@@ -73,6 +73,12 @@ int   getc   (FILE *f);
 int   getchar(void);
 char *fgets  (char *buf, int size, FILE *f);
 
+/* popen/pclose — stubs. Implementación real requiere pipes + fork +
+ * fdopen. Hoy retornan NULL/-1 para que apps que usen `$(shell ...)`
+ * opcional degraden sin crashear. */
+FILE *popen  (const char *cmd, const char *mode);
+int   pclose (FILE *f);
+
 int   fputc  (int c, FILE *f);
 int   putc   (int c, FILE *f);
 int   putchar(int c);

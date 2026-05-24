@@ -261,6 +261,23 @@ typedef struct task {
     uint64_t  fs_base;
 
     /*
+     * CLONE_VFORK bookkeeping (FASE 14.1).
+     *
+     * Cuando un task se crea via clone(CLONE_VM|CLONE_VFORK|...) (caso
+     * típico: musl posix_spawn), el parent se BLOQUEA hasta que el
+     * child llame execve o _exit. `vfork_waiter_pid` lleva el pid del
+     * parent suspendido; al `execve` o `proc_exit_current_user` del
+     * child, ese parent se marca READY de vuelta.
+     *
+     * `pml4_shared` indica que este task NO es dueño exclusivo de su
+     * pml4 — fue creado con CLONE_VM. En proc_exit / proc_execve el
+     * address_space_destroy se skip-ea (lo libera el último usuario
+     * que se descubra por lookup). 0 = dueño normal, 1 = compartido.
+     */
+    uint64_t  vfork_waiter_pid;
+    int       pml4_shared;
+
+    /*
      * Anonymous mmap regions. Bump-allocator: mmap_next points at
      * the next free virtual address, mmap_regions[] remembers each
      * live region so munmap can free its pages. VA isn't reclaimed
@@ -315,6 +332,14 @@ const task_t *task_slot(size_t idx);
 /* Mutable lookup by pid; used by proc_exec to finish setup right after
  * task_create. Returns NULL if no such task. */
 task_t *task_by_pid(uint64_t pid);
+
+/*
+ * pml4_other_users — cuántas OTRAS tasks vivas referencian este pml4.
+ * Necesario para CLONE_VM: el address_space_destroy en proc_exit /
+ * proc_execve sólo debe liberar el PML4 cuando soy el último usuario.
+ * `self_pid` se excluye del conteo (típicamente el caller).
+ */
+int task_pml4_other_users(uint64_t *pml4, uint64_t self_pid);
 
 /*
  * Walk the task table and convert every TASK_DEAD slot back to
