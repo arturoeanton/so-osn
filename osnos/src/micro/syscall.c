@@ -2103,13 +2103,26 @@ int64_t sys_fork(void) {
     for (int i = 0; i < (int)sizeof(child->fpu_state); i++) {
         child->fpu_state[i] = parent->fpu_state[i];
     }
-    /* fork copy: child inherits parent's TLS pointer. Esto es POSIX-
-     * correcto cuando el child no hace exec — la TLS vive en el
-     * address space CLONADO (mismas direcciones), así que el FS_BASE
-     * del parent sigue siendo válido en el child. SI el child hace
-     * execve después, proc_execve resetea fs_base a 0 explícitamente
-     * porque ahí el address space CAMBIA. */
-    child->fs_base = parent->fs_base;
+    /* fork copy: child inherits parent's TLS pointer. POSIX requiere
+     * que la TLS sobreviva fork (mismo address space). PERO
+     * `parent->fs_base` en task_t SOLO se sincroniza con el MSR
+     * cuando hay un task switch (rdmsr en task_run_next). Si fork()
+     * es llamado SIN un switch previo desde que el parent seteó
+     * %fs vía arch_prctl, el campo task_t.fs_base queda stale (0).
+     * El child entonces hereda 0 y su primer acceso a %fs:0 fault-ea.
+     * Esto es exactamente el boot fault de busybox (cr2=0 dentro de
+     * __post_Fork's __get_tp). Fix: rdmsr ACÁ para capturar el FS
+     * vivo del parent y propagar al child. */
+    {
+        uint32_t lo, hi;
+        __asm__ volatile ("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000100));
+        uint64_t live_fs = ((uint64_t)hi << 32) | lo;
+        child->fs_base   = live_fs;
+        /* También actualizar el snapshot del parent — task_run_next
+         * lo va a hacer de nuevo en el próximo switch, pero
+         * mantenemos consistencia ahora. */
+        parent->fs_base  = live_fs;
+    }
 
     /* Both kill_pending / stop_pending stay 0 in the child. Even if
      * the parent had them set (mid-Ctrl+C), fork should give the
@@ -2249,7 +2262,15 @@ static int64_t sys_clone(uint64_t flags, uint64_t child_stack,
     child->mmap_next      = parent->mmap_next;
     for (int i = 0; i < TASK_MMAP_MAX; i++) child->mmap_regions[i] = parent->mmap_regions[i];
     for (int i = 0; i < (int)sizeof(child->fpu_state); i++) child->fpu_state[i] = parent->fpu_state[i];
-    child->fs_base = parent->fs_base;
+    /* Capturar FS_BASE vivo del parent (rdmsr) en vez de leer el
+     * snapshot stale en task_t. Mismo razonamiento que sys_fork. */
+    {
+        uint32_t lo, hi;
+        __asm__ volatile ("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000100));
+        uint64_t live_fs = ((uint64_t)hi << 32) | lo;
+        child->fs_base   = live_fs;
+        parent->fs_base  = live_fs;
+    }
     child->kill_pending = 0;
     child->stop_pending = 0;
 

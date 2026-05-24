@@ -19,6 +19,7 @@
  */
 
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +54,10 @@ static char *tcctest_argv    [] = {"tcctest",     0};
 static char *luatest_argv    [] = {"luatest",     0};
 static char *jqtest_argv     [] = {"jqtest",      0};
 static char *libctest_argv   [] = {"libctest",    0};
+/* FASE 14 — infra moderna. */
+static char *unixtest_argv   [] = {"unixtest",    0};   /* AF_UNIX sockets */
+static char *shmtest_argv    [] = {"shmtest",     0};   /* POSIX SHM + mmap MAP_SHARED */
+static char *hello_dyn_argv  [] = {"hello_dyn",   0};   /* Dynamic linking via ld-musl */
 
 static test_t tests[] = {
     /* Order roughly by dependency: kernel ABI first (kerntest),
@@ -76,6 +81,10 @@ static test_t tests[] = {
     {"luatest",     "/bin/luatest",     luatest_argv    },
     {"jqtest",      "/bin/jqtest",      jqtest_argv     },
     {"libctest",    "/bin/libctest",    libctest_argv   },
+    /* FASE 14 — infraestructura moderna (POSIX IPC + dynamic linking). */
+    {"unixtest",    "/bin/unixtest",    unixtest_argv   },
+    {"shmtest",     "/bin/shmtest",     shmtest_argv    },
+    {"hello_dyn",   "/bin/hello_dyn",   hello_dyn_argv  },
 };
 
 #define N_TESTS ((int)(sizeof(tests) / sizeof(tests[0])))
@@ -131,21 +140,37 @@ int main(int argc, char **argv) {
             _exit(127);
         }
 
-        int status = 0;
-        pid_t r = waitpid(pid, &status, 0);
+        /* Poll-based wait con timeout. Sin esto, un test que se cuelga
+         * (read bloqueante sin EOF, loop infinito, etc) bloquea TODA
+         * la suite. 60 segundos es suficiente para los tests más
+         * lentos (tcctest, jqtest tardan ~10s en QEMU). */
+        int status   = 0;
+        pid_t r      = -1;
+        int   t_max  = 60 * 10;  /* 60s × 100ms ticks */
+        for (int t = 0; t < t_max; t++) {
+            r = waitpid(pid, &status, 1 /* WNOHANG */);
+            if (r == pid) break;
+            if (r < 0)    { results[i] = -1; break; }
+            usleep(100000); /* 100 ms */
+        }
         if (r != pid) {
+            /* Timeout — kill and reap. Marker -2 = TIMEOUT en summary. */
             fprintf(stderr,
-                    "alltest: waitpid %s failed: r=%d errno=%d\n",
-                    tests[i].name, (int)r, errno);
-            results[i] = -1;
-        } else if (WIFEXITED(status)) {
-            results[i] = WEXITSTATUS(status);
-        } else if (WIFSIGNALED(status)) {
-            /* Signal-killed → reflect as 128 + signum (POSIX
-             * convention; matches what shellsrv shows for kill 9). */
-            results[i] = 128 + WTERMSIG(status);
-        } else {
-            results[i] = -1;   /* shouldn't happen */
+                    "alltest: %s TIMEOUT after 60s — killing\n",
+                    tests[i].name);
+            kill(pid, 9);
+            waitpid(pid, &status, 0);
+            results[i] = -2;
+        } else if (r == pid) {
+            if (WIFEXITED(status)) {
+                results[i] = WEXITSTATUS(status);
+            } else if (WIFSIGNALED(status)) {
+                /* Signal-killed → reflect as 128 + signum (POSIX
+                 * convention; matches what shellsrv shows for kill 9). */
+                results[i] = 128 + WTERMSIG(status);
+            } else {
+                results[i] = -1;   /* shouldn't happen */
+            }
         }
     }
 
@@ -166,9 +191,10 @@ int main(int argc, char **argv) {
     rule();
     for (int i = 0; i < N_TESTS; i++) {
         const char *tag;
-        if      (results[i] == 0) tag = "PASS ";
-        else if (results[i] <  0) tag = "ERROR";
-        else                      tag = "FAIL ";
+        if      (results[i] ==  0) tag = "PASS   ";
+        else if (results[i] == -2) tag = "TIMEOUT";
+        else if (results[i] <   0) tag = "ERROR  ";
+        else                       tag = "FAIL   ";
         printf("  %s  %-14s  (exit=%d)\n",
                tag, tests[i].name, results[i]);
     }

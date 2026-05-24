@@ -5,10 +5,13 @@ desde cero. Bootea con Limine, corre en QEMU, y trae **BusyBox ash
 1.36.1** como shell de sistema linkeado contra **musl 1.2.5**, FAT16
 persistente, **cuatro lenguajes self-host** (C via TCC + Lua + jq +
 **SQL via SQLite**), un **mini-X window system propio (Ox)** con
-notepad/calculadora/terminal/file-browser/settings, ~70 syscalls
-Linux x86_64-compatibles, y un microkernel de ~25K LOC con ELF
-loader + paging propio + scheduler preemptivo + IPC + line discipline
-POSIX completa.
+notepad/calculadora/terminal/file-browser/settings, **POSIX make
+self-host** (`cd /home && make hello && ./hello` compila con tcc
+desde adentro), **AF_UNIX sockets**, **POSIX shared memory**
+(`shm_open` + `mmap MAP_SHARED`), **dynamic linking via ld-musl.so**
+(apps dyn-linked corren), ~70+ syscalls Linux x86_64-compatibles, y
+un microkernel de ~25K LOC con ELF loader + paging propio +
+scheduler preemptivo + IPC + line discipline POSIX completa.
 
 ```
    osnos x86_64 — BusyBox ash 1.36.1 + musl (init shell, FASE 13.1)
@@ -354,10 +357,18 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | FB ioctls Linux-compat: `FBIOGET_VSCREENINFO`, `FBIO_BLIT` | ✅ |
 | `/home` alias a `/sd/home` (idem `/etc`, `/bin`, `/lib`, `/usr`) | ✅ |
 | `getcwd` / `chdir` syscalls + per-task cwd | ✅ |
-| 18/18 tests automatizados via `/bin/alltest` | ✅ |
+| **🎉 `make` POSIX (`/bin/make` = pdpmake) — `cd /home && make hello` self-host con tcc** (FASE 14.1) | ✅ |
+| **🎉 `AF_UNIX` SOCK_STREAM** (path namespace + socket/bind/listen/accept/connect/read/write) (FASE 14.2) | ✅ |
+| **🎉 POSIX `shm_open` + `mmap(MAP_SHARED, fd)`** — shared memory cross-fork (FASE 14.3) | ✅ |
+| **🎉 Dynamic linking** via `ld-musl-x86_64.so.1` + `/lib/libc.so` — PT_INTERP, auxv completo, app dyn-linked corre (FASE 14.4) | ✅ |
+| **`SYS_CLONE` real** con `CLONE_VM` + `CLONE_VFORK` (posix_spawn de musl) | ✅ |
+| **POSIX `execve` reset de signal handlers a SIG_DFL** (sin esto SIGCHLD heredado jumped a interp text del binario viejo) | ✅ |
+| **`sys_execve` preserva argv boundaries** (no flat-join + re-tokenize) | ✅ |
+| **rdmsr FS_BASE en fork** (sin esto musl `__post_Fork` NULL-deref en %fs:0 al primer fork pre-task-switch) | ✅ |
+| 20/21 tests automatizados via `/bin/alltest` (incluye unixtest + shmtest + hello_dyn) | ✅ |
 | SMP (multi-core) | ❌ |
 | Copy-on-write para fork | ❌ |
-| File-backed mmap | ❌ |
+| File-backed mmap de archivos regulares | ❌ |
 | Real X11 / tinyX (Ox es protocolo propio) | ❌ |
 
 ---
@@ -491,12 +502,23 @@ querés invocarlo como command nativo (FAT16 no soporta symlinks).
 
 Detalle en [`osnos/STATUS.md`](osnos/STATUS.md). Resumen:
 
-**Corto plazo (FASE 14)** — quality of life:
+**FASE 14 (CERRADA)** — infraestructura moderna POSIX:
+- ✅ 14.1 — POSIX `make` (pdpmake) + `make hello && ./hello` end-to-end self-host con tcc
+- ✅ 14.2 — `AF_UNIX` SOCK_STREAM (pool sockets + path namespace + ring buffer)
+- ✅ 14.3 — POSIX SHM (`shm_open` + `mmap(MAP_SHARED, fd)`) + fork preserva pages compartidas
+- ✅ 14.4 — Dynamic linking via `ld-musl-x86_64.so.1`, PT_INTERP + auxv completo
+
+**FASE 14.x pendiente (quality of life)**:
 - Per-PTY termios real (cada shell/REPL su propio termios)
 - Fix de argv passing en sqlite3
 - `/proc` synthetic (al menos `/proc/<pid>/cmdline`, `/proc/meminfo`)
 - Más BusyBox: `top`, `ps`, `free`, `uptime`
 - Chip-8 emulator (último item del roadmap original gráfico)
+
+**FASE 15 — GUI extendida (en discusión)**:
+- Opción A: `xeyes-via-Ox` (cliente nativo Ox)
+- Opción B: vendorizar nano-X (~20K LOC) sobre FBDEV
+- Opción C: X11 wire protocol mínimo bind a `/tmp/.X11-unix/X0` via AF_UNIX (ahora posible)
 
 **Mediano plazo (FASE 15)** — drivers a ring 3:
 - IRQ delegation por IPC

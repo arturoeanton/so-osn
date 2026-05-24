@@ -44,7 +44,11 @@ static long sys_taskinfo_raw(size_t idx, osnos_taskinfo_t *out) {
     __asm__ volatile (
         "syscall"
         : "=a"(ret)
-        : "a"(265 /* SYS_TASKINFO */),
+        : "a"(515 /* SYS_TASKINFO — movido de 265 a 515 en FASE 13.1
+                   * para no chocar con Linux newfstatat (#262) que
+                   * musl usa internamente. Sin este update, kerntest
+                   * llamaba un syscall basura y todos los chequeos
+                   * de taskinfo fallaban en silencio. */),
           "D"(idx), "S"((long)out),
           "r"(r10), "r"(r8), "r"(r9)
         : "rcx", "r11", "memory"
@@ -66,25 +70,28 @@ static void test_taskinfo(void) {
         long r = sys_taskinfo_raw(i, &info);
         if (r < 0) continue;             /* unused slot or out of range */
 
-        /* Shell server: "shell" pre-FASE-10.4, "shellsrv" once it
-         * migrates to a ring-3 ELF (the FASE 10.4 chunk-5 swap).
-         * Either name counts. */
+        /* Shell server: "shell" pre-FASE-10.4, "shellsrv" en FASE 10.4
+         * (custom ring-3 shell ELF), "busybox" desde FASE 13.1
+         * (BusyBox 1.36.1 ash linkeado contra musl reemplaza a
+         * shellsrv como init shell). Cualquier nombre cuenta. */
         if (strcmp(info.name, "shell")    == 0 ||
-            strcmp(info.name, "shellsrv") == 0) saw_shell++;
+            strcmp(info.name, "shellsrv") == 0 ||
+            strcmp(info.name, "busybox")  == 0 ||
+            strcmp(info.name, "sh")       == 0) saw_shell++;
         if (strcmp(info.name, "keyboard") == 0) saw_keyboard++;
-        /* Console server: "console" pre-FASE-10.1, "consrv" once
-         * it migrates to a ring-3 ELF. Either name counts. */
+        /* Console server: "console" pre-FASE-10.1, "consrv" desde
+         * FASE 10.1 (ring-3 ELF). Cualquier nombre cuenta. */
         if (strcmp(info.name, "console")  == 0 ||
             strcmp(info.name, "consrv")   == 0) saw_console++;
         if ((long)info.pid == my_pid)           saw_self++;
         if (info.is_user)                       n_user++;
     }
 
-    CHECK(saw_shell    == 1, "taskinfo: shell server present");
+    CHECK(saw_shell    == 1, "taskinfo: shell server present (busybox/shellsrv)");
     CHECK(saw_keyboard == 1, "taskinfo: keyboard feeder present");
-    CHECK(saw_console  == 1, "taskinfo: console server present");
+    CHECK(saw_console  == 1, "taskinfo: console server present (consrv)");
     CHECK(saw_self     == 1, "taskinfo: own task visible");
-    CHECK(n_user       >= 2, "taskinfo: at least two ring-3 tasks (consrv+kbdsrv)");
+    CHECK(n_user       >= 2, "taskinfo: at least two ring-3 tasks");
 
     /* Walking past the slot table returns -ENOENT cleanly. */
     osnos_taskinfo_t dummy;
