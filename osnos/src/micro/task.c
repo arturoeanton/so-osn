@@ -99,6 +99,17 @@ void task_run_next(void) {
         task_t *prev = &tasks[prev_index];
         if (prev->state != TASK_UNUSED) {
             fpu_save(prev->fpu_state);
+            /* Snapshot MSR_FS_BASE — TLS pointer del task saliente.
+             * musl errno, pthread_self, stack-protector cookie todos
+             * viven en %fs:offset, así que sin save/restore un task
+             * hereda el FS_BASE del que corrió antes. */
+            if (prev->pml4) {
+                uint32_t lo, hi;
+                __asm__ volatile ("rdmsr"
+                    : "=a"(lo), "=d"(hi)
+                    : "c"(0xC0000100));   /* MSR_FS_BASE */
+                prev->fs_base = ((uint64_t)hi << 32) | lo;
+            }
         }
     }
 
@@ -119,6 +130,17 @@ void task_run_next(void) {
          * cycles and the regs are already correct. */
         if (current_index != prev_index) {
             fpu_restore(task->fpu_state);
+            /* Restaurar MSR_FS_BASE del task entrante (ver comment
+             * arriba en el save path). 0 es válido — tasks recién
+             * spawneados aún no han ejecutado arch_prctl. */
+            if (task->pml4) {
+                uint64_t fs = task->fs_base;
+                uint32_t lo = (uint32_t)fs;
+                uint32_t hi = (uint32_t)(fs >> 32);
+                __asm__ volatile ("wrmsr"
+                    :
+                    : "a"(lo), "d"(hi), "c"(0xC0000100));
+            }
         }
 
         if (task->entry) {

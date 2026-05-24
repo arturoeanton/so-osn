@@ -191,13 +191,15 @@ USER_ELF_LIBC_SRCS := \
 
 # musl-linked ELFs (vendor/musl). Declared early so USER_ELF_LIST sees it.
 USER_ELF_MUSL_SRCS := elfs/tests/hello_musl.c elfs/tests/poll_musl.c elfs/tests/ls_musl.c
+USER_ELF_MUSL_EXTRA := $(BUILD)/elfs/tools/sqlite3.elf
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_MUSL_SRCS)) \
                  $(BUILD)/elfs/tools/tcc.elf \
                  $(BUILD)/elfs/tools/lua.elf \
-                 $(BUILD)/elfs/tools/jq.elf
+                 $(BUILD)/elfs/tools/jq.elf \
+                 $(BUILD)/elfs/tools/sqlite3.elf
 
 # ---------------------------------------------------------------------------
 # Fase 2 disk-resident: split the embedded set into ROM (small, kept inside
@@ -329,6 +331,17 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBTCC1_A) $(CRTI_O) $(CRTN
 	@# Wallpaper PPMs (FASE 12).
 	mcopy -i $@ $(WALLPAPER_TMP)/samurai.ppm ::/home/wallpapers/samurai.ppm
 	mcopy -i $@ $(WALLPAPER_TMP)/girl.ppm    ::/home/wallpapers/girl.ppm
+	@# SQLite demo DB (FASE 13.3) — pre-poblada con tablas books/users/
+	@# checkouts + view + indices, lista para `sqlite3 /home/demo.db
+	@# "SELECT ..."`. SQL fuente en res/demo.sql; regenera demo.db
+	@# en disco con sqlite3 host antes de copiarla.
+	@if [ -f res/demo.sql ] && command -v sqlite3 >/dev/null; then \
+	    rm -f res/demo.db; sqlite3 res/demo.db < res/demo.sql; \
+	fi
+	@if [ -f res/demo.db ]; then \
+	    mcopy -i $@ res/demo.db ::/home/demo.db; \
+	    mcopy -i $@ res/demo.sql ::/home/demo.sql; \
+	fi
 	@# Copy every built ELF into /bin/, stripping the .elf extension so
 	@# shellsrv's PATH lookup finds /bin/cat (not /bin/cat.elf).
 	@for elf in $(USER_ELF_LIST); do \
@@ -504,6 +517,52 @@ $(BUILD)/elfs/tests/ls_musl.elf: elfs/tests/ls_musl.c elfs/musl.lds \
 	$(LD) $(MUSL_LDFLAGS) -T elfs/musl.lds \
 	    $(MUSL_CRT1) $(MUSL_CRTI) $@.tmp.o $(MUSL_LIB) $(MUSL_CRTN) -o $@
 	rm $@.tmp.o
+
+# --------------------------------------------------------------------------
+# SQLite 3.45.2 port — FASE 13.3. Vendor amalgamation (sqlite3.c + shell.c
+# + sqlite3.h, ~290k LOC en 1 file). Linkea contra musl (necesita stdio
+# completo). Defines:
+#   - THREADSAFE=0   no pthread (osnos es single-task per shell)
+#   - DEFAULT_MEMSTATUS=0   menos overhead
+#   - OMIT_LOAD_EXTENSION   no dlopen
+#   - OMIT_DEPRECATED   pruning
+#   - OMIT_WAL   sin Write-Ahead-Logging (necesita file locking real)
+#   - DEFAULT_TEMP_STORE=2   temp tables en memoria
+#   - OMIT_AUTHORIZATION + OMIT_PROGRESS_CALLBACK   pruning
+#   - HAVE_USLEEP=1   acepta sleep en us
+#   - HAVE_FCHOWN=0   no chown
+#   - HAVE_READLINK=0   no symlinks
+#   - HAVE_LSTAT=0   alias de stat
+#   - DISABLE_LFS=0   FAT16 maneja >2GB en teoría
+#   - SHELL_NO_SYSCALLS=0   shell.c usa system() opcional — lo desactiva
+# Build: ~6 MB ELF estático.
+SQLITE_DIR    := vendor/sqlite
+SQLITE_CFLAGS := -DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 \
+                 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_DEPRECATED \
+                 -DSQLITE_OMIT_WAL -DSQLITE_DEFAULT_TEMP_STORE=2 \
+                 -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_AUTOINIT \
+                 -DHAVE_USLEEP=1 -DSQLITE_USE_URI=0 \
+                 -DSQLITE_DEFAULT_FOREIGN_KEYS=1 \
+                 -DSQLITE_ENABLE_COLUMN_METADATA \
+                 -DSQLITE_DEFAULT_LOCKING_MODE=1 \
+                 -DSQLITE_NO_SYNC=1 \
+                 -DSQLITE_DEFAULT_MMAP_SIZE=0 -DSQLITE_MAX_MMAP_SIZE=0 \
+                 -w
+
+$(BUILD)/$(SQLITE_DIR)/sqlite3.c.o: $(SQLITE_DIR)/sqlite3.c
+	mkdir -p "$(dir $@)"
+	$(CC) $(MUSL_CFLAGS) $(SQLITE_CFLAGS) -I$(SQLITE_DIR) -c $< -o $@
+
+$(BUILD)/$(SQLITE_DIR)/shell.c.o: $(SQLITE_DIR)/shell.c
+	mkdir -p "$(dir $@)"
+	$(CC) $(MUSL_CFLAGS) $(SQLITE_CFLAGS) -I$(SQLITE_DIR) -c $< -o $@
+
+$(BUILD)/elfs/tools/sqlite3.elf: $(BUILD)/$(SQLITE_DIR)/sqlite3.c.o $(BUILD)/$(SQLITE_DIR)/shell.c.o \
+        elfs/musl.lds $(MUSL_LIB) $(MUSL_CRT1) $(MUSL_CRTI) $(MUSL_CRTN)
+	mkdir -p "$(dir $@)"
+	$(LD) $(MUSL_LDFLAGS) -T elfs/musl.lds \
+	    $(MUSL_CRT1) $(MUSL_CRTI) $(BUILD)/$(SQLITE_DIR)/sqlite3.c.o $(BUILD)/$(SQLITE_DIR)/shell.c.o \
+	    $(MUSL_LIB) $(MUSL_CRTN) -o $@
 
 # --------------------------------------------------------------------------
 # TinyCC port — FASE 11.0. Vendor tree at vendor/tinycc/ (release 0.9.27).

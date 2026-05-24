@@ -42,7 +42,7 @@ typedef struct kblock {
 #define KHEAP_VIRT_BASE   0xffffc00000000000ULL
 #define KHEAP_INIT_PAGES  16
 #define KHEAP_GROW_PAGES  16
-#define KHEAP_MAX_BYTES   (4ULL * 1024 * 1024)   /* 4 MiB hard cap */
+#define KHEAP_MAX_BYTES   (32ULL * 1024 * 1024)  /* 32 MiB hard cap — sqlite ELF es 5 MB y proc_execve aloca el blob entero acá; bumpado de 4 MB en FASE 13.3 (sqlite port) */
 
 static kblock_t *heap_head;
 static size_t    heap_total;

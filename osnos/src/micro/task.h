@@ -249,6 +249,18 @@ typedef struct task {
     uint8_t   fpu_state[512] __attribute__((aligned(16)));
 
     /*
+     * Per-task FS_BASE (MSR_FS_BASE = 0xC0000100). musl + glibc
+     * usan %fs como thread pointer (TLS); errno y otros locals
+     * viven en %fs:offset. arch_prctl(ARCH_SET_FS, addr) escribe
+     * el MSR pero NO es per-task automáticamente — sin save/restore
+     * en task switch, el task entrante hereda el FS de quien corrió
+     * antes. Sintomas: __errno_location() page fault al primer acceso
+     * desde ash post-sqlite3-exit. Resuelto guardando aquí en
+     * task_run_next y restaurando al despachar.
+     */
+    uint64_t  fs_base;
+
+    /*
      * Anonymous mmap regions. Bump-allocator: mmap_next points at
      * the next free virtual address, mmap_regions[] remembers each
      * live region so munmap can free its pages. VA isn't reclaimed

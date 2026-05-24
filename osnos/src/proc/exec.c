@@ -681,6 +681,13 @@ static int64_t task_create_user_elf(
     t->user_stack_top    = init_rsp;
     t->heap_start        = USER_HEAP_BASE;
     t->heap_brk          = USER_HEAP_BASE;
+    /* Reset MSR_FS_BASE snapshot — el nuevo address space no tiene
+     * la TLS del parent, y musl __init_libc va a hacer arch_prctl
+     * temprano en el startup. Sin esto, el child hereda el fs_base
+     * del parent (apuntando a TLS válida en pml4 del parent pero
+     * inválida en el pml4 nuevo del child) → page fault inmediato
+     * al primer acceso a errno via %fs:offset. */
+    t->fs_base           = 0;
 
     /* POSIX job-control defaults: a freshly-spawned top-level task
      * is its own session leader of its own one-task process group.
@@ -922,11 +929,12 @@ void proc_exit_current_user(int exit_code) {
 /*
  * Maximum ELF blob we'll slurp from the VFS for an out-of-/bin
  * exec. Has to fit in the kernel heap (whose cap is 4 MiB today),
- * minus headroom for argv/envp/per-task structures. 2 MiB is
- * comfortably enough for TCC-class binaries (~200 KiB) and any
- * reasonable hand-written program.
+ * minus headroom for argv/envp/per-task structures. SQLite is
+ * ~5 MB linked against musl, BusyBox ~1.3 MB, TCC/Lua/jq ~1 MB.
+ * 16 MiB cap leaves plenty of headroom para próximos vendor ports
+ * (postgres-lite, perl, ruby) sin tener que tocar esto otra vez.
  */
-#define EXEC_VFS_BLOB_MAX (2 * 1024 * 1024)
+#define EXEC_VFS_BLOB_MAX (16 * 1024 * 1024)
 
 int64_t proc_execve(const char *path, const char *args,
                      const char *const *envp) {
@@ -1125,6 +1133,11 @@ int64_t proc_execve_replace(const char *path, const char *args,
     t->saved_valid       = 0;
     t->kill_pending      = 0;
     t->stop_pending      = 0;
+    /* Reset TLS base — el address space cambió, fs_base del image
+     * anterior no es válido en el nuevo. Mismo razonamiento que en
+     * task_create_user_elf. musl __init_libc lo va a setear al
+     * arrancar el nuevo programa via arch_prctl(ARCH_SET_FS). */
+    t->fs_base           = 0;
     t->mmap_next         = 0;
     for (int i = 0; i < TASK_MMAP_MAX; i++) {
         t->mmap_regions[i].addr = 0;

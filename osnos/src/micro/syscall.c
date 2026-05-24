@@ -1804,6 +1804,13 @@ int64_t sys_fork(void) {
     for (int i = 0; i < (int)sizeof(child->fpu_state); i++) {
         child->fpu_state[i] = parent->fpu_state[i];
     }
+    /* fork copy: child inherits parent's TLS pointer. Esto es POSIX-
+     * correcto cuando el child no hace exec — la TLS vive en el
+     * address space CLONADO (mismas direcciones), así que el FS_BASE
+     * del parent sigue siendo válido en el child. SI el child hace
+     * execve después, proc_execve resetea fs_base a 0 explícitamente
+     * porque ahí el address space CAMBIA. */
+    child->fs_base = parent->fs_base;
 
     /* Both kill_pending / stop_pending stay 0 in the child. Even if
      * the parent had them set (mid-Ctrl+C), fork should give the
@@ -2491,6 +2498,23 @@ int64_t sys_fcntl(int fd, int cmd, int64_t arg) {
         f->flags = (f->flags & ~mutable_mask) | ((int)arg & mutable_mask);
         return 0;
     }
+    case 5:  /* F_GETLK — pretend lock is free */
+    case 6:  /* F_SETLK — pretend we got the lock */
+    case 7:  /* F_SETLKW — same */
+    case 36: /* F_OFD_GETLK */
+    case 37: /* F_OFD_SETLK */
+    case 38: /* F_OFD_SETLKW */
+        /* osnos es single-process effectivamente (multi-task pero sin
+         * cross-process file sharing real); SQLite + cualquier app
+         * que use POSIX advisory locks puede asumir success. Linux
+         * permite F_SETLK retornar 0 sin tocar nada. */
+        return 0;
+    case 1030: /* F_DUPFD_CLOEXEC — like F_DUPFD pero set CLOEXEC */ {
+        int r = fd_dup_min(task_current(), fd, (int)arg);
+        if (r < 0) return err(OSNOS_EMFILE);
+        fd_set_flags(task_current(), r, OSNOS_FD_CLOEXEC);
+        return r;
+    }
     default:
         return err(OSNOS_EINVAL);
     }
@@ -3139,6 +3163,97 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
             return pack(sys_clock_gettime(
                 (int)frame->rdi,
                 (void *)frame->rsi));
+        case SYS_GETTIMEOFDAY: {
+            /* musl + sqlite usan esto. tv = {sec, usec}; tz ignorado.
+             * Convertimos timer_ms a sec/usec. */
+            struct { int64_t sec; int64_t usec; } tv;
+            uint64_t ms = timer_ms();
+            tv.sec  = (int64_t)(ms / 1000);
+            tv.usec = (int64_t)((ms % 1000) * 1000);
+            if (frame->rdi) {
+                if (copy_to_user((void *)frame->rdi, &tv, sizeof(tv)) != OSNOS_OK)
+                    return pack(-(int64_t)OSNOS_EFAULT);
+            }
+            return 0;
+        }
+        case SYS_FSYNC:
+        case SYS_FDATASYNC: {
+            /* osnos no tiene write-back cache (FAT16 escribe sync), así
+             * que sync es no-op. Solo validamos que el fd existe. */
+            int fd = (int)frame->rdi;
+            osnos_fd_t *f = fd_get(task_current(), fd);
+            if (!f) return pack(-(int64_t)OSNOS_EBADF);
+            return 0;
+        }
+        case SYS_FTRUNCATE: {
+            /* sqlite necesita truncar el journal file. fd → path, luego
+             * vfs_truncate. */
+            int fd = (int)frame->rdi;
+            uint64_t len = (uint64_t)frame->rsi;
+            osnos_fd_t *f = fd_get(task_current(), fd);
+            if (!f) return pack(-(int64_t)OSNOS_EBADF);
+            if (f->is_dir) return pack(-(int64_t)OSNOS_EISDIR);
+            if (f->is_special || f->is_pipe || f->is_pty || f->is_socket || f->is_chr)
+                return pack(-(int64_t)OSNOS_EINVAL);
+            /* Truncate via vfs_write con buffer vacío + el size adecuado.
+             * Si len == 0: vfs_write con "" + size=0 trunca. Para len > 0:
+             * leemos los primeros len bytes y re-escribimos. */
+            if (len == 0) {
+                osnos_status_t s = vfs_write(f->path, "", 0);
+                if (s != OSNOS_OK) return pack(-(int64_t)s);
+                return 0;
+            }
+            /* Truncate-to-size > 0: read up to `len`, rewrite. Si el
+             * archivo es más chico que len, hay que padding con zeros
+             * (POSIX ftruncate). */
+            extern void *kmalloc(size_t);
+            extern void kfree(void *);
+            uint64_t cap = len < (4 * 1024 * 1024) ? len : (4 * 1024 * 1024);
+            char *buf = (char *)kmalloc((size_t)cap + 1);
+            if (!buf) return pack(-(int64_t)OSNOS_ENOMEM);
+            size_t got = 0;
+            osnos_status_t s = vfs_read_at(f->path, 0, buf, (size_t)cap, &got);
+            if (s != OSNOS_OK) { kfree(buf); return pack(-(int64_t)s); }
+            /* Si needed > got, pad con zeros */
+            if (len > got) {
+                for (size_t i = got; i < (size_t)cap; i++) buf[i] = 0;
+                got = (size_t)cap;
+            } else if (len < got) {
+                got = (size_t)len;
+            }
+            s = vfs_write(f->path, buf, got);
+            kfree(buf);
+            if (s != OSNOS_OK) return pack(-(int64_t)s);
+            return 0;
+        }
+        case SYS_GETRANDOM: {
+            /* musl + sqlite usan getrandom para entropy. flags ignorados.
+             * Llenamos buffer con PRNG xorshift seeded por timer. No es
+             * cryptographic-grade, pero sqlite solo lo usa para temp file
+             * naming + sqlite_randomness(). */
+            void *buf = (void *)frame->rdi;
+            size_t len = (size_t)frame->rsi;
+            /* flags = frame->rdx — ignored (GRND_NONBLOCK/GRND_RANDOM) */
+            if (!buf && len > 0) return pack(-(int64_t)OSNOS_EFAULT);
+            static uint64_t prng_state = 0;
+            if (prng_state == 0) prng_state = timer_ms() | 1;
+            char scratch[256];
+            size_t total = 0;
+            while (total < len) {
+                size_t chunk = len - total;
+                if (chunk > sizeof(scratch)) chunk = sizeof(scratch);
+                for (size_t i = 0; i < chunk; i++) {
+                    prng_state ^= prng_state << 13;
+                    prng_state ^= prng_state >> 7;
+                    prng_state ^= prng_state << 17;
+                    scratch[i] = (char)(prng_state & 0xff);
+                }
+                if (copy_to_user((char *)buf + total, scratch, chunk) != OSNOS_OK)
+                    return pack(-(int64_t)OSNOS_EFAULT);
+                total += chunk;
+            }
+            return (int64_t)len;
+        }
         case SYS_DUP:
             return pack(sys_dup((int)frame->rdi));
         case SYS_DUP2:

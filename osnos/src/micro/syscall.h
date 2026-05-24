@@ -28,6 +28,11 @@ typedef struct task task_t;
 #define SYS_FSTAT     5
 #define SYS_LSTAT     6   /* osnos has no symlinks → alias of stat */
 #define SYS_STATX   332   /* musl can use this; we fail it → fallback to stat */
+#define SYS_FSYNC    74   /* stub → 0 (FAT16 writes ya son sync por default) */
+#define SYS_FDATASYNC 75  /* stub → 0 (alias de fsync) */
+#define SYS_FTRUNCATE 77  /* truncar regular file a tamaño N (sqlite needs) */
+#define SYS_GETTIMEOFDAY 96   /* alias de clock_gettime con conversion */
+#define SYS_GETRANDOM   318   /* PRNG basado en timer (sqlite entropy) */
 #define SYS_MMAP      9
 #define SYS_MUNMAP   11
 #define SYS_LSEEK     8

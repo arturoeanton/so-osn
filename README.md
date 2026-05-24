@@ -89,6 +89,13 @@ y settings.
    #                     setea wallpaper; click .txt → abre Notepad
    #                     con ese archivo
    # kill <pid-oxsrv>  → consrv + kbdsrv auto-resumen, shell vuelve
+   osnos:/# echo "SELECT title, year FROM books ORDER BY year LIMIT 3;" > /home/q.sql
+   osnos:/# sqlite3 /home/demo.db < /home/q.sql   # ¡SQL en osnos! 🗃️
+   The Mythical Man-Month|1975
+   The C Programming Language|1978
+   SICP|1985
+   # demo.db pre-poblada en /home con tablas books/users/checkouts + view
+   # Cuatro idiomas self-host: C (tcc) + Lua + jq + SQL (sqlite)
    osnos:/# hello_musl                # ¡FASE 13.0 — musl libc opcional!
    ============================================
      hello from musl libc on osnos

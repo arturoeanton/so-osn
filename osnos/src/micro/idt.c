@@ -217,7 +217,11 @@ static bool fault_try_recover(int vec,
     if ((frame->cs & 3) == 3) {
         task_t *t = task_current();
         if (t && t->pml4) {
-            put_str("\n*** ring-3 task killed: ", 0xff9955);
+            put_str("\n*** task '", 0xff9955);
+            put_str(t->name[0] ? t->name : "?", 0xff9955);
+            put_str("' pid=", 0xff9955);
+            put_hex((uint64_t)t->pid, 0xffff00);
+            put_str(" killed: ", 0xff9955);
             put_str(exception_name(vec), 0xff9955);
             if (vec == 14) {
                 put_str(" cr2=", 0xff9955); put_hex(read_cr2(), 0xffff00);
