@@ -76,20 +76,33 @@ COMMON OPTIONS
 COMMANDS
     Currently available applets include:
 
-            [, [[, ash, basename, cat, cp, cpio, cut, date, dirname, echo, env,
-            envdir, envuidgid, false, grep, head, ls, lsattr, lsmod, lsof,
-            lspci, lsscsi, lsusb, mkdir, mv, printf, pwd, pwdx, rm, rmdir,
-            rmmod, sh, sleep, sort, tail, test, touch, tr, traceroute, tree,
-            true, truncate, uniq, wc
+            [, [[, ash, awk, base64, basename, bc, cat, cksum, cp, cpio, cut,
+            date, dc, dd, df, diff, dirname, du, echo, env, envdir, envuidgid,
+            expand, factor, false, find, fold, grep, head, hexdump, ls, lsattr,
+            lsmod, lsof, lspci, lsscsi, lsusb, md5sum, mkdir, more, mv, patch,
+            printf, pwd, pwdx, readlink, realpath, rev, rm, rmdir, rmmod, sed,
+            sh, sha1sum, sha256sum, sleep, sort, stat, strings, tac, tail, test,
+            timeout, touch, tr, traceroute, tree, true, truncate, uniq, vi, wc,
+            xargs
 
 COMMAND DESCRIPTIONS
     ash ash [-il] [-|+Cabefmnuvx] [-|+o OPT]... [-c 'SCRIPT' [ARG0 ARGS] |
         FILE ARGS | -s ARGS]
 
+    awk awk [OPTIONS] [AWK_PROGRAM] [FILE]...
+
+    base64
+        base64 [-d] [-w COL] [FILE]
+
     basename
         basename FILE [SUFFIX] | -a FILE... | -s SUFFIX FILE...
 
+    bc  bc [-sqlw] [FILE]...
+
     cat cat [FILE]...
+
+    cksum
+        cksum FILE...
 
     cp  cp [-arPLHpfinlsTu] SOURCE DEST or: cp [-arPLHpfinlsu] SOURCE... {
         -t DIRECTORY | DIRECTORY }
@@ -102,8 +115,19 @@ COMMAND DESCRIPTIONS
     date
         date [OPTIONS] [+FMT] [[-s] TIME]
 
+    dc  dc [-x] [-eSCRIPT]... [-fFILE]... [FILE]...
+
+    dd  dd [if=FILE] [of=FILE] [bs=N] [count=N] [skip=N] [seek=N]
+
+    df  df [-PkT] [-t TYPE] [FILESYSTEM]...
+
+    diff
+        diff [-abBdiNqrTstw] [-L LABEL] [-S FILE] [-U LINES] FILE1 FILE2
+
     dirname
         dirname FILENAME
+
+    du  du [-aHLdclsxk] [FILE]...
 
     echo
         echo [ARG]...
@@ -116,12 +140,28 @@ COMMAND DESCRIPTIONS
     envuidgid
         envuidgid USER PROG ARGS
 
+    expand
+        expand [-i] [-t N] [FILE]...
+
+    factor
+        factor [NUMBER]...
+
+    find
+        find [-HL] [PATH]... [OPTIONS] [ACTIONS]
+
+    fold
+        fold [-bs] [-w WIDTH] [FILE]...
+
     grep
         grep [-HhnlLoqvsrRiwFE] [-m N] { PATTERN | -e PATTERN... | -f
         FILE... } [FILE]...
 
     head
         head [OPTIONS] [FILE]...
+
+    hexdump
+        hexdump [-bcdoxCv] [-e FMT] [-f FMT_FILE] [-n LEN] [-s OFS]
+        [FILE]...
 
     ls  ls [-1AaCxdlins] [FILE]...
 
@@ -137,11 +177,20 @@ COMMAND DESCRIPTIONS
     lspci
         lspci [-mk]
 
+    md5sum
+        md5sum [FILE]...
+
     mkdir
         mkdir [-m MODE] [-p] DIRECTORY...
 
+    more
+        more [FILE]...
+
     mv  mv [-finT] SOURCE DEST or: mv [-fin] SOURCE... { -t DIRECTORY |
         DIRECTORY }
+
+    patch
+        patch [-RNE] [-p N] [-i DIFF] [ORIGFILE [PATCHFILE]]
 
     printf
         printf FORMAT [ARG]...
@@ -151,6 +200,14 @@ COMMAND DESCRIPTIONS
     pwdx
         pwdx PID...
 
+    readlink
+        readlink FILE
+
+    realpath
+        realpath FILE...
+
+    rev rev [FILE]...
+
     rm  rm [-irf] FILE...
 
     rmdir
@@ -159,8 +216,17 @@ COMMAND DESCRIPTIONS
     rmmod
         rmmod [-wfa] [MODULE]...
 
+    sed sed [-i[SFX]] [-nrE] [-f FILE]... [-e CMD]... [FILE]... or: sed
+        [-i[SFX]] [-nrE] CMD [FILE]...
+
     sh  sh [-il] [-|+Cabefmnuvx] [-|+o OPT]... [-c 'SCRIPT' [ARG0 ARGS] |
         FILE ARGS | -s ARGS]
+
+    sha1sum
+        sha1sum [FILE]...
+
+    sha256sum
+        sha256sum [FILE]...
 
     sleep
         sleep N
@@ -168,8 +234,19 @@ COMMAND DESCRIPTIONS
     sort
         sort [-nru] [FILE]...
 
+    stat
+        stat [-lt] FILE...
+
+    strings
+        strings [-fo] [-t o|d|x] [-n LEN] [FILE]...
+
+    tac tac [FILE]...
+
     tail
         tail [OPTIONS] [FILE]...
+
+    timeout
+        timeout [-s SIG] [-k KILL_SECS] SECS PROG ARGS
 
     touch
         touch [-ch] FILE...
@@ -187,7 +264,12 @@ COMMAND DESCRIPTIONS
     uniq
         uniq [-cduiz] [-f,s,w N] [FILE [OUTFILE]]
 
+    vi  vi [-c CMD] [-R] [-H] [FILE]...
+
     wc  wc [-clwL] [FILE]...
+
+    xargs
+        xargs [OPTIONS] [PROG ARGS]
 
 LIBC NSS
     GNU Libc (glibc) uses the Name Service Switch (NSS) to configure the

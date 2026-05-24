@@ -81,11 +81,14 @@ been enabled, more detailed usage information will also be available.
 
 Currently available applets include:
 
-	[, [[, ash, basename, cat, cp, cpio, cut, date, dirname, echo, env,
-	envdir, envuidgid, false, grep, head, ls, lsattr, lsmod, lsof,
-	lspci, lsscsi, lsusb, mkdir, mv, printf, pwd, pwdx, rm, rmdir,
-	rmmod, sh, sleep, sort, tail, test, touch, tr, traceroute, tree,
-	true, truncate, uniq, wc
+	[, [[, ash, awk, base64, basename, bc, cat, cksum, cp, cpio, cut,
+	date, dc, dd, df, diff, dirname, du, echo, env, envdir, envuidgid,
+	expand, factor, false, find, fold, grep, head, hexdump, ls, lsattr,
+	lsmod, lsof, lspci, lsscsi, lsusb, md5sum, mkdir, more, mv, patch,
+	printf, pwd, pwdx, readlink, realpath, rev, rm, rmdir, rmmod, sed,
+	sh, sha1sum, sha256sum, sleep, sort, stat, strings, tac, tail, test,
+	timeout, touch, tr, traceroute, tree, true, truncate, uniq, vi, wc,
+	xargs
 
 =head1 COMMAND DESCRIPTIONS
 
@@ -95,13 +98,29 @@ Currently available applets include:
 
 ash [-il] [-|+Cabefmnuvx] [-|+o OPT]... [-c 'SCRIPT' [ARG0 ARGS] | FILE ARGS | -s ARGS]
 
+=item B<awk>
+
+awk [OPTIONS] [AWK_PROGRAM] [FILE]...
+
+=item B<base64>
+
+base64 [-d] [-w COL] [FILE]
+
 =item B<basename>
 
 basename FILE [SUFFIX] | -a FILE... | -s SUFFIX FILE...
 
+=item B<bc>
+
+bc [-sqlw] [FILE]...
+
 =item B<cat>
 
 cat [FILE]...
+
+=item B<cksum>
+
+cksum FILE...
 
 =item B<cp>
 
@@ -120,9 +139,29 @@ cut [OPTIONS] [FILE]...
 
 date [OPTIONS] [+FMT] [[-s] TIME]
 
+=item B<dc>
+
+dc [-x] [-eSCRIPT]... [-fFILE]... [FILE]...
+
+=item B<dd>
+
+dd [if=FILE] [of=FILE] [bs=N] [count=N] [skip=N] [seek=N]
+
+=item B<df>
+
+df [-PkT] [-t TYPE] [FILESYSTEM]...
+
+=item B<diff>
+
+diff [-abBdiNqrTstw] [-L LABEL] [-S FILE] [-U LINES] FILE1 FILE2
+
 =item B<dirname>
 
 dirname FILENAME
+
+=item B<du>
+
+du [-aHLdclsxk] [FILE]...
 
 =item B<echo>
 
@@ -140,6 +179,22 @@ envdir DIR PROG ARGS
 
 envuidgid USER PROG ARGS
 
+=item B<expand>
+
+expand [-i] [-t N] [FILE]...
+
+=item B<factor>
+
+factor [NUMBER]...
+
+=item B<find>
+
+find [-HL] [PATH]... [OPTIONS] [ACTIONS]
+
+=item B<fold>
+
+fold [-bs] [-w WIDTH] [FILE]...
+
 =item B<grep>
 
 grep [-HhnlLoqvsrRiwFE] [-m N] { PATTERN | -e PATTERN... | -f FILE... } [FILE]...
@@ -147,6 +202,10 @@ grep [-HhnlLoqvsrRiwFE] [-m N] { PATTERN | -e PATTERN... | -f FILE... } [FILE]..
 =item B<head>
 
 head [OPTIONS] [FILE]...
+
+=item B<hexdump>
+
+hexdump [-bcdoxCv] [-e FMT] [-f FMT_FILE] [-n LEN] [-s OFS] [FILE]...
 
 =item B<ls>
 
@@ -168,14 +227,26 @@ lsof
 
 lspci [-mk]
 
+=item B<md5sum>
+
+md5sum [FILE]...
+
 =item B<mkdir>
 
 mkdir [-m MODE] [-p] DIRECTORY...
+
+=item B<more>
+
+more [FILE]...
 
 =item B<mv>
 
 mv [-finT] SOURCE DEST
 or: mv [-fin] SOURCE... { -t DIRECTORY | DIRECTORY }
+
+=item B<patch>
+
+patch [-RNE] [-p N] [-i DIFF] [ORIGFILE [PATCHFILE]]
 
 =item B<printf>
 
@@ -189,6 +260,18 @@ pwd
 
 pwdx PID...
 
+=item B<readlink>
+
+readlink FILE
+
+=item B<realpath>
+
+realpath FILE...
+
+=item B<rev>
+
+rev [FILE]...
+
 =item B<rm>
 
 rm [-irf] FILE...
@@ -201,9 +284,22 @@ rmdir [-p] DIRECTORY...
 
 rmmod [-wfa] [MODULE]...
 
+=item B<sed>
+
+sed [-i[SFX]] [-nrE] [-f FILE]... [-e CMD]... [FILE]...
+or: sed [-i[SFX]] [-nrE] CMD [FILE]...
+
 =item B<sh>
 
 sh [-il] [-|+Cabefmnuvx] [-|+o OPT]... [-c 'SCRIPT' [ARG0 ARGS] | FILE ARGS | -s ARGS]
+
+=item B<sha1sum>
+
+sha1sum [FILE]...
+
+=item B<sha256sum>
+
+sha256sum [FILE]...
 
 =item B<sleep>
 
@@ -213,9 +309,25 @@ sleep N
 
 sort [-nru] [FILE]...
 
+=item B<stat>
+
+stat [-lt] FILE...
+
+=item B<strings>
+
+strings [-fo] [-t o|d|x] [-n LEN] [FILE]...
+
+=item B<tac>
+
+tac [FILE]...
+
 =item B<tail>
 
 tail [OPTIONS] [FILE]...
+
+=item B<timeout>
+
+timeout [-s SIG] [-k KILL_SECS] SECS PROG ARGS
 
 =item B<touch>
 
@@ -239,9 +351,17 @@ truncate [-c] -s SIZE FILE...
 
 uniq [-cduiz] [-f,s,w N] [FILE [OUTFILE]]
 
+=item B<vi>
+
+vi [-c CMD] [-R] [-H] [FILE]...
+
 =item B<wc>
 
 wc [-clwL] [FILE]...
+
+=item B<xargs>
+
+xargs [OPTIONS] [PROG ARGS]
 
 =back
 

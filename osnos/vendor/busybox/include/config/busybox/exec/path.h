@@ -1,1 +1,1 @@
-#define CONFIG_BUSYBOX_EXEC_PATH "/proc/self/exe"
+#define CONFIG_BUSYBOX_EXEC_PATH "/bin/busybox"

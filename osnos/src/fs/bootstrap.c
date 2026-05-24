@@ -209,19 +209,65 @@ void bootstrap_fs(void) {
             "export OSNAME=osnos\n");
         /* /home/.ashrc — bash-style "rc file" para BusyBox ash.
          * Sourced en cada shell interactiva via $ENV=/home/.ashrc
-         * (definido en /etc/profile). Aquí van prompt, aliases y
-         * banner — análogo a ~/.bashrc en sistemas Linux. El usuario
-         * puede editarlo libremente con `ovi /home/.ashrc`. */
+         * (definido en /etc/profile). Aquí van prompt, aliases,
+         * banner Y wrappers de busybox applets — análogo a ~/.bashrc
+         * en sistemas Linux. El usuario puede editarlo libremente
+         * con `ovi /home/.ashrc`.
+         *
+         * Por qué los wrappers `alias <app>='busybox <app>'`: FAT16
+         * no soporta symlinks/hardlinks, así que no podemos linkear
+         * /bin/vi → /bin/busybox al estilo Linux. STANDALONE_SHELL
+         * de busybox tampoco funciona (multi-arg dispatch bug en
+         * osnos). Por lo tanto: aliases sencillos cuyo efecto es
+         * que `vi foo.txt` invoca `busybox vi foo.txt` transparente.
+         * Lista incluye los applets útiles que verificamos funcionan
+         * cuando se invocan via `busybox <app>`. */
         seed_if_absent("/home/.ashrc",
             "# osnos ~/.ashrc — sourced every interactive ash session.\n"
             "# Edit freely: prompt, aliases, banner, anything per-shell.\n"
             "export PS1='osnos:\\w# '\n"
+            "\n"
+            "# Navigation / listing aliases\n"
             "alias ll='ls -l'\n"
             "alias la='ls -la'\n"
             "alias l='ls -CF'\n"
             "alias ..='cd ..'\n"
             "alias h='history'\n"
             "alias cls=clear\n"
+            "\n"
+            "# BusyBox applet wrappers — FAT16 has no symlinks, so we\n"
+            "# can't install /bin/vi -> /bin/busybox. These aliases\n"
+            "# make every applet feel like a native command.\n"
+            "alias vi='busybox vi'\n"
+            "alias sed='busybox sed'\n"
+            "alias awk='busybox awk'\n"
+            "alias find='busybox find'\n"
+            "alias diff='busybox diff'\n"
+            "alias patch='busybox patch'\n"
+            "alias stat='busybox stat'\n"
+            "alias dd='busybox dd'\n"
+            "alias df='busybox df'\n"
+            "alias du='busybox du'\n"
+            "alias base64='busybox base64'\n"
+            "alias md5sum='busybox md5sum'\n"
+            "alias sha1sum='busybox sha1sum'\n"
+            "alias sha256sum='busybox sha256sum'\n"
+            "alias cksum='busybox cksum'\n"
+            "alias hexdump='busybox hexdump'\n"
+            "alias more='busybox more'\n"
+            "alias timeout='busybox timeout'\n"
+            "alias xargs='busybox xargs'\n"
+            "alias tac='busybox tac'\n"
+            "alias factor='busybox factor'\n"
+            "alias fold='busybox fold'\n"
+            "alias expand='busybox expand'\n"
+            "alias rev='busybox rev'\n"
+            "alias readlink='busybox readlink'\n"
+            "alias realpath='busybox realpath'\n"
+            "alias bc='busybox bc'\n"
+            "alias dc='busybox dc'\n"
+            "alias strings='busybox strings'\n"
+            "\n"
             "/bin/banner osnos 2>/dev/null\n"
             "echo 'BusyBox ash on osnos — help for builtins, ls /bin for commands.'\n");
         /* Ox window-system settings (FASE 12). oxsrv reads this at

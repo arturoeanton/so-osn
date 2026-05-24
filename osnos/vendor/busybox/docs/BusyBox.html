@@ -60,11 +60,14 @@
 
 <p>Currently available applets include:</p>
 
-<pre><code>[, [[, ash, basename, cat, cp, cpio, cut, date, dirname, echo, env,
-envdir, envuidgid, false, grep, head, ls, lsattr, lsmod, lsof,
-lspci, lsscsi, lsusb, mkdir, mv, printf, pwd, pwdx, rm, rmdir,
-rmmod, sh, sleep, sort, tail, test, touch, tr, traceroute, tree,
-true, truncate, uniq, wc</code></pre>
+<pre><code>[, [[, ash, awk, base64, basename, bc, cat, cksum, cp, cpio, cut,
+date, dc, dd, df, diff, dirname, du, echo, env, envdir, envuidgid,
+expand, factor, false, find, fold, grep, head, hexdump, ls, lsattr,
+lsmod, lsof, lspci, lsscsi, lsusb, md5sum, mkdir, more, mv, patch,
+printf, pwd, pwdx, readlink, realpath, rev, rm, rmdir, rmmod, sed,
+sh, sha1sum, sha256sum, sleep, sort, stat, strings, tac, tail, test,
+timeout, touch, tr, traceroute, tree, true, truncate, uniq, vi, wc,
+xargs</code></pre>
 
 <h1 id="COMMAND-DESCRIPTIONS">COMMAND DESCRIPTIONS</h1>
 
@@ -76,16 +79,40 @@ true, truncate, uniq, wc</code></pre>
 <p>ash [-il] [-|+Cabefmnuvx] [-|+o OPT]... [-c &#39;SCRIPT&#39; [ARG0 ARGS] | FILE ARGS | -s ARGS]</p>
 
 </dd>
+<dt id="awk"><b>awk</b></dt>
+<dd>
+
+<p>awk [OPTIONS] [AWK_PROGRAM] [FILE]...</p>
+
+</dd>
+<dt id="base64"><b>base64</b></dt>
+<dd>
+
+<p>base64 [-d] [-w COL] [FILE]</p>
+
+</dd>
 <dt id="basename"><b>basename</b></dt>
 <dd>
 
 <p>basename FILE [SUFFIX] | -a FILE... | -s SUFFIX FILE...</p>
 
 </dd>
+<dt id="bc"><b>bc</b></dt>
+<dd>
+
+<p>bc [-sqlw] [FILE]...</p>
+
+</dd>
 <dt id="cat"><b>cat</b></dt>
 <dd>
 
 <p>cat [FILE]...</p>
+
+</dd>
+<dt id="cksum"><b>cksum</b></dt>
+<dd>
+
+<p>cksum FILE...</p>
 
 </dd>
 <dt id="cp"><b>cp</b></dt>
@@ -112,10 +139,40 @@ true, truncate, uniq, wc</code></pre>
 <p>date [OPTIONS] [+FMT] [[-s] TIME]</p>
 
 </dd>
+<dt id="dc"><b>dc</b></dt>
+<dd>
+
+<p>dc [-x] [-eSCRIPT]... [-fFILE]... [FILE]...</p>
+
+</dd>
+<dt id="dd"><b>dd</b></dt>
+<dd>
+
+<p>dd [if=FILE] [of=FILE] [bs=N] [count=N] [skip=N] [seek=N]</p>
+
+</dd>
+<dt id="df"><b>df</b></dt>
+<dd>
+
+<p>df [-PkT] [-t TYPE] [FILESYSTEM]...</p>
+
+</dd>
+<dt id="diff"><b>diff</b></dt>
+<dd>
+
+<p>diff [-abBdiNqrTstw] [-L LABEL] [-S FILE] [-U LINES] FILE1 FILE2</p>
+
+</dd>
 <dt id="dirname"><b>dirname</b></dt>
 <dd>
 
 <p>dirname FILENAME</p>
+
+</dd>
+<dt id="du"><b>du</b></dt>
+<dd>
+
+<p>du [-aHLdclsxk] [FILE]...</p>
 
 </dd>
 <dt id="echo"><b>echo</b></dt>
@@ -142,6 +199,30 @@ true, truncate, uniq, wc</code></pre>
 <p>envuidgid USER PROG ARGS</p>
 
 </dd>
+<dt id="expand"><b>expand</b></dt>
+<dd>
+
+<p>expand [-i] [-t N] [FILE]...</p>
+
+</dd>
+<dt id="factor"><b>factor</b></dt>
+<dd>
+
+<p>factor [NUMBER]...</p>
+
+</dd>
+<dt id="find"><b>find</b></dt>
+<dd>
+
+<p>find [-HL] [PATH]... [OPTIONS] [ACTIONS]</p>
+
+</dd>
+<dt id="fold"><b>fold</b></dt>
+<dd>
+
+<p>fold [-bs] [-w WIDTH] [FILE]...</p>
+
+</dd>
 <dt id="grep"><b>grep</b></dt>
 <dd>
 
@@ -152,6 +233,12 @@ true, truncate, uniq, wc</code></pre>
 <dd>
 
 <p>head [OPTIONS] [FILE]...</p>
+
+</dd>
+<dt id="hexdump"><b>hexdump</b></dt>
+<dd>
+
+<p>hexdump [-bcdoxCv] [-e FMT] [-f FMT_FILE] [-n LEN] [-s OFS] [FILE]...</p>
 
 </dd>
 <dt id="ls"><b>ls</b></dt>
@@ -184,16 +271,34 @@ true, truncate, uniq, wc</code></pre>
 <p>lspci [-mk]</p>
 
 </dd>
+<dt id="md5sum"><b>md5sum</b></dt>
+<dd>
+
+<p>md5sum [FILE]...</p>
+
+</dd>
 <dt id="mkdir"><b>mkdir</b></dt>
 <dd>
 
 <p>mkdir [-m MODE] [-p] DIRECTORY...</p>
 
 </dd>
+<dt id="more"><b>more</b></dt>
+<dd>
+
+<p>more [FILE]...</p>
+
+</dd>
 <dt id="mv"><b>mv</b></dt>
 <dd>
 
 <p>mv [-finT] SOURCE DEST or: mv [-fin] SOURCE... { -t DIRECTORY | DIRECTORY }</p>
+
+</dd>
+<dt id="patch"><b>patch</b></dt>
+<dd>
+
+<p>patch [-RNE] [-p N] [-i DIFF] [ORIGFILE [PATCHFILE]]</p>
 
 </dd>
 <dt id="printf"><b>printf</b></dt>
@@ -214,6 +319,24 @@ true, truncate, uniq, wc</code></pre>
 <p>pwdx PID...</p>
 
 </dd>
+<dt id="readlink"><b>readlink</b></dt>
+<dd>
+
+<p>readlink FILE</p>
+
+</dd>
+<dt id="realpath"><b>realpath</b></dt>
+<dd>
+
+<p>realpath FILE...</p>
+
+</dd>
+<dt id="rev"><b>rev</b></dt>
+<dd>
+
+<p>rev [FILE]...</p>
+
+</dd>
 <dt id="rm"><b>rm</b></dt>
 <dd>
 
@@ -232,10 +355,28 @@ true, truncate, uniq, wc</code></pre>
 <p>rmmod [-wfa] [MODULE]...</p>
 
 </dd>
+<dt id="sed"><b>sed</b></dt>
+<dd>
+
+<p>sed [-i[SFX]] [-nrE] [-f FILE]... [-e CMD]... [FILE]... or: sed [-i[SFX]] [-nrE] CMD [FILE]...</p>
+
+</dd>
 <dt id="sh"><b>sh</b></dt>
 <dd>
 
 <p>sh [-il] [-|+Cabefmnuvx] [-|+o OPT]... [-c &#39;SCRIPT&#39; [ARG0 ARGS] | FILE ARGS | -s ARGS]</p>
+
+</dd>
+<dt id="sha1sum"><b>sha1sum</b></dt>
+<dd>
+
+<p>sha1sum [FILE]...</p>
+
+</dd>
+<dt id="sha256sum"><b>sha256sum</b></dt>
+<dd>
+
+<p>sha256sum [FILE]...</p>
 
 </dd>
 <dt id="sleep"><b>sleep</b></dt>
@@ -250,10 +391,34 @@ true, truncate, uniq, wc</code></pre>
 <p>sort [-nru] [FILE]...</p>
 
 </dd>
+<dt id="stat"><b>stat</b></dt>
+<dd>
+
+<p>stat [-lt] FILE...</p>
+
+</dd>
+<dt id="strings"><b>strings</b></dt>
+<dd>
+
+<p>strings [-fo] [-t o|d|x] [-n LEN] [FILE]...</p>
+
+</dd>
+<dt id="tac"><b>tac</b></dt>
+<dd>
+
+<p>tac [FILE]...</p>
+
+</dd>
 <dt id="tail"><b>tail</b></dt>
 <dd>
 
 <p>tail [OPTIONS] [FILE]...</p>
+
+</dd>
+<dt id="timeout"><b>timeout</b></dt>
+<dd>
+
+<p>timeout [-s SIG] [-k KILL_SECS] SECS PROG ARGS</p>
 
 </dd>
 <dt id="touch"><b>touch</b></dt>
@@ -286,10 +451,22 @@ true, truncate, uniq, wc</code></pre>
 <p>uniq [-cduiz] [-f,s,w N] [FILE [OUTFILE]]</p>
 
 </dd>
+<dt id="vi"><b>vi</b></dt>
+<dd>
+
+<p>vi [-c CMD] [-R] [-H] [FILE]...</p>
+
+</dd>
 <dt id="wc"><b>wc</b></dt>
 <dd>
 
 <p>wc [-clwL] [FILE]...</p>
+
+</dd>
+<dt id="xargs"><b>xargs</b></dt>
+<dd>
+
+<p>xargs [OPTIONS] [PROG ARGS]</p>
 
 </dd>
 </dl>
