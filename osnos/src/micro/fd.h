@@ -57,12 +57,14 @@ typedef struct osnos_ofd {
 
     bool         is_special;          /* stdin/stdout/stderr default */
     bool         is_dir;              /* opened a directory (getdents) */
-    bool         is_socket;           /* opened via sys_socket */
+    bool         is_socket;           /* opened via sys_socket (AF_INET) */
+    bool         is_unix_socket;      /* AF_UNIX socket — unix_idx valido */
     bool         is_pipe;             /* opened via sys_pipe / inherited */
     bool         is_chr;              /* character device */
     bool         is_pty;              /* /dev/ptmx or /dev/pts/N */
 
     int          sock_idx;            /* index into net/socket table */
+    int          unix_idx;            /* index into unix_sock table */
     struct pipe *pipe_ref;            /* shared pipe object */
     int          pipe_side;           /* 0 = read end, 1 = write end */
 

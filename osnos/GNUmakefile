@@ -169,6 +169,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/tests/alltest.c \
     elfs/tests/ofdtest.c \
     elfs/tests/ptytest.c \
+    elfs/tests/unixtest.c \
     elfs/tests/fdedgetest.c \
     elfs/tests/jobtest.c \
     elfs/tests/termtest.c \

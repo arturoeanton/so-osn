@@ -53,5 +53,7 @@ typedef enum {
     OSNOS_ERANGE         = 34,  /* result too large (getcwd buffer) */
     OSNOS_ETIMEDOUT      = 110,
     OSNOS_ECONNREFUSED   = 111,
-    OSNOS_EINPROGRESS    = 115  /* connect() still negotiating */
+    OSNOS_EINPROGRESS    = 115, /* connect() still negotiating */
+    OSNOS_EISCONN        = 106, /* socket already connected */
+    OSNOS_ENOTCONN       = 107  /* socket not connected */
 } osnos_status_t;

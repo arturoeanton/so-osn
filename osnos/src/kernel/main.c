@@ -142,6 +142,8 @@ void kmain(void) {
     ipc_init();
     pipe_init();           /* shell-pipeline kernel object */
     pty_init();            /* /dev/ptmx + /dev/pts/N pool */
+    extern void unix_sock_init(void);
+    unix_sock_init();      /* AF_UNIX socket pool + bind table */
     task_init();
     reaper_init();
     scheduler_init();

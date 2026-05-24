@@ -230,9 +230,21 @@ Trabajo (~6 cambios cascading, todos críticos):
 
 Verificación end-to-end: `sh -c "echo a b c"` → `a b c`; `cd /home && make hello` → tcc compila SIN SEGFAULT; `/home/hello` → "hello from tcc on osnos!"; `make clean` ejecuta la recipe limpia. Único item pendiente cosmético: mini-libc `/bin/rm` no soporta `-f` flag (independiente, no bloquea FASE 14.1).
 
-#### FASE 14.2 — AF_UNIX sockets (pendiente)
-- ❌ Familia `AF_UNIX` en `sys_socket` + `bind`/`connect`/`accept` con namespace de paths (`/tmp/X11-unix/X0` etc.).
-- Necesario para X11 wire protocol (xeyes habla AF_UNIX al server).
+#### FASE 14.2 — AF_UNIX sockets — ✅ **CERRADA**
+
+`socket(AF_UNIX, SOCK_STREAM)` + `bind(pathname)` + `listen` + `connect` + `accept` + `read/write/send/recv` + `close` funcionan end-to-end. Smoke test `/bin/unixtest` hace round-trip PING/PONG entre parent (server) y forked child (client) sin networking real involucrado.
+
+Trabajo:
+
+- ✅ **`src/include/osnos_unix_abi.h`** + **`lib/libc/include/sys/un.h`**: `sockaddr_un { sun_family, sun_path[108] }` layout-compat Linux.
+- ✅ **`src/micro/unix_sock.{c,h}`** (~270 LOC): pool fijo de 32 sockets + tabla de 16 paths bound. Estados UNUSED / UNBOUND / LISTENING / CONNECTED / DISCONNECTED. Per-conn ring buffer de 4 KiB por dirección. Backlog de pending connects = 8. Sin abstract namespace ni SOCK_DGRAM.
+- ✅ **OFD extendido** (`src/micro/fd.h`): nuevos campos `is_unix_socket` + `unix_idx` paralelos a `is_socket`/`sock_idx`. `ofd_clear` los resetea, `ofd_unref` cierra ambos backends.
+- ✅ **Dispatch en syscalls** (`src/micro/syscall.c`): `sys_socket` rama AF_UNIX → `unix_sock_create` + fd con `is_unix_socket=true`. `sys_bind/listen/connect/accept` chequean familia y delegan. Helper `copy_un_path` valida `sockaddr_un` user-side. `sys_read/write/sendto/recvfrom` y `fd_readable` (path de `select`) también ramifican. `accept` retorna fd recién-creado, peer-side queda CONNECTED apuntando al cliente.
+- ✅ **Boot init** (`src/kernel/main.c`): `unix_sock_init()` después de `pty_init`.
+- ✅ **Errno extendido**: agregados `OSNOS_EISCONN=106`, `OSNOS_ENOTCONN=107` (números Linux).
+- ✅ **`elfs/tests/unixtest.c`** smoke test: parent abre socket, bind, listen, fork; child connect, write "PING", read "PONG"; parent accept, read "PING", write "PONG", waitpid. Verificado: `/bin/unixtest` → `server got: 'PING'` / `client got: 'PONG'` / `unixtest: OK`.
+
+**Out of scope**: SOCK_DGRAM (datagrams), `SCM_RIGHTS` (fd passing entre procesos via UNIX), abstract namespace (`sun_path[0]==0` Linux extension), credentials passing. Para xeyes/X11 lo que tenemos alcanza.
 
 #### FASE 14.3 — POSIX SHM (pendiente)
 - ❌ `shm_open` + `mmap(MAP_SHARED, fd)`: shared file-backed mmap para pixmaps cliente↔server.

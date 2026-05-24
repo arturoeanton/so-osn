@@ -18,6 +18,7 @@
 #include "uaccess.h"
 #include "fd.h"
 #include "ipc.h"
+#include "unix_sock.h"
 #include "kmalloc.h"
 #include "pipe.h"
 #include "pmm.h"
@@ -312,6 +313,12 @@ int64_t sys_write(int fd, const void *buf, size_t count) {
         return pipe_write(f->pipe_ref, buf, count);
     }
 
+    /* AF_UNIX socket — write() === send() for stream sockets. */
+    if (f->is_unix_socket) {
+        int r = unix_sock_send(f->unix_idx, buf, count);
+        return (r < 0) ? -(int64_t)(-r) : (int64_t)r;
+    }
+
     /* PTY: dispatch to master/slave write. The other side's reader
      * picks bytes up via pty_*_read; canonical mode line-buffering
      * + echo are applied in pty_master_write itself. */
@@ -517,6 +524,12 @@ int64_t sys_read(int fd, void *buf, size_t count) {
     if (f->is_pipe) {
         if (f->pipe_side != 0 || !f->pipe_ref) return err(OSNOS_EBADF);
         return pipe_read(f->pipe_ref, buf, count);
+    }
+
+    /* AF_UNIX socket — read() === recv() para SOCK_STREAM. */
+    if (f->is_unix_socket) {
+        int r = unix_sock_recv(f->unix_idx, buf, count);
+        return (r < 0) ? -(int64_t)(-r) : (int64_t)r;
     }
 
     /* PTY read — master and slave have different semantics:
@@ -1220,6 +1233,19 @@ static void pack_sockaddr_in(void *addr, uint32_t ip, uint16_t port) {
 
 int64_t sys_socket(int domain, int type, int protocol) {
     (void)protocol;
+    /* AF_UNIX: nuestra propia tabla unix_sock_t. SOCK_STREAM solo. */
+    if (domain == 1 /* OSNOS_AF_UNIX */) {
+        if (type != OSNOS_SOCK_STREAM) return err(OSNOS_EAFNOSUPPORT);
+        int ux = unix_sock_create(type);
+        if (ux < 0) return -(int64_t)(-ux);
+        int fd = fd_alloc(task_current());
+        if (fd < 0) { unix_sock_close(ux); return err(OSNOS_EMFILE); }
+        osnos_fd_t *f = fd_get(task_current(), fd);
+        f->is_unix_socket = true;
+        f->unix_idx       = ux;
+        return (int64_t)fd;
+    }
+
     if (domain != AF_INET_LX) return err(OSNOS_EAFNOSUPPORT);
     if (type != OSNOS_SOCK_DGRAM && type != OSNOS_SOCK_STREAM) {
         return err(OSNOS_EAFNOSUPPORT);
@@ -1240,9 +1266,44 @@ int64_t sys_socket(int domain, int type, int protocol) {
     return (int64_t)fd;
 }
 
+/* Helper: copia un sockaddr_un user → kernel y extrae el path. */
+static int64_t copy_un_path(const void *u_addr, uint32_t addrlen,
+                             char *path_out, size_t path_max) {
+    if (!u_addr) return -(int64_t)OSNOS_EFAULT;
+    if (addrlen < 2 + 1)        return -(int64_t)OSNOS_EINVAL;
+    if (addrlen > 2 + 108)      return -(int64_t)OSNOS_EINVAL;
+    char buf[2 + 108];
+    if (copy_from_user(buf, u_addr, addrlen) != OSNOS_OK) {
+        return -(int64_t)OSNOS_EFAULT;
+    }
+    uint16_t family;
+    family  = (uint8_t)buf[0];
+    family |= ((uint16_t)(uint8_t)buf[1]) << 8;
+    if (family != 1 /* AF_UNIX */) return -(int64_t)OSNOS_EINVAL;
+    /* Path empieza en byte 2, longitud = addrlen - 2 max 108. */
+    size_t plen = addrlen - 2;
+    if (plen >= path_max) plen = path_max - 1;
+    for (size_t i = 0; i < plen; i++) {
+        path_out[i] = buf[2 + i];
+        if (buf[2 + i] == 0) { plen = i; break; }
+    }
+    path_out[plen] = 0;
+    if (path_out[0] == 0) return -(int64_t)OSNOS_EINVAL;
+    return 0;
+}
+
 int64_t sys_bind(int fd, const void *addr, uint32_t addrlen) {
     osnos_fd_t *f = fd_get(task_current(), fd);
-    if (!f || !f->is_socket) return err(OSNOS_EBADF);
+    if (!f) return err(OSNOS_EBADF);
+
+    if (f->is_unix_socket) {
+        char path[OSNOS_UNIX_PATH_MAX];
+        int64_t prc = copy_un_path(addr, addrlen, path, sizeof(path));
+        if (prc < 0) return prc;
+        int r = unix_sock_bind(f->unix_idx, path);
+        return (r < 0) ? -(int64_t)(-r) : 0;
+    }
+    if (!f->is_socket) return err(OSNOS_EBADF);
 
     uint32_t ip = 0;
     uint16_t port = 0;
@@ -1255,14 +1316,27 @@ int64_t sys_bind(int fd, const void *addr, uint32_t addrlen) {
 
 int64_t sys_listen(int fd, int backlog) {
     osnos_fd_t *f = fd_get(task_current(), fd);
-    if (!f || !f->is_socket) return err(OSNOS_EBADF);
+    if (!f) return err(OSNOS_EBADF);
+    if (f->is_unix_socket) {
+        int r = unix_sock_listen(f->unix_idx, backlog);
+        return (r < 0) ? -(int64_t)(-r) : 0;
+    }
+    if (!f->is_socket) return err(OSNOS_EBADF);
     if (sock_listen(f->sock_idx, backlog) != 0) return err(OSNOS_EINVAL);
     return 0;
 }
 
 int64_t sys_connect(int fd, const void *addr, uint32_t addrlen) {
     osnos_fd_t *f = fd_get(task_current(), fd);
-    if (!f || !f->is_socket) return err(OSNOS_EBADF);
+    if (!f) return err(OSNOS_EBADF);
+    if (f->is_unix_socket) {
+        char path[OSNOS_UNIX_PATH_MAX];
+        int64_t prc = copy_un_path(addr, addrlen, path, sizeof(path));
+        if (prc < 0) return prc;
+        int r = unix_sock_connect(f->unix_idx, path);
+        return (r < 0) ? -(int64_t)(-r) : 0;
+    }
+    if (!f->is_socket) return err(OSNOS_EBADF);
 
     uint32_t ip = 0;
     uint16_t port = 0;
@@ -1304,7 +1378,8 @@ static bool fd_readable(int fd) {
     if (f->is_special) {
         return (fd == OSNOS_FD_STDIN) ? stdin_readable() : false;
     }
-    if (f->is_socket) return sock_readable(f->sock_idx);
+    if (f->is_socket)      return sock_readable(f->sock_idx);
+    if (f->is_unix_socket) return unix_sock_readable(f->unix_idx);
     if (f->is_pty && f->pty_ref) {
         return (f->pty_side == 0)
             ? pty_master_readable(f->pty_ref)
@@ -3143,7 +3218,30 @@ int64_t sys_select(int nfds,
 
 int64_t sys_accept(int fd, void *addr, void *addrlen_ptr) {
     osnos_fd_t *f = fd_get(task_current(), fd);
-    if (!f || !f->is_socket) return err(OSNOS_EBADF);
+    if (!f) return err(OSNOS_EBADF);
+
+    if (f->is_unix_socket) {
+        int child = unix_sock_accept(f->unix_idx);
+        if (child == -(int)OSNOS_EAGAIN) return err(OSNOS_EAGAIN);
+        if (child < 0)                    return -(int64_t)(-child);
+        int new_fd = fd_alloc(task_current());
+        if (new_fd < 0) { unix_sock_close(child); return err(OSNOS_EMFILE); }
+        osnos_fd_t *nf = fd_get(task_current(), new_fd);
+        nf->is_unix_socket = true;
+        nf->unix_idx       = child;
+        /* sockaddr_un opcional para el caller — emitimos vacío. */
+        if (addr && addrlen_ptr) {
+            uint32_t *alenp = (uint32_t *)addrlen_ptr;
+            if (*alenp >= 2) {
+                uint8_t buf[2] = { 1, 0 };  /* AF_UNIX little-endian */
+                copy_to_user(addr, buf, 2);
+                *alenp = 2;
+            }
+        }
+        return (int64_t)new_fd;
+    }
+
+    if (!f->is_socket) return err(OSNOS_EBADF);
 
     uint32_t peer_ip = 0;
     uint16_t peer_port = 0;
@@ -3176,8 +3274,14 @@ int64_t sys_sendto(int fd, const void *buf, size_t len, int flags,
                     const void *dst_addr, uint32_t addrlen) {
     (void)flags;
     osnos_fd_t *f = fd_get(task_current(), fd);
-    if (!f || !f->is_socket) return err(OSNOS_EBADF);
+    if (!f)                  return err(OSNOS_EBADF);
     if (!buf && len > 0)     return err(OSNOS_EFAULT);
+
+    if (f->is_unix_socket) {
+        int r = unix_sock_send(f->unix_idx, buf, len);
+        return (r < 0) ? -(int64_t)(-r) : (int64_t)r;
+    }
+    if (!f->is_socket) return err(OSNOS_EBADF);
 
     /* On a stream socket dst_addr is ignored — connection is already
      * pinned by accept/connect. Lets libc send() forward verbatim. */
@@ -3209,8 +3313,18 @@ int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
                       void *src_addr, void *addrlen_ptr) {
     (void)flags;
     osnos_fd_t *f = fd_get(task_current(), fd);
-    if (!f || !f->is_socket) return err(OSNOS_EBADF);
+    if (!f)                  return err(OSNOS_EBADF);
     if (!buf && len > 0)     return err(OSNOS_EFAULT);
+
+    if (f->is_unix_socket) {
+        int r = unix_sock_recv(f->unix_idx, buf, len);
+        if (src_addr && addrlen_ptr) {
+            uint32_t *alenp = (uint32_t *)addrlen_ptr;
+            *alenp = 0;
+        }
+        return (r < 0) ? -(int64_t)(-r) : (int64_t)r;
+    }
+    if (!f->is_socket) return err(OSNOS_EBADF);
 
     /* Stream sockets ignore src_addr (use getpeername). Non-blocking
      * single-shot; libc loops with nanosleep on EAGAIN. */
