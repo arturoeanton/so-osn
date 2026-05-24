@@ -1,45 +1,72 @@
 #!/bin/sh
-# Wrapper alrededor de clang para BusyBox builds targeting osnos.
-# - compile: clang con flags freestanding + musl headers
-# - link: ld.lld -m elf_x86_64 directo (no via clang en macOS — usaría ld64)
-MUSL_LIB=/Users/arturoeanton/github.com/arturoeanton/so-osn/osnos/vendor/musl/build-osnos/lib
+# Wrapper alrededor de clang para BusyBox cross-compile a osnos
+# desde macOS. Tres modos:
+#   1. Preproc mode (-E / -xc / -MM / -dM): plain clang con musl headers.
+#   2. Compile mode (-c): clang con -U__APPLE__ -D__linux__ + musl headers.
+#   3. Link mode: ld.lld directo (no via clang en macOS — usaría ld64).
+# El truco crítico: -U__APPLE__ -D__linux__ hace que include/platform.h
+# tome la rama Linux y use <byteswap.h>/<endian.h>/<sys/syscall.h> de
+# musl en vez de <machine/endian.h> que es macOS-specific.
 
+MUSL_DIR=/Users/arturoeanton/github.com/arturoeanton/so-osn/osnos/vendor/musl
+MUSL_LIB=$MUSL_DIR/build-osnos/lib
+MUSL_INCS="-isystem $MUSL_DIR/build-osnos/obj/include \
+           -isystem $MUSL_DIR/arch/x86_64 \
+           -isystem $MUSL_DIR/arch/generic \
+           -isystem $MUSL_DIR/include \
+           -isystem /Users/arturoeanton/github.com/arturoeanton/so-osn/osnos/kernel-deps/freestnd-c-hdrs/include"
+
+OSNOS_DEFS="-U__APPLE__ -D__linux__ -D__linux"
+
+# Classify args
 has_minus_c=0
+is_preproc=0
 for a in "$@"; do
     case "$a" in
-        -c) has_minus_c=1 ;;
+        -c)             has_minus_c=1 ;;
+        -E|-xc|-MM|-dM) is_preproc=1 ;;
     esac
 done
 
-if [ "$has_minus_c" -eq 1 ]; then
-    # Compile mode — clang normal.
-    exec clang "$@"
+# Preprocess-only invocation (busybox feature probes like `cc -E -dM -`)
+if [ "$is_preproc" -eq 1 ]; then
+    exec clang -target x86_64-unknown-none-elf $OSNOS_DEFS -nostdinc $MUSL_INCS "$@"
 fi
 
-# Link mode. BusyBox pasa: clang ... -o output OBJ1 OBJ2 ... -lm
-# Filtramos -lm, sacamos flags clang-only (-static, -no-pie), agregamos
-# crt + libc explícitos.
+# Compile-only invocation (-c)
+if [ "$has_minus_c" -eq 1 ]; then
+    exec clang -target x86_64-unknown-none-elf $OSNOS_DEFS -nostdinc $MUSL_INCS "$@"
+fi
+
+# Link mode. Filtramos flags clang-only y agregamos crt + libc explícitos.
 args=""
 output=""
 out_next=0
 for a in "$@"; do
     if [ "$out_next" -eq 1 ]; then output="$a"; out_next=0; continue; fi
     case "$a" in
-        -lm|-lpthread|-ldl|-lrt) ;;             # musl libc has these
-        -static|-no-pie|-nostdlib|-fno-PIC|-fno-pie) ;;  # ld.lld handles
+        -lm|-lpthread|-ldl|-lrt|-lc) ;;          # musl libc has these
+        -static|-no-pie|-nostdlib|-fno-PIC|-fno-pie) ;;
         -fno-stack-protector|-target|-mno-red-zone) ;;
-        x86_64-unknown-none-elf) ;;             # value of -target above
-        -fuse-ld=lld) ;;                         # we ARE lld
-        -Wl,--start-group|-Wl,--end-group) ;;   # we add our own
+        x86_64-unknown-none-elf) ;;
+        -fuse-ld=lld) ;;
+        -Wl,--start-group|-Wl,--end-group) ;;
         -Wall|-Wshadow|-Wwrite-strings|-Wundef|-Wstrict-prototypes) ;;
         -Wunused*|-Wmissing*|-Wno-*|-Wdeclaration-after-statement) ;;
         -Wold-style-definition|-fno-builtin-*|-fomit-frame-pointer) ;;
         -ffunction-sections|-fdata-sections|-funsigned-char) ;;
         -static-libgcc|-falign-functions=1|-fno-unwind-tables) ;;
-        -fno-asynchronous-unwind-tables|-Oz|-O*|-g*) ;;
+        -falign-jumps=*|-falign-labels=*|-falign-loops=*) ;;
+        -finline-limit=*|-fno-asynchronous-unwind-tables) ;;
+        -std=*|-include) ;;
+        -Iinclude|-Ilibbb|-I*) ;;
+        -D_GNU_SOURCE|-DNDEBUG|-DBB_VER=*|-DKBUILD_*) ;;
+        -Wp,*) ;;
+        -Oz|-O*|-g*) ;;
         -isystem|-nostdinc|-MMD|-MP) ;;
-        /*musl/include|/*musl/arch/*|/*musl/build-osnos/*) ;;
-        -Wl,*) args="$args ${a#-Wl,}" ;;          # strip -Wl, prefix
+        -U__APPLE__|-D__linux__|-D__linux) ;;
+        /*musl/include|/*musl/arch/*|/*musl/build-osnos/*|/*freestnd-c-hdrs/*) ;;
+        -Wl,*) args="$args ${a#-Wl,}" ;;
         -o)  out_next=1 ;;
         *)   args="$args $a" ;;
     esac
