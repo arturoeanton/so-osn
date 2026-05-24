@@ -688,6 +688,15 @@ static int64_t task_create_user_elf(
      * inválida en el pml4 nuevo del child) → page fault inmediato
      * al primer acceso a errno via %fs:offset. */
     t->fs_base           = 0;
+    /* Reset TTY termios a defaults (canonical mode + ECHO). Esto
+     * es el "exec boundary" análogo al de Linux donde cada nuevo
+     * proceso hereda un terminal con echo+canonical por default.
+     * Sin esto, si el shell padre setea raw+noecho para su line
+     * editor, el child REPL (sqlite3, lua, etc.) hereda raw y
+     * usuario no ve lo que tipea. Programs que necesitan raw
+     * (vi, less, ash mismo) call tcsetattr explícitamente. */
+    extern void tty_reset_to_defaults(void);
+    tty_reset_to_defaults();
 
     /* POSIX job-control defaults: a freshly-spawned top-level task
      * is its own session leader of its own one-task process group.
@@ -1138,6 +1147,11 @@ int64_t proc_execve_replace(const char *path, const char *args,
      * task_create_user_elf. musl __init_libc lo va a setear al
      * arrancar el nuevo programa via arch_prctl(ARCH_SET_FS). */
     t->fs_base           = 0;
+    /* Reset TTY a canonical+echo — boundary entre shell (raw mode
+     * para line editor) y el nuevo programa que generalmente quiere
+     * echo de input. Ver comment en task_create_user_elf. */
+    extern void tty_reset_to_defaults(void);
+    tty_reset_to_defaults();
     t->mmap_next         = 0;
     for (int i = 0; i < TASK_MMAP_MAX; i++) {
         t->mmap_regions[i].addr = 0;

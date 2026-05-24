@@ -174,6 +174,23 @@ static void tty_stop_signal(void) {
 
 /* ----- Public API ----- */
 
+/* Reset SOLO los flags de termios a los defaults POSIX (canonical
+ * mode + ECHO + ECHOE), sin tocar el ring buffer ni `line_*`.
+ * Llamado por proc_execve al spawn de cada child: mimic the
+ * Linux/PTY boundary donde cada exec hereda un terminal "limpio"
+ * con echo on + canonical. Sin esto, ash sets raw+noecho para su
+ * line editor, hace fork+exec, y el child (sqlite3 / lua REPL /
+ * etc.) hereda raw+noecho — usuario tipea y no ve nada. Real
+ * Linux no tiene este problema porque cada PTY tiene su propio
+ * termios; en osnos tenemos UN solo TTY global. El reset al
+ * execve es el workaround pragmático. Programs que necesitan raw
+ * (vi, less, ash mismo) van a llamar tcsetattr explícitamente. */
+void tty_reset_to_defaults(void) {
+    tty_t.c_iflag = TTY_ICRNL;
+    tty_t.c_oflag = 0;
+    tty_t.c_lflag = TTY_ISIG | TTY_ICANON | TTY_ECHO | TTY_ECHOE;
+}
+
 void tty_init(void) {
     tty_t.c_iflag = TTY_ICRNL;
     tty_t.c_oflag = 0;
@@ -311,6 +328,34 @@ int tty_get_termios(struct osnos_termios *out) {
 
 int tty_set_termios(const struct osnos_termios *in) {
     if (!in) return -1;
+    /* Anti-clobber: si la tarea que está intentando deshabilitar ECHO
+     * tiene children vivos, ignoramos el cambio. Caso típico: ash
+     * (parent) hace `tcsetattr(ECHO=off)` PRE-emptivamente después
+     * de fork para tener raw mode listo para su próximo prompt,
+     * pero como osnos tiene un solo TTY global compartido, ese
+     * cambio mata el echo del child (sqlite3, lua REPL, etc.).
+     * Real Linux maneja esto via SIGTTOU + controlling-pgid checks
+     * que no tenemos implementados; esta heurística es el approximate
+     * práctico — sin children vivos, ash puede setear lo que quiera.
+     * Cuando los children terminan, ash hace su tcsetattr propio
+     * exitoso en la siguiente lectura. */
+    if (!(in->c_lflag & TTY_ECHO)) {
+        task_t *self = task_current();
+        if (self && self->pml4) {
+            extern const task_t *task_slot(size_t idx);
+            for (size_t i = 0; i < 16; i++) {
+                const task_t *child = task_slot(i);
+                if (!child) continue;
+                if (child->parent_pid != self->pid) continue;
+                if (child->state == TASK_UNUSED ||
+                    child->state == TASK_DEAD ||
+                    child->state == TASK_ZOMBIE) continue;
+                /* Hay un child activo. Ignoramos este intento de
+                 * disable de ECHO — el child necesita echo on. */
+                return 0;
+            }
+        }
+    }
     tty_t = *in;
     return 0;
 }

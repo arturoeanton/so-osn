@@ -101,6 +101,13 @@ struct osnos_winsize {
 
 void   tty_init(void);
 
+/* Reset termios flags to POSIX defaults (ICANON | ECHO | ECHOE).
+ * Called by proc_execve so each new child starts with a "clean"
+ * terminal — sin esto, un shell que pone raw mode + ECHO=off
+ * para su line editor deja el TTY así, y el child hereda raw
+ * (sin echo de teclas del usuario). */
+void   tty_reset_to_defaults(void);
+
 /* Called from keyboard_server with one decoded ASCII char per
  * keystroke. Applies the current termios; may consume the char
  * silently (backspace inside canonical line), enqueue it for read
