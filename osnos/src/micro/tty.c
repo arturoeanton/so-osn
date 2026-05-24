@@ -58,7 +58,15 @@ static void tty_echo_char(char c) {
 
 static void tty_echo_erase(void) {
     if (!(tty_t.c_lflag & TTY_ECHOE)) return;
-    framebuffer_backspace();
+    /* Sequence "BS SPACE BS" — el clásico erase visual: cursor atrás,
+     * sobreescribe el char con espacio, cursor atrás otra vez. Usar
+     * framebuffer_write_bytes (no _draw_string ni _backspace directo)
+     * para mantener el mismo path/cursor que las apps via consrv.
+     * Sin esto, framebuffer_backspace solo movía el cursor pero el
+     * char visual seguía ahí, y peor: cursor se desincronizaba con
+     * lo que el app esperaba. */
+    extern void framebuffer_write_bytes(const char *buf, size_t n, uint32_t color);
+    framebuffer_write_bytes("\b \b", 3, 0xffffff);
 }
 
 /* Deliver SIGINT to the current foreground user task.
