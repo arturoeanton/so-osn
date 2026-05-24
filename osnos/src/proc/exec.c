@@ -456,7 +456,8 @@ static uint64_t build_argv_block_tokens(uint64_t *pml4,
                                          const char **tokens,
                                          const size_t *token_lens,
                                          int argc,
-                                         const char *const *envp);
+                                         const char *const *envp,
+                                         const elf_load_result_t *aux_info);
 
 /* build_argv_block_argv — variante que toma argv como ARRAY pre-parsed.
  * Necesario para sys_execve (Linux argv[]): preserva boundaries que
@@ -477,7 +478,30 @@ static uint64_t build_argv_block_argv(uint64_t   *pml4,
             argc++;
         }
     }
-    return build_argv_block_tokens(pml4, user_stack_top, tokens, token_lens, argc, envp);
+    return build_argv_block_tokens(pml4, user_stack_top, tokens, token_lens, argc, envp, 0);
+}
+
+/* Variante con info ELF para dynamic linking: emite auxv completo
+ * (AT_PHDR, AT_PHENT, AT_PHNUM, AT_BASE, AT_ENTRY, AT_RANDOM) que
+ * ld-musl.so necesita parsear al arrancar. Sin esto la interp sale
+ * con error temprano. */
+static uint64_t build_argv_block_argv_dyn(uint64_t   *pml4,
+                                          uint64_t    user_stack_top,
+                                          const char *const *argv,
+                                          const char *const *envp,
+                                          const elf_load_result_t *aux_info)
+{
+    const char *tokens[MAX_ARGV];
+    size_t      token_lens[MAX_ARGV];
+    int         argc = 0;
+    if (argv) {
+        while (argv[argc] && argc < MAX_ARGV) {
+            tokens[argc]     = argv[argc];
+            token_lens[argc] = os_strlen(argv[argc]);
+            argc++;
+        }
+    }
+    return build_argv_block_tokens(pml4, user_stack_top, tokens, token_lens, argc, envp, aux_info);
 }
 
 static uint64_t build_argv_block(uint64_t   *pml4,
@@ -544,18 +568,24 @@ static uint64_t build_argv_block(uint64_t   *pml4,
         argc++;
     }
 
-    return build_argv_block_tokens(pml4, user_stack_top, tokens, token_lens, argc, envp);
+    return build_argv_block_tokens(pml4, user_stack_top, tokens, token_lens, argc, envp, 0);
 }
 
 /* build_argv_block_tokens — código común post-tokenizado. Recibe
  * arrays paralelos de strings + sus longitudes; serializa al stack
- * SysV-init (argc | argv[] | envp[] | aux | strings). */
+ * SysV-init (argc | argv[] | envp[] | aux | strings).
+ *
+ * `aux_info` opcional: si != NULL, emite auxv full (AT_PHDR/PHENT/
+ * PHNUM/BASE/ENTRY/RANDOM) que ld-musl.so requiere. Sino, auxv
+ * mínimo (solo AT_PAGESZ + terminator) — basta para static binaries.
+ */
 static uint64_t build_argv_block_tokens(uint64_t *pml4,
                                          uint64_t user_stack_top,
                                          const char **tokens,
                                          const size_t *token_lens,
                                          int argc,
-                                         const char *const *envp)
+                                         const char *const *envp,
+                                         const elf_load_result_t *aux_info)
 {
     /* Snapshot envp[] pointers + lengths. envp may be NULL. */
     const char *envs[MAX_ENVP];
@@ -569,19 +599,27 @@ static uint64_t build_argv_block_tokens(uint64_t *pml4,
         }
     }
 
-    /* Total bytes for ALL strings (argv + envp), each NUL-terminated. */
+    /* Total bytes for ALL strings (argv + envp), each NUL-terminated.
+     * Si vamos a emitir AT_RANDOM, sumamos 16 bytes para el blob de
+     * "random" (necesario para musl stack canary; ponemos ceros + el
+     * pid para que no sea idéntico entre tasks pero tampoco predecible
+     * trivialmente). Lo plantamos en el área de strings. */
     size_t strings_total = 0;
     for (int i = 0; i < argc; i++) strings_total += token_lens[i] + 1;
     for (int i = 0; i < envc; i++) strings_total += env_lens[i] + 1;
+    size_t random_offset = 0;
+    if (aux_info) {
+        /* Reserve 16 bytes for AT_RANDOM, 8-byte-aligned. */
+        strings_total = (strings_total + 7) & ~(size_t)7;
+        random_offset = strings_total;
+        strings_total += 16;
+    }
 
-    /* musl + glibc init code expects an `auxv` array right after the
-     * envp NULL: pairs of {key, value} terminated by {AT_NULL, 0}.
-     * Without it, __init_libc reads past envp into random string bytes
-     * and assigns nonsense to libc.page_size etc. We ship a tiny set:
-     *   AT_PAGESZ = 6  → 4096   (musl uses this; readelf -d shows it)
-     *   AT_NULL   = 0  → 0      (terminator)
-     * 4 u64s = 32 bytes. */
-    size_t aux_bytes = 4 * 8;
+    /* AUX entries count: mínimo = 2 (AT_PAGESZ + AT_NULL).
+     * Full   = 8 (AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE,
+     *             AT_ENTRY, AT_RANDOM, AT_NULL). */
+    int aux_pairs = aux_info ? 8 : 2;
+    size_t aux_bytes = (size_t)aux_pairs * 2 * 8;
 
     /* Stay well inside the 4 KiB user stack page. */
     size_t block_size =
@@ -605,23 +643,20 @@ static uint64_t build_argv_block_tokens(uint64_t *pml4,
 
     /* Pointer area layout (top → bottom):
      *   [strings_base]
-     *   [aux: AT_NULL,0]
-     *   [aux: AT_PAGESZ,4096]
+     *   [auxv...]
      *   [envp_null]
      *   [envp[envc-1..0]]
      *   [argv_null]
      *   [argv[argc-1..0]]
      *   [argc]                ← argc_virt = RSP at entry
      */
-    uint64_t aux_null_val_virt = strings_base_virt   - 8;
-    uint64_t aux_null_key_virt = aux_null_val_virt   - 8;
-    uint64_t aux_ps_val_virt   = aux_null_key_virt   - 8;
-    uint64_t aux_ps_key_virt   = aux_ps_val_virt     - 8;
-    uint64_t envp_null_virt    = aux_ps_key_virt     - 8;
-    uint64_t envp0_virt        = envp_null_virt      - 8 * (uint64_t)envc;
-    uint64_t argv_null_virt    = envp0_virt          - 8;
-    uint64_t argv0_virt        = argv_null_virt      - 8 * (uint64_t)argc;
-    uint64_t argc_virt         = argv0_virt          - 8;
+    uint64_t auxv_end_virt   = strings_base_virt;
+    uint64_t auxv_start_virt = auxv_end_virt - aux_bytes;
+    uint64_t envp_null_virt  = auxv_start_virt   - 8;
+    uint64_t envp0_virt      = envp_null_virt    - 8 * (uint64_t)envc;
+    uint64_t argv_null_virt  = envp0_virt        - 8;
+    uint64_t argv0_virt      = argv_null_virt    - 8 * (uint64_t)argc;
+    uint64_t argc_virt       = argv0_virt        - 8;
 
     /* Copy strings, recording the virt address of each. */
     uint64_t arg_ptrs[MAX_ARGV];
@@ -645,13 +680,34 @@ static uint64_t build_argv_block_tokens(uint64_t *pml4,
         page[off + env_lens[i]] = 0;
         cursor += env_lens[i] + 1;
     }
+    /* AT_RANDOM blob (16 bytes). Plantamos un patrón fijo + pid; no es
+     * seguro criptográficamente pero alcanza para musl stack canary
+     * (que solo verifica que NO sea cero entre llamadas). */
+    uint64_t random_user_va = 0;
+    if (aux_info) {
+        random_user_va = strings_base_virt + random_offset;
+        size_t off = random_user_va - page_virt;
+        for (int b = 0; b < 16; b++) {
+            page[off + b] = (uint8_t)(0xa5 ^ b);
+        }
+    }
 
-    /* Write the pointer block. */
-    /* auxv: {AT_PAGESZ=6, 4096}, {AT_NULL=0, 0} */
-    *(uint64_t *)(page + (aux_null_val_virt - page_virt)) = 0;
-    *(uint64_t *)(page + (aux_null_key_virt - page_virt)) = 0;        /* AT_NULL   */
-    *(uint64_t *)(page + (aux_ps_val_virt   - page_virt)) = 4096;
-    *(uint64_t *)(page + (aux_ps_key_virt   - page_virt)) = 6;        /* AT_PAGESZ */
+    /* Write the auxv pairs (low → high addresses, so we can iterate). */
+    uint64_t *aux_kva = (uint64_t *)(page + (auxv_start_virt - page_virt));
+    int ai = 0;
+    if (aux_info) {
+        aux_kva[ai*2 + 0] = 3;  aux_kva[ai*2 + 1] = aux_info->phdr_user_va; ai++;     /* AT_PHDR */
+        aux_kva[ai*2 + 0] = 4;  aux_kva[ai*2 + 1] = aux_info->phentsize;    ai++;     /* AT_PHENT */
+        aux_kva[ai*2 + 0] = 5;  aux_kva[ai*2 + 1] = aux_info->phnum;        ai++;     /* AT_PHNUM */
+        aux_kva[ai*2 + 0] = 6;  aux_kva[ai*2 + 1] = 4096;                   ai++;     /* AT_PAGESZ */
+        aux_kva[ai*2 + 0] = 7;  aux_kva[ai*2 + 1] = aux_info->interp_base;  ai++;     /* AT_BASE */
+        aux_kva[ai*2 + 0] = 9;  aux_kva[ai*2 + 1] = aux_info->entry;        ai++;     /* AT_ENTRY */
+        aux_kva[ai*2 + 0] = 25; aux_kva[ai*2 + 1] = random_user_va;         ai++;     /* AT_RANDOM */
+        aux_kva[ai*2 + 0] = 0;  aux_kva[ai*2 + 1] = 0;                      ai++;     /* AT_NULL */
+    } else {
+        aux_kva[ai*2 + 0] = 6;  aux_kva[ai*2 + 1] = 4096;                   ai++;     /* AT_PAGESZ */
+        aux_kva[ai*2 + 0] = 0;  aux_kva[ai*2 + 1] = 0;                      ai++;     /* AT_NULL */
+    }
     *(uint64_t *)(page + (envp_null_virt - page_virt)) = 0;
     for (int i = 0; i < envc; i++) {
         *(uint64_t *)(page + (envp0_virt + 8 * (uint64_t)i - page_virt)) =
@@ -1325,12 +1381,53 @@ int64_t proc_execve_replace_argv(const char *path,
     osnos_status_t s = resolve_executable(path, &blob, &blob_size, &blob_owned);
     if (s != OSNOS_OK) return -(int64_t)s;
 
+    /* Detectar PT_INTERP en el blob principal. Si lo tiene, cargar
+     * el interpreter (ld-musl.so) también y arrancar ahí — el
+     * interpreter resuelve dynamic libs y luego salta al main. */
+    char interp_path[OSNOS_PATH_MAX];
+    uint8_t *interp_blob_owned = 0;
+    const uint8_t *interp_blob = 0;
+    size_t interp_size = 0;
+    osnos_status_t igs = elf_get_interp(blob, blob_size, interp_path, sizeof(interp_path));
+    if (igs == OSNOS_OK) {
+        /* Leer interpreter del VFS. */
+        vfs_stat_t ist;
+        if (vfs_stat(interp_path, &ist) != OSNOS_OK || ist.type != VFS_NODE_REG ||
+            ist.size == 0 || ist.size > EXEC_VFS_BLOB_MAX) {
+            if (blob_owned) kfree(blob_owned);
+            return -(int64_t)OSNOS_ENOENT;
+        }
+        interp_size = (size_t)ist.size;
+        interp_blob_owned = (uint8_t *)kmalloc(interp_size);
+        if (!interp_blob_owned) {
+            if (blob_owned) kfree(blob_owned);
+            return -(int64_t)OSNOS_ENOMEM;
+        }
+        size_t igot = 0;
+        if (vfs_read(interp_path, (char *)interp_blob_owned, interp_size, &igot)
+              != OSNOS_OK || igot != interp_size) {
+            kfree(interp_blob_owned);
+            if (blob_owned) kfree(blob_owned);
+            return -(int64_t)OSNOS_EIO;
+        }
+        interp_blob = interp_blob_owned;
+    }
+
     uint64_t *new_pml4 = 0;
-    uint64_t  new_entry = 0;
-    uint64_t  new_stack_top = 0;
-    s = elf_load(blob, blob_size, &new_pml4, &new_entry, &new_stack_top);
-    if (blob_owned) kfree(blob_owned);
+    elf_load_result_t er = {0};
+    if (interp_blob) {
+        s = elf_load_dyn(blob, blob_size, interp_blob, interp_size, &new_pml4, &er);
+    } else {
+        /* Path estático tradicional — auxv mínimo. */
+        s = elf_load(blob, blob_size, &new_pml4, &er.entry, &er.stack_top);
+        er.start_entry = er.entry;
+    }
+    if (blob_owned)        kfree(blob_owned);
+    if (interp_blob_owned) kfree(interp_blob_owned);
     if (s != OSNOS_OK) return -(int64_t)s;
+
+    uint64_t new_entry      = er.start_entry;
+    uint64_t new_stack_top  = er.stack_top;
 
     /* basename para task name. */
     const char *base = path;
@@ -1338,7 +1435,12 @@ int64_t proc_execve_replace_argv(const char *path,
         if (*p == '/') base = p + 1;
     }
 
-    uint64_t init_rsp = build_argv_block_argv(new_pml4, new_stack_top, argv, envp);
+    uint64_t init_rsp;
+    if (interp_blob) {
+        init_rsp = build_argv_block_argv_dyn(new_pml4, new_stack_top, argv, envp, &er);
+    } else {
+        init_rsp = build_argv_block_argv(new_pml4, new_stack_top, argv, envp);
+    }
     if (init_rsp == 0) {
         address_space_destroy(new_pml4);
         return -(int64_t)OSNOS_E2BIG;

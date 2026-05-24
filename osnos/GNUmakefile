@@ -192,7 +192,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/tools/uxsh.c
 
 # musl-linked ELFs (vendor/musl). Declared early so USER_ELF_LIST sees it.
-USER_ELF_MUSL_SRCS := elfs/tests/hello_musl.c elfs/tests/poll_musl.c elfs/tests/ls_musl.c
+USER_ELF_MUSL_SRCS := elfs/tests/hello_musl.c elfs/tests/poll_musl.c elfs/tests/ls_musl.c elfs/tests/hello_dyn.c
 USER_ELF_MUSL_EXTRA := $(BUILD)/elfs/tools/sqlite3.elf
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
@@ -264,7 +264,7 @@ SD_IMG       := sd.img
 # limit). mformat with -c 8 (4 KiB clusters) keeps the cluster count
 # under 65525 so the volume stays FAT16, which is what our parser
 # understands.
-SD_SIZE_MB   ?= 32
+SD_SIZE_MB   ?= 64
 SD_TMP       := $(BUILD)/sd_seed
 SD_README_TXT = hola desde el disco
 SD_HELLO_TXT  = fat works!
@@ -362,6 +362,16 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBTCC1_A) $(CRTI_O) $(CRTN
 	mcopy -i $@ -o $(CRTN_O)     ::/lib/crtn.o
 	mcopy -i $@ -o $(LIBC_A)     ::/lib/libc.a
 	mcopy -i $@ -o $(LIBTCC1_A)  ::/lib/tcc/libtcc1.a
+	@# musl dynamic linker / libc.so (FASE 14.4). En musl, libc.so
+	@# es a la vez la libc dinámica Y el dynamic linker — el mismo
+	@# binario serves both roles. Lo copiamos como /lib/libc.so y
+	@# como /lib/ld-musl-x86_64.so.1 (lo que PT_INTERP apunta por
+	@# default en cualquier dyn-linked musl ELF).
+	@if [ -f $(MUSL_BUILD)/lib/libc.so ]; then \
+	    mcopy -i $@ -o $(MUSL_BUILD)/lib/libc.so ::/lib/libc.so; \
+	    mcopy -i $@ -o $(MUSL_BUILD)/lib/libc.so ::/lib/ld-musl-x86_64.so.1; \
+	    echo "  COPY    /lib/libc.so + /lib/ld-musl-x86_64.so.1"; \
+	fi
 	@# BusyBox 1.36.1 — segundo shell + ~30 applets (FASE 13.1).
 	@if [ -f vendor/busybox/busybox_unstripped ]; then \
 	    mcopy -i $@ -o vendor/busybox/busybox_unstripped ::/bin/busybox; \
@@ -532,6 +542,20 @@ $(BUILD)/elfs/tests/ls_musl.elf: elfs/tests/ls_musl.c elfs/musl.lds \
 	$(CC) $(MUSL_CFLAGS) -c $< -o $@.tmp.o
 	$(LD) $(MUSL_LDFLAGS) -T elfs/musl.lds \
 	    $(MUSL_CRT1) $(MUSL_CRTI) $@.tmp.o $(MUSL_LIB) $(MUSL_CRTN) -o $@
+	rm $@.tmp.o
+
+# Dynamic-linked hello (FASE 14.4). Linkea contra libc.so en vez de
+# libc.a, PT_INTERP=/lib/ld-musl-x86_64.so.1. ET_EXEC con dyn segments.
+# `-Bdynamic` + `--dynamic-linker` + ld.so as input, no -static.
+MUSL_LIBSO   := $(MUSL_BUILD)/lib/libc.so
+$(BUILD)/elfs/tests/hello_dyn.elf: elfs/tests/hello_dyn.c \
+        $(MUSL_LIBSO) $(MUSL_CRT1) $(MUSL_CRTI) $(MUSL_CRTN)
+	mkdir -p "$(dir $@)"
+	$(CC) $(MUSL_CFLAGS) -fPIC -c $< -o $@.tmp.o
+	$(LD) -m elf_x86_64 -nostdlib -no-pie -z noexecstack \
+	    --dynamic-linker=/lib/ld-musl-x86_64.so.1 \
+	    --hash-style=both --allow-shlib-undefined \
+	    $(MUSL_CRT1) $(MUSL_CRTI) $@.tmp.o $(MUSL_LIBSO) $(MUSL_CRTN) -o $@
 	rm $@.tmp.o
 
 # --------------------------------------------------------------------------

@@ -264,9 +264,24 @@ Trabajo:
 
 **Out of scope**: file-backed (non-shm) mmap de archivos regulares en disco (futuro: necesario para programas que mmappean ELFs). PROT_EXEC enforcement vía NX bit (todo mmap hoy es efectivamente RWX). Resize después de mmap (changing un shm que ya tiene mappers vivos rompe; requiere notificación a clientes via signals).
 
-#### FASE 14.4 — Dynamic linking (.so) (pendiente)
-- ❌ ELF dynamic loader (`ld-musl.so`), PT_INTERP, PT_DYNAMIC, GOT/PLT, lazy resolve.
-- Habilita ejecutables Linux unmodified que asuman dynamic libc.
+#### FASE 14.4 — Dynamic linking (.so) — ✅ **CERRADA**
+
+`/bin/hello_dyn` linkeado dynamic-musl arranca via PT_INTERP, el dynamic linker (`ld-musl.so` que en musl ES la libc.so) resuelve printf + libc symbols contra `libc.so`, y main() corre limpio imprimiendo a stdout.
+
+Trabajo:
+
+- ✅ **musl rebuild con shared**: re-`./configure` sin `--disable-shared`, luego `make` produce `lib/libc.so` (la libc.so DE musl ya incluye `_dlstart` y todo el dynamic linker — no hay un binario `ld-musl.so` separado, es el mismo `libc.so` con dos roles). Link de libc.so necesitó manual fix con `ld.lld` directamente (clang chokeaba con `-Wa,--noexecstack` durante linking). Output: 882 KB ELF DYN con SONAME=libc.so y dynamic section completa.
+- ✅ **Stubs compiler-rt** (`vendor/musl/build-osnos/stubs.c`): musl interno usa `__mulxc3`/`__mulsc3`/`__muldc3` (complex multiplication helpers) que normalmente vienen de libgcc.a/compiler_rt — nuestro musl build no incluye LIBCC. Sin stubs, ld-musl.so reportaba "Error relocating … symbol not found" al cargar libc.so. Stubs vacíos (apps no usan complex math) los resuelven. Linkeados al libc.so.
+- ✅ **`src/proc/elf.{c,h}` extendido**: `validate_ehdr_loose` acepta ET_DYN (para el interpreter); `elf_get_interp(blob)` parsea PT_INTERP y devuelve el path string; `elf_load_dyn(main, interp, ...)` carga AMBOS blobs en el mismo PML4 — main en sus p_vaddr originales (ET_EXEC), interpreter offseteado a `INTERP_LOAD_BASE=0x40000000`. Devuelve `elf_load_result_t` con: e_entry del main, start_entry (= interpreter entry+base si hay interp, else main entry), phdr_user_va (para AT_PHDR), phnum, phentsize, interp_base.
+- ✅ **Auxv extendido** (`src/proc/exec.c` `build_argv_block_tokens` ahora toma `const elf_load_result_t *aux_info`): para el path estático sigue emitiendo solo `AT_PAGESZ + AT_NULL` (32 bytes). Para el path dinámico emite **8 pares**: `AT_PHDR=3`, `AT_PHENT=4`, `AT_PHNUM=5`, `AT_PAGESZ=6`, `AT_BASE=7`, `AT_ENTRY=9`, `AT_RANDOM=25` (apunta a 16 bytes plantados en el área de strings), `AT_NULL=0`. ld-musl.so necesita TODOS estos para parsear y reubicar el main + libs.
+- ✅ **`proc_execve_replace_argv` wirea PT_INTERP**: detecta PT_INTERP en el blob principal, lee el interp ELF del VFS (`/lib/ld-musl-x86_64.so.1`), llama `elf_load_dyn`, usa `build_argv_block_argv_dyn` con el result. Path estático (sin PT_INTERP) sigue usando `elf_load` legacy.
+- ✅ **sd.img bump 32→64 MiB**: las dos copias de libc.so (~1.7 MiB combined) + busybox (1.3 MiB) + binarios existentes saturaban el 32 MiB. 64 MiB con `-c 8` (4 KiB clusters) = 16384 clusters, bajo el FAT16 max de 65525.
+- ✅ **GNUmakefile stage**: `mcopy` libc.so a `/lib/libc.so` Y a `/lib/ld-musl-x86_64.so.1` (FAT16 no tiene symlinks; el path en PT_INTERP es lo que importa). Nueva regla `$(BUILD)/elfs/tests/hello_dyn.elf` linkea dynamic: `ld -m elf_x86_64 -nostdlib -no-pie -z noexecstack --dynamic-linker=/lib/ld-musl-x86_64.so.1 --hash-style=both --allow-shlib-undefined crt1.o crti.o app.o libc.so crtn.o`.
+- ✅ **`elfs/tests/hello_dyn.c`** smoke test: `printf("hello from dynamic linker on osnos!\n")`. Verificado: `/bin/hello_dyn` → `hello from dynamic linker on osnos!` / `argc=1 argv[0]='/bin/hello_dyn'`.
+
+**Test integral FASE 14.1-14.4**: `make hello && /home/hello` ✓; `shmtest: OK` ✓; `unixtest: OK` ✓; `hello_dyn` ✓; `sqlite3 SELECT 7*8 → 56` ✓; `lua print(1+2+3) → 6` ✓.
+
+**Out of scope**: PIE main (ET_DYN executable cargado con load offset random). RTLD_LAZY (lazy bind via PLT trampolines — hoy todo se relocata eagerly). dlopen/dlsym (musl los expone via libc.so pero no probamos cargar libs dynamic adicionales). Multiple .so deps (DT_NEEDED transitivo).
 
 #### FASE 14.5 — Ox extendido + Ox-as-X11 (pendiente)
 - ❌ Ox compite con nano-X (botones reales, widget tree, propiedades).
