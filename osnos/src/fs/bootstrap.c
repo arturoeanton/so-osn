@@ -25,12 +25,13 @@ static void seed_if_absent(const char *path, const char *content) {
 }
 
 /* Storage for the /home → /sd/home, /bin → /sd/bin, /lib → /sd/lib,
- * /usr → /sd/usr bind mounts. Lives in BSS — the VFS layer keeps
- * pointers into here. */
+ * /usr → /sd/usr, /etc → /sd/etc bind mounts. Lives in BSS — the
+ * VFS layer keeps pointers into here. */
 static aliasfs_t home_alias_slot;
 static aliasfs_t bin_alias_slot;
 static aliasfs_t lib_alias_slot;
 static aliasfs_t usr_alias_slot;
+static aliasfs_t etc_alias_slot;
 
 /* Walk the embedded ELF registry and write each blob into /sd/bin/<name>
  * if the file isn't already there. With FASE2-1's dir-chain extension
@@ -149,6 +150,30 @@ void bootstrap_fs(void) {
         if (aliasfs_init(&usr_alias_slot, "/usr", "/sd/usr")) {
             vfs_mount("/usr", &aliasfs_ops, &usr_alias_slot);
         }
+        /* /etc → /sd/etc — populated by the build with passwd,
+         * group, hosts so BusyBox getpwuid / cat /etc/passwd
+         * funcionan sin que cada applet maneje paths /sd/. */
+        vfs_mkdir("/sd/etc");
+        if (aliasfs_init(&etc_alias_slot, "/etc", "/sd/etc")) {
+            vfs_mount("/etc", &aliasfs_ops, &etc_alias_slot);
+        }
+        /* /etc/profile — sourced ONCE at login. System-wide env vars
+         * only (PATH/HOME/HISTFILE/...) — NO banners, no PS1, no
+         * interactive niceties (those go in /home/.ashrc which is
+         * sourced for every interactive shell). This split mirrors
+         * the bash convention: /etc/profile + ~/.profile run on
+         * login, ~/.bashrc runs every interactive shell. */
+        seed_if_absent("/etc/profile",
+            "# osnos /etc/profile — system-wide login env. Sourced ONCE.\n"
+            "# Put env vars here. Put aliases / prompt / banner in ~/.ashrc.\n"
+            "export PATH=/bin\n"
+            "export HOME=/home\n"
+            "export HISTFILE=/home/.ash_history\n"
+            "export HISTSIZE=500\n"
+            "export TERM=linux\n"
+            "export ENV=/home/.ashrc\n");
+        /* /home/.ashrc seed lives further down — it has to wait until
+         * the /home aliasfs is mounted. */
     } else {
         vfs_mount("/bin", &binfs_vfs_ops, 0);
     }
@@ -182,6 +207,23 @@ void bootstrap_fs(void) {
             "export HOME=/home\n"
             "export SHELL=/bin/shellsrv\n"
             "export OSNAME=osnos\n");
+        /* /home/.ashrc — bash-style "rc file" para BusyBox ash.
+         * Sourced en cada shell interactiva via $ENV=/home/.ashrc
+         * (definido en /etc/profile). Aquí van prompt, aliases y
+         * banner — análogo a ~/.bashrc en sistemas Linux. El usuario
+         * puede editarlo libremente con `ovi /home/.ashrc`. */
+        seed_if_absent("/home/.ashrc",
+            "# osnos ~/.ashrc — sourced every interactive ash session.\n"
+            "# Edit freely: prompt, aliases, banner, anything per-shell.\n"
+            "export PS1='osnos:\\w# '\n"
+            "alias ll='ls -l'\n"
+            "alias la='ls -la'\n"
+            "alias l='ls -CF'\n"
+            "alias ..='cd ..'\n"
+            "alias h='history'\n"
+            "alias cls=clear\n"
+            "/bin/banner osnos 2>/dev/null\n"
+            "echo 'BusyBox ash on osnos — help for builtins, ls /bin for commands.'\n");
         /* Ox window-system settings (FASE 12). oxsrv reads this at
          * boot; /bin/oxsettings rewrites it. */
         seed_if_absent("/home/.oxrc",

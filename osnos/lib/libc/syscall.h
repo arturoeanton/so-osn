@@ -57,7 +57,7 @@
 #define SYS_MKDIR     83
 #define SYS_RMDIR     84
 #define SYS_UNLINK    87
-#define SYS_ISATTY   250   /* osnos-specific (above 250 to dodge Linux #201/#228) */
+#define SYS_ISATTY   500   /* osnos-specific (moved to 500+ to dodge Linux #201/#228/#262=newfstatat) */
 #define SYS_GETDENTS 217
 #define SYS_SELECT     23
 #define SYS_SOCKET     41

@@ -194,7 +194,34 @@ void kmain(void) {
     if (kbdsrv_pid > 0) {
         service_register(SERVER_KEYBOARD, (uint64_t)kbdsrv_pid);
     }
-    int64_t shellsrv_pid = proc_execve("/bin/shellsrv", "", 0);
+    /* System shell. Prefer BusyBox ash (FASE 13.1) — POSIX-compliant
+     * sh with full arithmetic, loops, parameter expansion, etc.
+     * `-l` makes it a login shell so /etc/profile gets sourced
+     * (banner + HISTFILE setup). envp pre-seeds PATH/HOME/HISTFILE/
+     * TERM so the very first command can find /bin executables and
+     * line-editing history persists across reboots in /home/.ash_history.
+     * Fall back to legacy shellsrv if /bin/busybox isn't on disk
+     * (diskless boot uses the ROM shellsrv recovery). */
+    /* Minimal envp. HISTFILE *must* live here (not /etc/profile)
+     * because BusyBox ash reads it BEFORE entering cmdloop to set
+     * line_input_state->hist_file; /etc/profile runs INSIDE cmdloop
+     * so a HISTFILE export there would arrive too late. PS1, aliases,
+     * banner stay in /home/.ashrc (sourced via $ENV every interactive
+     * shell) so the user can edit them without recompiling the
+     * kernel. PATH/HOME pre-seeded so /etc/profile finds /bin/banner
+     * even before its own `export PATH=/bin` runs. */
+    static const char *shell_envp[] = {
+        "PATH=/bin",
+        "HOME=/home",
+        "HISTFILE=/home/.ash_history",
+        "HISTSIZE=500",
+        "TERM=linux",
+        0
+    };
+    int64_t shellsrv_pid = proc_execve("/bin/busybox", "sh -l", shell_envp);
+    if (shellsrv_pid <= 0) {
+        shellsrv_pid = proc_execve("/bin/shellsrv", "", 0);
+    }
     if (shellsrv_pid > 0) {
         service_register(SERVER_SHELL, (uint64_t)shellsrv_pid);
     }
@@ -278,7 +305,32 @@ static void respawn_if_dead(int sid, const char *path) {
 static void server_respawn_tick(void) {
     respawn_if_dead(SERVER_CONSOLE,  "/bin/consrv");
     respawn_if_dead(SERVER_KEYBOARD, "/bin/kbdsrv");
-    respawn_if_dead(SERVER_SHELL,    "/bin/shellsrv");
+    /* Shell respawn: prefer ash (-l login mode + envp), fallback
+     * shellsrv. Keep envp/args in sync with the boot spawn above. */
+    static const char *resp_envp[] = {
+        "PATH=/bin", "HOME=/home",
+        "HISTFILE=/home/.ash_history", "HISTSIZE=500",
+        "TERM=linux", 0
+    };
+    if (service_get_pid((uint64_t)SERVER_SHELL) == 0) {
+        int64_t pid = proc_execve("/bin/busybox", "sh -l", resp_envp);
+        if (pid <= 0) pid = proc_execve("/bin/shellsrv", "", 0);
+        if (pid > 0) service_register((uint64_t)SERVER_SHELL, (uint64_t)pid);
+    } else {
+        uint64_t pid = service_get_pid((uint64_t)SERVER_SHELL);
+        int alive = 0;
+        for (size_t i = 0; i < 16; i++) {
+            const task_t *t = task_slot(i);
+            if (t && t->pid == pid && t->state != TASK_UNUSED && t->state != TASK_DEAD) {
+                alive = 1; break;
+            }
+        }
+        if (!alive) {
+            int64_t np = proc_execve("/bin/busybox", "sh -l", resp_envp);
+            if (np <= 0) np = proc_execve("/bin/shellsrv", "", 0);
+            if (np > 0) service_register((uint64_t)SERVER_SHELL, (uint64_t)np);
+        }
+    }
     /* SERVER_OX (oxsrv) is opt-in — user starts it via `oxsrv` in
      * the shell. No respawn here so quitting it (Alt+F12 / sys_exit)
      * actually stays quit. */

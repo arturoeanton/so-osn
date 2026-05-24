@@ -357,6 +357,57 @@ int64_t sys_write(int fd, const void *buf, size_t count) {
 /* sys_read                                                           */
 /* ------------------------------------------------------------------ */
 
+/*
+ * POSIX-style restart_syscall: park the calling user task in the
+ * blocked queue with iret RIP rewound 2 bytes (past the preceding
+ * `syscall` or `int 0x80` instruction, both 2-byte) and saved_rax set
+ * to the original syscall number so the CPU re-executes the same call
+ * on wake-up. Returns 0 = OK (caller MUST treat as "this function
+ * never returned — control transferred out") or non-zero on inability
+ * to block (kernel-mode caller, no kstack, etc).
+ *
+ * After this returns control to sched_resume_jump, the next time the
+ * task is dispatched the user-space RIP points at the syscall
+ * instruction → the syscall is re-issued → kernel checks readiness
+ * again. This is how Linux implements blocking I/O on top of a
+ * non-preemptive in-kernel control flow.
+ */
+static int block_restart_syscall(uint64_t wakeup_at_ms, uint64_t syscall_nr) {
+    task_t *tc = task_current();
+    if (!tc || !tc->pml4 || !tc->kernel_stack_top) return -1;
+    if (tc->kill_pending) return -1;
+
+    uint64_t *iret = (uint64_t *)(tc->kernel_stack_top - 40);
+    tc->saved_iret_rip    = iret[0] - 2;  /* re-execute syscall insn */
+    tc->saved_iret_cs     = iret[1];
+    tc->saved_iret_rflags = iret[2];
+    tc->saved_iret_rsp    = iret[3];
+    tc->saved_iret_ss     = iret[4];
+
+    syscall_frame_t *sf =
+        (syscall_frame_t *)(tc->kernel_stack_top - 40 - sizeof(*sf));
+    tc->saved_rax = syscall_nr;
+    tc->saved_rbx = sf->rbx;
+    tc->saved_rcx = sf->rcx;
+    tc->saved_rdx = sf->rdx;
+    tc->saved_rsi = sf->rsi;
+    tc->saved_rdi = sf->rdi;
+    tc->saved_rbp = sf->rbp;
+    tc->saved_r8  = sf->r8;
+    tc->saved_r9  = sf->r9;
+    tc->saved_r10 = sf->r10;
+    tc->saved_r11 = sf->r11;
+    tc->saved_r12 = sf->r12;
+    tc->saved_r13 = sf->r13;
+    tc->saved_r14 = sf->r14;
+    tc->saved_r15 = sf->r15;
+    tc->saved_valid  = 1;
+    tc->wakeup_at_ms = wakeup_at_ms;
+    tc->state        = TASK_BLOCKED;
+    sched_resume_jump();                   /* never returns */
+    return 0;                              /* unreachable */
+}
+
 int64_t sys_read(int fd, void *buf, size_t count) {
     if (!buf && count > 0) return err(OSNOS_EFAULT);
 
@@ -392,8 +443,23 @@ int64_t sys_read(int fd, void *buf, size_t count) {
          * TTY. */
         if (!sin || sin->is_special) {
             size_t n = stdin_pop((char *)buf, count);
-            if (n == 0 && count > 0) return err(OSNOS_EAGAIN);
-            return (int64_t)n;
+            if (n > 0) return (int64_t)n;
+            if (count == 0) return 0;
+            /* No data. If fd is explicitly O_NONBLOCK, return EAGAIN
+             * (libc/app handles retry). Otherwise BLOCK by snapshotting
+             * the iret frame with RIP rewound 2 bytes (past the
+             * preceding `syscall` or `int 0x80` instruction, both
+             * 2 bytes) and saved_rax = SYS_READ (0). The scheduler
+             * will wake us after a short timeout and the CPU re-
+             * executes the same read(), draining whatever input has
+             * arrived. This is the POSIX restart_syscall pattern.
+             * Critical for musl (and any libc that doesn't auto-retry
+             * on EAGAIN): without this BusyBox ash thinks the read
+             * returned 0 = EOF and exits with code 0. */
+            int nonblock = (sin && (sin->flags & 0x800 /* O_NONBLOCK */));
+            if (nonblock) return err(OSNOS_EAGAIN);
+            if (block_restart_syscall(timer_ms() + 10, SYS_READ) != 0)
+                return err(OSNOS_EAGAIN);
         }
         /* fall through with `sin` as our fd */
     }
@@ -1244,13 +1310,23 @@ int64_t sys_chdir(const char *path) {
 int64_t sys_stat(const char *path, void *out) {
     if (!path || !out) return err(OSNOS_EFAULT);
 
-    /* Pull path into kernel scratch so a faulting user pointer
-     * unwinds cleanly via the extable. */
+    /* Pull path into kernel scratch one byte at a time so we stop at
+     * the NUL terminator instead of pulling a full PATH_MAX block.
+     * The earlier "copy_from_user(kpath, path, OSNOS_PATH_MAX)"
+     * pattern faulted whenever the user string sat near a page
+     * boundary — perfectly legal for a 2-byte string like "/", but
+     * we'd try to read 128 bytes and hit an unmapped page. EFAULT
+     * back to musl made `ls /` fail with "cannot open /". */
     char kpath[OSNOS_PATH_MAX];
-    if (copy_from_user(kpath, path, OSNOS_PATH_MAX) != OSNOS_OK) {
-        return err(OSNOS_EFAULT);
+    size_t i = 0;
+    for (; i < OSNOS_PATH_MAX - 1; i++) {
+        char c;
+        if (copy_from_user(&c, path + i, 1) != OSNOS_OK)
+            return err(OSNOS_EFAULT);
+        kpath[i] = c;
+        if (c == 0) break;
     }
-    kpath[OSNOS_PATH_MAX - 1] = 0;
+    kpath[i] = 0;
 
     vfs_stat_t st;
     osnos_status_t s = vfs_stat(kpath, &st);
@@ -2573,6 +2649,105 @@ int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* sys_poll — Linux poll(2). BusyBox ash, sshd, screen, many POSIX     */
+/* programs use poll instead of select.                                 */
+/* ------------------------------------------------------------------ */
+
+/* poll event bits (Linux <poll.h>). */
+#define POLL_POLLIN    0x0001
+#define POLL_POLLPRI   0x0002
+#define POLL_POLLOUT   0x0004
+#define POLL_POLLERR   0x0008
+#define POLL_POLLHUP   0x0010
+#define POLL_POLLNVAL  0x0020
+
+struct osnos_pollfd {
+    int   fd;
+    short events;
+    short revents;
+};
+
+int64_t sys_poll(void *u_fds, uint64_t nfds, int timeout_ms) {
+    /* Empty array — sleep timeout (or return 0 if non-blocking). */
+    if (nfds == 0) {
+        if (timeout_ms > 0) {
+            osnos_timespec_t ts = {
+                .tv_sec  = timeout_ms / 1000,
+                .tv_nsec = (int64_t)(timeout_ms % 1000) * 1000000
+            };
+            sys_nanosleep(&ts, 0);
+        }
+        return 0;
+    }
+    if (nfds > 1024) return err(OSNOS_EINVAL);
+    /* Static buffer = 8 KiB; fine for kernel BSS. */
+    static struct osnos_pollfd kfds[1024];
+    size_t bytes = (size_t)nfds * sizeof(struct osnos_pollfd);
+    if (copy_from_user(kfds, u_fds, bytes) != OSNOS_OK)
+        return err(OSNOS_EFAULT);
+
+    uint64_t now = timer_ms();
+    uint64_t deadline = (timeout_ms > 0) ? now + (uint64_t)timeout_ms : 0;
+
+    for (;;) {
+        int ready = 0;
+        for (uint64_t i = 0; i < nfds; i++) {
+            kfds[i].revents = 0;
+            if (kfds[i].fd < 0) continue;
+            osnos_fd_t *f = fd_get(task_current(), kfds[i].fd);
+            if (!f) {
+                kfds[i].revents = POLL_POLLNVAL;
+                ready++;
+                continue;
+            }
+            if ((kfds[i].events & POLL_POLLIN) && fd_readable(kfds[i].fd)) {
+                kfds[i].revents |= POLL_POLLIN;
+            }
+            if (kfds[i].events & POLL_POLLOUT) {
+                /* Conservative: assume writable. Pipes/sockets/PTYs that
+                 * are full would still EAGAIN on actual write, but
+                 * poll-then-write loops accept that. */
+                kfds[i].revents |= POLL_POLLOUT;
+            }
+            if (kfds[i].revents) ready++;
+        }
+
+        if (ready > 0) {
+            if (copy_to_user(u_fds, kfds, bytes) != OSNOS_OK)
+                return err(OSNOS_EFAULT);
+            return ready;
+        }
+
+        if (timeout_ms == 0) {
+            /* Non-blocking poll — return 0 immediately. */
+            if (copy_to_user(u_fds, kfds, bytes) != OSNOS_OK)
+                return err(OSNOS_EFAULT);
+            return 0;
+        }
+
+        if (timeout_ms > 0 && timer_ms() >= deadline) {
+            if (copy_to_user(u_fds, kfds, bytes) != OSNOS_OK)
+                return err(OSNOS_EFAULT);
+            return 0;
+        }
+
+        /* Block via restart_syscall — when the task wakes (after the
+         * short timeout or sooner via signal) the CPU re-issues the
+         * same poll() and we re-check readiness. Cannot call
+         * sys_nanosleep here: it longjumps to the scheduler and the
+         * task resumes in user-space with rax=0, making poll appear
+         * to time out spuriously (ash interprets 0 with timeout=-1
+         * as "stdin closed" and exits). */
+        uint64_t wake = timer_ms() + 5;
+        if (block_restart_syscall(wake, SYS_POLL) != 0) {
+            if (copy_to_user(u_fds, kfds, bytes) != OSNOS_OK)
+                return err(OSNOS_EFAULT);
+            return 0;
+        }
+    }
+}
+
 int64_t sys_select(int nfds,
                     void *readfds, void *writefds, void *exceptfds,
                     const void *timeout) {
@@ -2778,6 +2953,41 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
                 (const char *)frame->rdi,
                 (int)frame->rsi,
                 (uint32_t)frame->rdx));
+        case SYS_OPENAT: {
+            /* musl opendir() / openat(). dirfd in rdi, path in rsi,
+             * flags in rdx, mode in r10. We only support AT_FDCWD
+             * (-100) — relative paths against the task cwd. Absolute
+             * paths work for any dirfd because we ignore it. */
+            int dirfd = (int)frame->rdi;
+            const char *path = (const char *)frame->rsi;
+            int flags = (int)frame->rdx;
+            uint32_t mode = (uint32_t)frame->r10;
+            if (!path) return pack(-(int64_t)OSNOS_EFAULT);
+            /* Reject relative paths with a real dirfd — not yet
+             * supported. Most coreutils only pass AT_FDCWD here. */
+            if (path[0] != '/' && dirfd != -100 /* AT_FDCWD */)
+                return pack(-(int64_t)OSNOS_ENOSYS);
+            return pack(sys_open(path, flags, mode));
+        }
+        case SYS_LSTAT:
+            /* osnos has no symbolic links — lstat is identical to stat. */
+            return pack(sys_stat(
+                (const char *)frame->rdi,
+                (osnos_stat_t *)frame->rsi));
+        case SYS_NEWFSTATAT: {
+            /* musl `stat()` / `lstat()` on x86_64 → fstatat(AT_FDCWD,
+             * path, buf, 0). dirfd in rdi, path in rsi, statbuf in
+             * rdx, flags in r10. We support absolute paths and
+             * AT_FDCWD; ignore the AT_SYMLINK_NOFOLLOW flag (no
+             * symlinks in osnos). */
+            int dirfd = (int)frame->rdi;
+            const char *path = (const char *)frame->rsi;
+            void *out = (void *)frame->rdx;
+            if (!path || !out) return pack(-(int64_t)OSNOS_EFAULT);
+            if (path[0] != '/' && dirfd != -100 /* AT_FDCWD */)
+                return pack(-(int64_t)OSNOS_ENOSYS);
+            return pack(sys_stat(path, out));
+        }
         case SYS_CLOSE:
             return pack(sys_close((int)frame->rdi));
         case SYS_READ:
@@ -3000,6 +3210,11 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
                 (int)frame->r10,
                 (void *)frame->r8,
                 (void *)frame->r9));
+        case SYS_POLL:
+            return pack(sys_poll(
+                (void *)frame->rdi,
+                (uint64_t)frame->rsi,
+                (int)frame->rdx));
         case SYS_WRITEV: {
             /* Linux writev(fd, iovec[], iovcnt) — musl's stdio writes
              * via this path. Loop and reuse sys_write for each iov. */
@@ -3062,7 +3277,77 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
             task_t *t = task_current();
             return pack(t ? (int64_t)t->pid : 1);
         }
+        /* ---- BusyBox / POSIX userland stubs ---- */
+        case SYS_GETUID:
+        case SYS_GETGID:
+        case SYS_GETEUID:
+        case SYS_GETEGID:
+            return 0;                        /* everyone is root        */
+        case SYS_SETUID:
+        case SYS_SETGID:
+            return 0;                        /* accept silently         */
+        case SYS_GETGROUPS:
+            return 0;                        /* no supplementary groups */
+        case SYS_SETGROUPS:
+            return 0;                        /* accept silently         */
+        case SYS_UMASK:
+            return 022;                      /* always the standard mask*/
+        case SYS_GETRLIMIT: {
+            /* struct rlimit { uint64_t cur, max; } — both RLIM_INFINITY */
+            uint64_t rl[2] = { (uint64_t)-1, (uint64_t)-1 };
+            if (copy_to_user((void *)frame->rsi, rl, sizeof(rl)) != OSNOS_OK)
+                return pack(-(int64_t)OSNOS_EFAULT);
+            return 0;
+        }
+        case SYS_SETRLIMIT:
+            return 0;                        /* accept silently         */
+        case SYS_GETRUSAGE: {
+            /* struct rusage is huge — zero it out (96 bytes is enough
+             * for the {tv_sec,tv_usec} pair + counters BusyBox uses). */
+            char zeros[144] = {0};
+            if (copy_to_user((void *)frame->rsi, zeros, sizeof(zeros)) != OSNOS_OK)
+                return pack(-(int64_t)OSNOS_EFAULT);
+            return 0;
+        }
+        case SYS_TIMES: {
+            /* struct tms { tms_utime, tms_stime, tms_cutime, tms_cstime } */
+            uint64_t tms[4] = {0, 0, 0, 0};
+            if (frame->rdi &&
+                copy_to_user((void *)frame->rdi, tms, sizeof(tms)) != OSNOS_OK)
+                return pack(-(int64_t)OSNOS_EFAULT);
+            return (int64_t)(timer_ms() / 10);  /* clock ticks (100 Hz)  */
+        }
+        case SYS_SYSINFO: {
+            char zeros[112] = {0};
+            if (copy_to_user((void *)frame->rdi, zeros, sizeof(zeros)) != OSNOS_OK)
+                return pack(-(int64_t)OSNOS_EFAULT);
+            return 0;
+        }
+        case SYS_PRCTL:
+            return 0;
+        case SYS_UNAME: {
+            /* struct utsname has 6 × 65-byte fields. */
+            struct {
+                char sysname[65];
+                char nodename[65];
+                char release[65];
+                char version[65];
+                char machine[65];
+                char domainname[65];
+            } un = {0};
+            os_strlcpy(un.sysname,    "osnos",          65);
+            os_strlcpy(un.nodename,   "osnos-vm",       65);
+            os_strlcpy(un.release,    "0.13",           65);
+            os_strlcpy(un.version,    "FASE13",         65);
+            os_strlcpy(un.machine,    "x86_64",         65);
+            os_strlcpy(un.domainname, "(none)",         65);
+            if (copy_to_user((void *)frame->rdi, &un, sizeof(un)) != OSNOS_OK)
+                return pack(-(int64_t)OSNOS_EFAULT);
+            return 0;
+        }
+        case 231: /* SYS_EXIT_GROUP */
+            return pack(sys_exit((int)frame->rdi));
         default:
-            return pack(-(int64_t)OSNOS_EINVAL);
+            return pack(-(int64_t)OSNOS_ENOSYS);
     }
 }

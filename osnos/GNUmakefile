@@ -190,7 +190,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/tools/uxsh.c
 
 # musl-linked ELFs (vendor/musl). Declared early so USER_ELF_LIST sees it.
-USER_ELF_MUSL_SRCS := elfs/tests/hello_musl.c
+USER_ELF_MUSL_SRCS := elfs/tests/hello_musl.c elfs/tests/poll_musl.c elfs/tests/ls_musl.c
 
 USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_LIBC_SRCS)) \
@@ -342,6 +342,20 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBTCC1_A) $(CRTI_O) $(CRTN
 	mcopy -i $@ -o $(CRTN_O)     ::/lib/crtn.o
 	mcopy -i $@ -o $(LIBC_A)     ::/lib/libc.a
 	mcopy -i $@ -o $(LIBTCC1_A)  ::/lib/tcc/libtcc1.a
+	@# BusyBox 1.36.1 — segundo shell + ~30 applets (FASE 13.1).
+	@if [ -f vendor/busybox/busybox_unstripped ]; then \
+	    mcopy -i $@ -o vendor/busybox/busybox_unstripped ::/bin/busybox; \
+	    echo "  COPY    /bin/busybox"; \
+	fi
+	@# /etc — minimal passwd + group para que BusyBox getpwuid etc.
+	@# anden. Sin esto `ls -l` y otros applets se cuelgan en lookups.
+	mmd -i $@ ::/etc 2>/dev/null || true
+	printf 'root:x:0:0:root:/home:/bin/ash\n' > $(SD_TMP)/passwd
+	printf 'root:x:0:\n' > $(SD_TMP)/group
+	printf '127.0.0.1 localhost\n' > $(SD_TMP)/hosts
+	mcopy -i $@ -o $(SD_TMP)/passwd ::/etc/passwd
+	mcopy -i $@ -o $(SD_TMP)/group  ::/etc/group
+	mcopy -i $@ -o $(SD_TMP)/hosts  ::/etc/hosts
 	@# TCC's own builtin headers (stdarg.h, stddef.h, stdbool.h, ...)
 	@# — preferred over /usr/include/* because they use TCC-native
 	@# va_list, not clang's __builtin_va_list.
@@ -468,6 +482,22 @@ MUSL_LDFLAGS := -m elf_x86_64 -nostdlib -static -no-pie \
                 -z noexecstack --gc-sections
 
 $(BUILD)/elfs/tests/hello_musl.elf: elfs/tests/hello_musl.c elfs/musl.lds \
+        $(MUSL_LIB) $(MUSL_CRT1) $(MUSL_CRTI) $(MUSL_CRTN)
+	mkdir -p "$(dir $@)"
+	$(CC) $(MUSL_CFLAGS) -c $< -o $@.tmp.o
+	$(LD) $(MUSL_LDFLAGS) -T elfs/musl.lds \
+	    $(MUSL_CRT1) $(MUSL_CRTI) $@.tmp.o $(MUSL_LIB) $(MUSL_CRTN) -o $@
+	rm $@.tmp.o
+
+$(BUILD)/elfs/tests/poll_musl.elf: elfs/tests/poll_musl.c elfs/musl.lds \
+        $(MUSL_LIB) $(MUSL_CRT1) $(MUSL_CRTI) $(MUSL_CRTN)
+	mkdir -p "$(dir $@)"
+	$(CC) $(MUSL_CFLAGS) -c $< -o $@.tmp.o
+	$(LD) $(MUSL_LDFLAGS) -T elfs/musl.lds \
+	    $(MUSL_CRT1) $(MUSL_CRTI) $@.tmp.o $(MUSL_LIB) $(MUSL_CRTN) -o $@
+	rm $@.tmp.o
+
+$(BUILD)/elfs/tests/ls_musl.elf: elfs/tests/ls_musl.c elfs/musl.lds \
         $(MUSL_LIB) $(MUSL_CRT1) $(MUSL_CRTI) $(MUSL_CRTN)
 	mkdir -p "$(dir $@)"
 	$(CC) $(MUSL_CFLAGS) -c $< -o $@.tmp.o

@@ -53,15 +53,34 @@ clean, kernel agrega `SYS_WRITEV=20` + `SYS_ARCH_PRCTL=158` (TLS
 via wrmsr MSR_FS_BASE) + `SYS_SET_TID_ADDRESS=218`, `build_argv_
 block` agrega auxv mínimo. ELFs opt-in via `USER_ELF_MUSL_SRCS`;
 `hello_musl` smoke test pasa con `snprintf %f` real (que la mini-
-libc no soporta). Todo verificado por **18/18 tests automatizados**
-vía `/bin/alltest`. Bonus: `/bin/poweroff` + `/bin/reboot` (ACPI S5
-/ 8042 reset), `tail -f` poll-based, `/bin/readelf -a/-l/-S/-h`
-para inspeccionar binarios.
+libc no soporta). **FASE 13.1** sube **BusyBox 1.36.1 linkeado a
+musl como init shell**: `proc_execve("/bin/busybox", "sh -l", envp)`
+con `PATH=/bin HOME=/home HISTFILE=/home/.ash_history TERM=linux`.
+ash en login mode sourcea `/etc/profile` (exports only, mirror exacto
+de Linux), que setea `$ENV=/home/.ashrc` (sourced en cada shell
+interactiva, mirror de ~/.bashrc). El `.ashrc` trae el banner ASCII
+"OSnOS", PS1 verde `osnos:\w# ` y aliases (`ll la l .. h cls`).
+Cerró 4 bugs de kernel para que ash sobreviva: (a) **restart_syscall pattern**
+en `sys_read`/`sys_poll` (rebobina iret RIP 2 bytes en lugar de
+longjump-con-rax=0 que ash interpretaba como EOF y causaba respawn
+loop infinito); (b) **syscall numbers osnos-specific movidos
+260-268 → 510-518** para no chocar con Linux x86_64 #262=newfstatat
+(musl `stat()` invocaba SERVICE_REGISTER por error); (c) `sys_stat`
+copia path **byte-a-byte hasta NUL** en vez de blast de 128 B (que
+faulteaba en paths cortos al final de página); (d) `VFS_MAX_MOUNTS`
+8 → 16 (con /home era el noveno mount). Nuevos mappings: `SYS_LSTAT
+=6`, `SYS_OPENAT=257`, `SYS_NEWFSTATAT=262`, `SYS_EXIT_GROUP=231`.
+Verificado: `ls /etc`, `for i in a b c`, `echo $((100*7))=700`,
+pipes, redir, glob, `cat /home/* > out`, todo posix. Todo verificado
+por **18/18 tests automatizados** vía `/bin/alltest`. Bonus:
+`/bin/poweroff` + `/bin/reboot` (ACPI S5 / 8042 reset), `tail -f`
+poll-based, `/bin/readelf -a/-l/-S/-h` para inspeccionar binarios.
 
 **Fases cerradas (orden cronológico inverso):**
 
 | Fase | Subsistema | Líneas (≈) |
 |------|-----------|------------|
+| **FASE 13.1 — BusyBox ash + login mode + .bashrc-style /home/.ashrc** | (1) **`vendor/busybox/`** — BusyBox 1.36.1 vendored, linkeado contra musl 1.2.5 via `osnos-cc-wrapper.sh` (clang frontend → `ld.lld -m elf_x86_64 -static -no-pie --gc-sections crt1.o ... libc.a`). Resulting `busybox_unstripped` ~1.4 MB con ~30 applets enabled: `sh ash echo cat ls ls find sed grep cut tr sort uniq head tail wc cp mv rm mkdir touch chmod md5sum expr cksum cpio basename dirname date dd du tee env pwd which printf seq yes test true false sleep less env uname`. (2) **BUG CRÍTICO #1 — restart_syscall pattern**: `sys_read` y `sys_poll` originalmente loopeaban con `sys_nanosleep()` para esperar input; pero `sys_nanosleep` hace `sched_resume_jump()` (longjmp al scheduler, NEVER returns) y deja al task con `saved_rax=0` apuntando al RIP user-space DESPUÉS del syscall. Resultado: ash llamaba `read(0)`, kernel longjumpeaba, ash recibía `read=0` que interpreta como EOF → exit(0) → watchdog respawn → infinite loop (52+ banners/30s). Fix: nuevo helper `block_restart_syscall(wakeup_ms, syscall_nr)` que stamp el iret frame con `rip -= 2` (rebobina 2 bytes — coincidente para `syscall 0F 05` y `int 0x80 CD 80`) + `saved_rax = syscall_nr` (SYS_READ=0, SYS_POLL=7). Al despertar la CPU re-ejecuta el syscall original con args originales en rdi/rsi/rdx → chequea readiness de nuevo. Esto es el patrón POSIX `restart_syscall` en kernel — sin él, libcs que no auto-retrytan en EAGAIN (musl, fopen-via-write libs) fallan inmediato. (3) **BUG CRÍTICO #2 — colisión de syscall numbers**: osnos-specific syscalls vivían en 260-268 (`SYS_IPC_SEND/RECV/SERVICE_REGISTER/LOOKUP/TTY_INPUT/TASKINFO/SPAWN/SET_FG/RESUME`) — chocaban con Linux x86_64 syscalls 260=fchownat, **262=newfstatat (que musl `stat()` invoca)**, 263=unlinkat, etc. musl `stat("/")` retornaba lo que respondía SERVICE_REGISTER → mode bits basura → ls/find/cp todos rotos. Movidos a 510-518 (kernel `src/micro/syscall.h` + libc `lib/libc/syscall.h` + `lib/libc/include/osnos_ipc.h`). Nuevos mappings agregados: `SYS_LSTAT=6` (alias de sys_stat, osnos no tiene symlinks), `SYS_OPENAT=257` (sys_open con dirfd ignorado), `SYS_NEWFSTATAT=262` (sys_stat con dirfd ignorado), `SYS_EXIT_GROUP=231` (alias de sys_exit). (4) **BUG CRÍTICO #3 — `sys_stat` faulteaba con paths cortos**: `copy_from_user(kpath, path, OSNOS_PATH_MAX)` pedía 128 bytes a partir de `path`, faulteando para strings al final de página como `"/"`. ls llamaba stat("/") → EFAULT → "cannot open /". Fix: copia byte-a-byte hasta NUL terminator. (5) **BUG CRÍTICO #4 — `VFS_MAX_MOUNTS=8` insuficiente**: con `/, /sys, /dev, /sd, /bin, /lib, /usr, /etc, /home` sumamos 9 mounts — `/home` no entraba y `find_mount("/home")` devolvía NULL. Bumpado a 16. (6) **Login shell + split /etc/profile + /home/.ashrc** (estilo `.bashrc`): `proc_execve("/bin/busybox", "sh -l", shell_envp)` con `shell_envp = {PATH=/bin, HOME=/home, HISTFILE=/home/.ash_history, HISTSIZE=500, TERM=linux}` (HISTFILE en envp porque ash lo lee ANTES de cmdloop, donde se sourcearía /etc/profile — fix de un bug que dejaba la HISTFILE no-detectada). Watchdog `server_respawn_tick` usa el mismo envp. Bootstrap seedea **dos archivos separados, mirror exacto del convention bash**: (a) `/etc/profile` (sourced ONCE on login) — solo `export PATH/HOME/HISTFILE/HISTSIZE/TERM` + `export ENV=/home/.ashrc`. NO banner, NO PS1 — esos son interactive concerns. (b) `/home/.ashrc` (sourced en CADA shell interactiva via $ENV, igual que ~/.bashrc) — `export PS1='osnos:\w# '`, aliases (`ll`, `la`, `l`, `..`, `h`, `cls`), `/bin/banner osnos`, mensaje de bienvenida. **Bug fixed**: el seed de `/home/.ashrc` originalmente estaba en el bloque /etc del bootstrap antes de que el aliasfs `/home → /sd/home` estuviera montado → escribía a ramfs sin efecto. Movido al bloque /home post-mount. **Bug fixed**: el `/etc/profile` y `$ENV` apuntaban al MISMO archivo (banner duplicado en cada boot). Split lo elimina — banner aparece EXACTAMENTE 1 vez por shell. Resultado: cada boot muestra el ASCII art "OSnOS" + welcome + prompt verde `osnos:/#`. Usuario puede editar `/home/.ashrc` con `ovi /home/.ashrc` sin recompilar nada. (7) **History line-editing**: `FEATURE_EDITING=y` está en la `.config` del binario actual, así que **up/down arrow recall in-memory funciona out-of-the-box**. **Limitación conocida**: el binario actual de busybox tiene `FEATURE_EDITING_SAVEHISTORY=n` (off en .config original), así que `/home/.ash_history` se setea como HISTFILE pero el archivo nunca se escribe — history NO persiste cross-reboot. Habilitar persistencia requiere rebuild de busybox con SAVEHISTORY=y; varios intentos chocaron con incompatibilidades de cross-compile (clang on macOS detecta `__APPLE__` → busybox toma branch BSD que necesita `<machine/endian.h>`, y musl headers tienen otros conflictos modutils/__NR_*). Deferred a FASE 13.2. (8) **Smoke verificado end-to-end**: `echo HELLO`, `echo arith=$((100*7))` → 700, `for i in a b c; do echo $i; done` → a/b/c, `ls /` → sys/dev/sd/bin/lib/usr/etc/home/, `ls /etc` → passwd group hosts (vía aliasfs), `cat /home/README.TXT`, `echo hi > /home/test.txt` (persiste en FAT16), `ls /bin \| head -n 5`, `tr a-z A-Z`, `sort`, `wc -l`, `uname -srm`. Banner aparece al boot. Default shell de osnos pasa de `shellsrv` (interno) a `busybox sh` (POSIX-compliant). `shellsrv` sigue disponible como fallback si `/bin/busybox` falta (diskless boot). | 800 |
 | **FASE 12.1 — Polish UX GUI + watchdog + ANSI completo** | (1) **`/bin/uxsh`** (`elfs/tools/uxsh.c`, ~140 LOC libc-linked): mini-shell para spawn dentro de oxterm. Builtins `cd` (with relative path), `pwd`, `clear` (CSI), `help`, `exit`. Cualquier comando que no sea builtin → fork + execve (`/bin/<name>` si no es absolute). `[exit N]` cuando child sale != 0. (2) **oxnotepad acepta argv[1]**: el path se pasa por `osn_spawn(path, "/home/foo.txt", ...)` desde oxfiles, parse en `main()`, title bar muestra `Notepad — /home/foo.txt`. Default sigue siendo `/home/notepad.txt` si no hay argv[1]. (3) **`/bin/oxfiles`** (`elfs/gui/oxfiles.c`, ~210 LOC): file browser. `opendir(cwd)` + stat para detectar dirs. Click sobre dir → cd; click sobre `.ppm` en `/home/wallpapers/` → setea wallpaper via `.oxrc` + `IPC_OX_RELOAD_SETTINGS`; click sobre otro file → spawn `/bin/oxnotepad <full_path>`. Hover highlight, header bar con cwd, `..` siempre visible salvo en `/`. (4) **Parser ANSI completo en oxterm** (`elfs/gui/oxterm.c`, +140 LOC): state machine `ST_NORMAL → ST_ESC → ST_CSI → final_byte`. Soporta: `ESC[H/f`/`ESC[r;cH` cursor pos absoluta, `ESC[A/B/C/D N` movimiento relativo, `ESC[J`/`[1J`/`[2J` erase display, `ESC[K`/`[1K` erase line, `ESC[m` SGR (reset, reverse 7/27, fg 30-37/90-97, bg 40-47/100-107, **truecolor 38;2;R;G;B + 48;2;...**). Grid de cells `{ch, fg, bg}` en vez de chars planos. Render optimizado: agrupa runs de bg/fg iguales en single draw_rect/draw_text. Cursor amarillo en bottom de cell (era bloque verde). (5) **libc stdio retry on EAGAIN** (`lib/libc/stdio.c`): `drain_write` retry'ea hasta 200 × 1ms en EAGAIN antes de bail con error. Output de comandos largos (TCC compilando, `cat big.txt | less`) ya no se trunca silente cuando el sink (PTY ring, pipe) está saturado. (6) **Watchdog auto-resume en consrv + kbdsrv**: cada ~500ms mientras `suspended`, chequea `ipc_service_lookup(SERVER_OX)`; si <=0 (oxsrv crashed / kill -9), auto-resume + canvas limpio. Defensa contra el escenario donde `kill -9 <oxsrv>` dejaría la shell muerta. (7) **oxsrv coalesce mouse MOVE**: en vez de mandar un `IPC_OX_EVENT_MOUSE` por cada delta del PS/2 (puede ser >100/seg), pendiente flag + envío uno por frame con la posición final. Edge-detect button DOWN/UP siguen siendo per-event. Baja drásticamente IPC pressure bajo mouse storm. (8) **Caps por iter en oxsrv main loop**: max 64 mouse + 32 kbd + 64 IPC reads por iteración — evita que un storm starve el resto del sistema o sature la queue. (9) **`oxfiles` agregado al menú Ox**: ahora son 6 entries (Files / Notepad / Calculator / Terminal / Settings / Reboot). | 600 |
 | **FASE 13.0 — musl libc port (segundo libc opcional)** | (1) **`vendor/musl/`** — musl 1.2.5 vendoreado (~140K LOC). `./configure --target=x86_64 --disable-shared --syslibdir=/lib --prefix=/usr` con `CC="clang -target x86_64-unknown-none-elf -fno-stack-protector -ffreestanding -nostdinc -mno-red-zone"`. `make -j4` compila al primer intento — **zero patches al árbol de musl**. Salida: `vendor/musl/build-osnos/lib/{libc.a (8.5 MB), crt1.o, crti.o, crtn.o}`. (2) **Kernel gaps cerrados** para que musl bootee: `SYS_WRITEV=20` (musl stdio escribe exclusivamente via writev, sin esto cualquier output via FILE* se pierde silente; impl loop sobre iov + reuse sys_write), `SYS_ARCH_PRCTL=158` (code 0x1002 ARCH_SET_FS → wrmsr MSR_FS_BASE = TLS pointer; code 0x1003 ARCH_GET_FS via rdmsr; necesario porque musl pone errno en TLS y todo dispara si %fs no apunta a algo válido), `SYS_SET_TID_ADDRESS=218` (musl __init_libc lo llama early; stub returnea pid). (3) **`build_argv_block` extendido** con auxv mínimo `[{AT_PAGESZ=6, 4096}, {AT_NULL=0, 0}]` después del envp NULL — sin esto musl lee bytes random de strings como auxv keys y setea `libc.page_size` a basura. (4) **`elfs/musl.lds`** linker script propio: mantiene `.init_array/.fini_array/.preinit_array` (musl __libc_start_init los recorre), agrega PT_TLS para `.tdata/.tbss`. (5) **`elfs/tests/hello_musl.c`** smoke test: spawna como ELF normal, valida 5 cosas en un solo flow — crt1 boot, auxv parse, TLS wrmsr, argv pass-through correcto (`hello_musl alpha beta gamma` → argv[0..3]), `snprintf` con `%f` (`3.1415926536`) + `%x` (`deadbeef`) + width/padding, exit limpio. **Verificado headless con captura serial**: 6/6 lines correctas. (6) **`GNUmakefile`**: nueva variable `USER_ELF_MUSL_SRCS` + regla pattern para linkear ELFs con musl (crt1 + crti + libc.a + crtn vs. nuestra libc mini). Coexisten: programs pequeños siguen usando `lib/libc/` (footprint reducido); programs que necesitan stdio/printf-%f/locale/pthread completos usan musl. **Limitación pendiente**: `printf` / `puts` via FILE* devuelven -1 en osnos (la cadena __ofl_lock o init de stdout falla antes de llegar a writev — no diagnóstico aún). `snprintf` + `write(2)` directo funcionan. Próximo iter: portear oxterm / oxnotepad a musl una vez que el printf path esté arreglado. (7) `STATUS.md` + `CLAUDE.md` documentados con el path de integración. **Hito**: osnos ahora tiene **dos libc** — la mini hecha en casa para programas chicos, y musl para los serios. Path claro a portear aplicaciones POSIX reales (vi/nano/ncurses) sin pelearse con bugs de libc artesanal. | 200 |
 | **FASE 12.0 — Ox mini-X window system** | (1) **Kernel framebuffer ioctls** (`src/drivers/framebuffer.{c,h}`, `src/fs/devfs.c`, `src/micro/syscall.c`): `framebuffer_get_info` (w/h/pitch/bpp) y `framebuffer_blit_kernel` (rect copy de buffer kernel → FB) exportados. Nuevos ioctls Linux-compat sobre `/dev/fb0`: `FBIOGET_VSCREENINFO` (0x4600) llena `struct osnos_fb_var_screeninfo` con xres/yres/bits_per_pixel/line_length + offsets BGRA; `FBIO_BLIT` (0x4680) acepta `osnos_fb_blit_req {x,y,w,h,*src,src_pitch}` y blittea via copy_from_user row-por-row con `kmalloc` scratch (faulting user pointer → EFAULT, sin panic). Detección en `sys_ioctl` vía `f->is_chr && os_streq(f->path, "/dev/fb0")` — no requiere campo nuevo en el OFD. (2) **ABI Ox** (`src/include/osnos_ipc_abi.h`, `src/include/osnos_fb_abi.h` nuevo): `SERVER_OX=5`, rango IPC `0x60-0x7F` reservado para window system, 14 opcodes (`IPC_OX_CONNECT/WINDOW_CREATE/DESTROY/DRAW_RECT/DRAW_TEXT/DRAW_IMAGE/PRESENT/SET_TITLE/EVENT_KEY/MOUSE/EXPOSE/CLOSE/RELOAD_SETTINGS/RESPONSE`). Wire-format documentado: arg0 = win_id, arg1 = color/scalar, data = packed uint32 args + payload. `lib/libc/include/sys/ioctl.h` agrega defs Linux-shape de `fb_var_screeninfo` y `fb_blit_req`; `lib/libc/include/linux/fb.h` nuevo expone los mismos bajo el path que tinyX espera. (3) **Cliente libc** (`lib/libc/include/ox.h`, `lib/libc/ox.c`, `lib/libc/ox_font.c`): API estilo mini-Xlib — `ox_init/ox_window_create/ox_window_destroy/ox_draw_rect/draw_text/draw_image/present/poll_event/wait_event` + macros `OX_RGB/OX_RGBA/OX_EV_*/OX_KEY_*/OX_MOD_*`. Ring local de eventos (32 slots) para que un wait-for-response no descarte eventos asincrónicos. `DRAW_IMAGE` chunkea automático en tiles de 240 px de ancho para encajar en el payload de 1008 B del `ipc_msg_t`. `ox_font.c` mirror del 8×8 bitmap del kernel (`src/include/font.h`) — clientes pueden medir texto sin hop al server. (4) **`/bin/oxsrv`** (`elfs/gui/oxsrv.c`, ~700 LOC libc-linked, embebido en ROM): registra SERVER_OX, abre /dev/fb0 + /dev/mouse0 + /dev/input0, query `FBIOGET_VSCREENINFO`, aloca backbuffer BGRA full-screen + parsea PPM P6 con `load_ppm` (scaler nearest-neighbour a screen size). Loop: drain /dev/mouse0 (acumula cursor 0..scr-1), drain /dev/input0 raw, drain ipc_recv, recomponer (wallpaper blit → window stack back-to-front con title bars + close `[x]` + body backing → menu cuando visible → cursor sprite 12×17) → un solo `FBIO_BLIT` por frame dirty. Eventos: left-click sobre title=focus+drag o cerrar; sobre body=`EVENT_MOUSE` al owner; right-click sobre wallpaper o F1 = root menu (Notepad/Calc/Terminal/Settings/Reboot, estilo Openbox); Alt+F4=close focused; Alt+Left=cycle focus. Settings via `/home/.oxrc` (`current_wallpaper=samurai\|girl`); reload en vivo via `IPC_OX_RELOAD_SETTINGS`. Window pool de 16, backing buffer por ventana (libre al destroy). (5) **Apps GUI** (`elfs/gui/oxnotepad.c oxcalc.c oxterm.c oxsettings.c`, ~250 LOC c/u libc-linked): **oxnotepad** 600×400 — carga/guarda `/home/notepad.txt`, Ctrl+S, autosave al cerrar. **oxcalc** 240×320 — 4×5 grid + display, +-*/ con accumulador + pending op, click o teclado. **oxterm** 640×400 (80×25 chars) — `posix_openpt + fork + execve("/bin/minishell")` con slave como fd 0/1/2 + master non-blocking, multiplexa eventos Ox + bytes del PTY, renderiza grid de chars usando font de libc, drop ESC sequences. **oxsettings** 400×300 — `opendir /home/wallpapers` lista `.ppm`, radio buttons, "Apply" reescribe `.oxrc` + `IPC_OX_RELOAD_SETTINGS` al oxsrv. (6) **Wallpapers** (`tools/gen_placeholder.c` + `tools/gen_wallpapers.sh` + `res/wallpapers/source/`): script host detecta `res/wallpapers/source/<name>.png` + ImageMagick `convert` → PPM 1280×800; si falta source o convert, compila host C generator que emite PPMs procedurales temáticos (samurai = sunset gradient + silueta poligonal con katana; girl = lavender→pink diagonal + silueta con cabello largo + sakura speckles). 100% desatendido: la build SIEMPRE produce wallpapers válidos. (7) **Boot integration** (`src/kernel/main.c`, `src/fs/bootstrap.c`, `src/proc/builtin.c`): `kmain` spawnea `/bin/oxsrv` después de `shellsrv` y registra `SERVER_OX`; watchdog `server_respawn_tick` agrega `respawn_if_dead(SERVER_OX)`. `bootstrap.c` seed `seed_if_absent("/home/.oxrc", "current_wallpaper=samurai\n")` + `vfs_mkdir("/home/wallpapers")`. `builtin.c` agrega `USERELF("oxsrv", ...)` al ROM (consrv/kbdsrv/shellsrv/banner + oxsrv ahora). (8) **GNUmakefile**: 5 GUI ELFs nuevos en `USER_ELF_LIBC_SRCS`, `oxsrv` también en `USER_ELF_ROM_SRCS`. Nueva regla `$(WALLPAPERS)` ejecuta `gen_wallpapers.sh`. `$(SD_IMG)` agrega `mmd ::/home/wallpapers`, `mcopy .oxrc`, `mcopy *.ppm`. **sd.img bumpado 16 → 32 MiB** + `mformat -c 8` (4 KiB clusters) para que mformat siga eligiendo FAT16 (cluster count <65525). (9) **Decisión FAT case-sensitivity**: **DEJAR como está** (case-insensitive + case-preserving via NT flags y LFN). Flipear rompería `exec("/bin/cat")` contra `CAT.ELF` en disco, `.oshrc` lookup, `bootstrap.c seed_disk_bin`. El comportamiento actual es lo que Windows + macOS hacen sobre FAT/VFAT; "case-exact" en display ya está cubierto por LFN. (10) **Path a tinyX/X11**: el protocolo IPC es estilo Xlib stub (CreateWindow/DrawRect/etc), así que cuando llegue file-backed mmap los clientes podrán mapear shared pixmaps sin cambiar el wire; tinyX puede portar contra `lib/libc/include/linux/fb.h` + `<sys/ioctl.h>` shape. **Verificación**: build clean (zero warnings con -Werror), kernel ELF embebe oxsrv (`_binary_oxsrv_elf_start/end` presentes), sd.img tiene `/bin/oxsrv`/`oxnotepad`/`oxcalc`/`oxterm`/`oxsettings` + `/home/wallpapers/{samurai,girl}.ppm` + `/home/.oxrc`. Headless boot ok (shell prompt llega). Verificación visual (mouse, wallpaper, menu) requiere QEMU con display gráfico. | 2200 |
@@ -2623,25 +2642,64 @@ Polish + cleanup ya cerrado:
 
 Lo que sigue (feature work, no bugs):
 
-### FASE 11 — Drivers a ring 3 — PENDIENTE
+> **Nota de re-numbering**: las "FASE 11/12/13" del roadmap original
+> abajo NO son las mismas FASE 11.0–11.4 / 12.0–12.1 / 13.0–13.1 que
+> aparecen en la tabla cronológica de arriba. El roadmap original
+> reservaba esos números para drivers/TUI/gráfico; en la práctica
+> las fases 11.x del log se usaron para self-hosting (TCC/Lua/jq) +
+> mouse, 12.x para Ox window system, 13.x para musl + busybox. Como
+> resultado, partes del "FASE 13 — Gráfico" original ya están hechas
+> en FASE 12.0/12.1 (window server, terminal en ventana, compositor),
+> mientras que el "FASE 11 — Drivers a ring 3" original sigue
+> íntegramente pendiente. Marcado a continuación.
+
+### FASE 11 (roadmap original) — Drivers a ring 3 — PENDIENTE
+Toda esta fase sigue 100% pendiente. PS/2 (keyboard + mouse),
+framebuffer, ATA, RTL8139, PIT y serial siguen en ring 0 dentro de
+`src/drivers/`. Lo único que pasó a ring 3 son los SERVIDORES de
+políticas (consrv/kbdsrv/shellsrv/oxsrv), no los drivers de hardware.
 - ☐ IRQ delegation por IPC desde kernel-side handlers
 - ☐ MMIO mapping per-task con permisos especiales
 - ☐ Port-IO delegation (syscall whitelist o IOPB en TSS)
 - ☐ DMA bouncing via kernel-mediated buffer pool
 - ☐ Portar PS/2, framebuffer, ATA, RTL8139, PIT a `elfs/osn-driver/`
 
-### FASE 12 — TUI potente — PENDIENTE
-- ☐ mini Norton Commander / mini-mc (dos paneles)
-- ☐ file viewer paginado (`less`-style)
-- ☐ editor `ovi` con syntax highlighting
-- ☐ copy/move/delete visual
+### FASE 12 (roadmap original) — TUI potente — PARCIAL
+- ☐ mini Norton Commander / mini-mc TUI (dos paneles texto). El
+  file browser actual es **`/bin/oxfiles`** (FASE 12.1) pero corre
+  como app GUI Ox, no como TUI texto-only sobre consrv.
+- ✓ **file viewer paginado** — `/bin/less` con search `/pattern`
+  highlight + `n`/`N` next/prev + pipe-mode (`cat foo | less`
+  drena stdin + dup2 /dev/tty para keyboard). Ver tabla de fases
+  cerradas arriba.
+- ⚠ editor `ovi` con syntax highlighting — `/bin/ovi` existe (modal
+  vim-style: hjkl, i/a/o, x/dd, :w/:q) PERO sin syntax highlighting.
+- ⚠ copy/move/delete "visual" — están como comandos (`cp mv rm`) y
+  como acciones de oxfiles via doble click; no hay un TUI commander
+  con marca-mueve-pega texto-only.
 
-### FASE 13 — Gráfico — PENDIENTE
-- ☐ window_server
-- ☐ terminal en ventana
-- ☐ Chip-8 emulator
-- ☐ mouse + compositor simple
+### FASE 13 (roadmap original) — Gráfico — DONE (excepto Chip-8)
+- ✓ **window_server** — `/bin/oxsrv` (FASE 12.0), ~700 LOC libc-linked,
+  posee `/dev/fb0` via ioctls `FBIOGET_VSCREENINFO` + `FBIO_BLIT`,
+  full compositor con wallpaper + z-order de 16 ventanas + cursor
+  overlay + root menu Openbox-style + 5 apps cliente (oxfiles,
+  oxnotepad, oxcalc, oxterm, oxsettings).
+- ✓ **terminal en ventana** — `/bin/oxterm` (FASE 12.0/12.1) con PTY
+  + child shell `/bin/uxsh` + parser ANSI completo (SGR truecolor,
+  cursor positioning, erase display/line). 80×25 chars 8×16 font.
+- ☐ Chip-8 emulator — pendiente, side quest.
+- ✓ **mouse + compositor simple** — driver PS/2 mouse + `/dev/mouse0`
+  (FASE 11.4) + compositor full-redraw on damage en oxsrv (FASE 12.0)
+  + coalesce mouse MOVE eventos a 1/frame para no inundar IPC
+  (FASE 12.1). Mouse acumula cursor 0..scr-1 a nivel oxsrv.
 
 ### Optimizaciones / futuro lejano — PENDIENTE
 - ☐ SMP (multi-core)
 - ☐ Copy-on-write para fork (hoy full page copy funciona pero usa más RAM)
+- ☐ FASE 13.2 — Rebuild de BusyBox con `FEATURE_EDITING_SAVEHISTORY=y`
+  para persistir `/home/.ash_history` entre reboots. Bloqueado por
+  cross-compile issues (clang on macOS detecta `__APPLE__` → branch
+  BSD de `include/platform.h` requiere `<machine/endian.h>`; musl
+  no provee bswap/__NR_*module compatibles via headers default).
+  Posible workaround: dropear el detect via `-U__APPLE__ -D__linux__`
+  más wrapper que filtre `-xc -E` link-mode falses.

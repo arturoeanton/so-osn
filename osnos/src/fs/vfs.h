@@ -149,7 +149,7 @@ typedef struct {
 /* Mount table                                                      */
 /* ---------------------------------------------------------------- */
 
-#define VFS_MAX_MOUNTS 8
+#define VFS_MAX_MOUNTS 16   /* was 8; /home alias didn't fit. 16 leaves headroom for future mounts (/tmp, /proc, /var, etc.) */
 
 typedef struct {
     char             mountpoint[OSNOS_PATH_MAX];  /* e.g. "/dev", "/" */

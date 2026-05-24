@@ -1,78 +1,83 @@
 # OSnOS
 
 Sistema operativo hobby x86_64, estilo microkernel, escrito en C desde
-cero. Bootea con Limine, corre en QEMU, y trae un shell interactivo,
-filesystem virtual, syscalls compatibles con Linux x86_64, una
-mini-libc propia para programas de usuario en ring 3, **musl 1.2.5
-vendoreado como segunda libc opt-in (FASE 13)** y un **mini-X window
-system propio llamado Ox (FASE 12)** con server, file browser,
-notepad, calculadora, terminal y settings.
+cero. Bootea con Limine, corre en QEMU, y trae **BusyBox ash 1.36.1
+como shell de sistema (FASE 13.1)** linkeado contra **musl 1.2.5
+(FASE 13.0)**, un filesystem virtual con FAT16 persistente, syscalls
+compatibles con Linux x86_64 (con restart_syscall pattern para
+bloqueo correcto de read/poll), una mini-libc propia para programas
+chicos de ring 3, y un **mini-X window system propio llamado Ox
+(FASE 12)** con server, file browser, notepad, calculadora, terminal
+y settings.
 
 ```
-   osnos x86_64 — shellsrv (ring 3, post-FASE 10 + Fase 2 disk-resident)
-   shellsrv:/$ ls /home
-   README.TXT  HELLO.TXT  .oshrc  .history
-   shellsrv:/$ ls /bin/h*               # glob expansion
-   /bin/hello  /bin/head  /bin/httpd  /bin/hello_libc  /bin/hello_elf
-   shellsrv:/$ true && echo a || echo b ; echo $?    # ;, &&, ||, $?
-   a
-   0
-   shellsrv:/$ cat README.TXT
-   Welcome to osnos.
-   shellsrv:/$ hello                    # from /sd/bin/hello (disk-resident)
-   hello, world
-   shellsrv:/$ echo persistente > /sd/note && cat /sd/note
+   osnos x86_64 — BusyBox ash 1.36.1 + musl (FASE 13.1, init shell)
+   
+     ___  ____         ___  ____  
+    / _ \/ ___| _ __  / _ \/ ___| 
+   | | | \___ \| '_ \| | | \___ \ 
+   | |_| |___) | | | | |_| |___) |
+    \___/|____/|_| |_|\___/|____/ 
+   
+     osnos — x86_64 microkernel hobby OS
+     Type 'help' for a list of shell builtins.
+   BusyBox ash on osnos — type help for builtins, ls /bin for commands.
+   osnos:/# ls /
+   sys/  dev/  sd/  bin/  lib/  usr/  etc/  home/
+   osnos:/# ls /etc                    # /etc → /sd/etc aliasfs → FAT16
+   passwd  group  hosts  profile
+   osnos:/# echo arith=$(( 100 * 7 ))  # ash POSIX arithmetic
+   arith=700
+   osnos:/# for f in /etc/*; do echo "$f"; done   # globs + loops
+   /etc/group
+   /etc/hosts
+   /etc/passwd
+   /etc/profile
+   osnos:/# echo persistente > /home/note && cat /home/note
    persistente
-   shellsrv:/$ env
+   osnos:/# ls /bin | head -n 5
+   user_hello
+   osh
+   hello
+   echo
+   true
+   osnos:/# echo "abc" | tr a-z A-Z              # pipes + tr
+   ABC
+   osnos:/# uname -srm
+   osnos 0.10 x86_64
+   osnos:/# env
    PATH=/bin
    HOME=/home
-   SHELL=/bin/shellsrv
-   OSNAME=osnos
-   shellsrv:/$ ls /home | grep TXT | sort   # full pipes + redirects
-   HELLO.TXT
-   README.TXT
-   shellsrv:/$ httpd &              # background
-   [1] pid=7 &
-   shellsrv:/$ jobs
-   [1] pid=7 running httpd
-   shellsrv:/$ exec /bin/top        # execve(2) — same pid, replaces shell
-   # top runs; Ctrl+C → kernel watchdog respawns shellsrv automatically
-   shellsrv:/$ ovi .oshrc           # editor modal vim-style
-   # i = insert, Esc = normal, hjkl = move,
-   # x = del char, dd = del línea, :w = save, :q = quit
-   shellsrv:/$ alltest              # 14/14 tests PASS
+   HISTFILE=/home/.ash_history
+   HISTSIZE=500
+   PS1=osnos:\w# 
+   osnos:/# # ↑/↓ recall history; /etc/profile auto-sourced en login (-l)
+   osnos:/# alltest              # 18/18 tests PASS (kernel + libc + ports)
    ALLTEST SUMMARY
      PASS  kerntest    forktest    waittest    sigtest
      PASS  sigchldtest pgrouptest  spawntest   exectest
      PASS  ofdtest     ptytest     fdedgetest  jobtest
-     PASS  termtest    libctest
-   RESULT: 14/14 passed
-   shellsrv:/$ term                 # sub-shell interactivo en PTY
-   term: started /bin/minishell (pid N) on /dev/pts/0 — Ctrl+D to exit
-   minishell: type 'exit' to quit.
-   mini$ hola mundo
-   you said: hola mundo
-   mini$ exit
-   bye
-   term: child exited with code 0
-   shellsrv:/$ tcc /home/hello.c -o /home/hello   # ¡SELF-HOSTING C! 🎉
-   shellsrv:/$ /home/hello
+     PASS  termtest    libctest    tcctest     luatest
+     PASS  jqtest      hello_musl
+   RESULT: 18/18 passed
+   osnos:/# tcc /home/hello.c -o /home/hello     # ¡SELF-HOSTING C! 🎉
+   osnos:/# /home/hello
    hello from tcc on osnos!
-   shellsrv:/$ lua                                # ¡Lua 5.4 REPL!
+   osnos:/# lua                                  # ¡Lua 5.4 REPL!
    Lua 5.4.7  Copyright (C) 1994-2024 Lua.org, PUC-Rio
    > print("hello from lua on osnos")
    hello from lua on osnos
    > = math.sqrt(2)
    1.4142135623731
    > os.exit()
-   shellsrv:/$ cat /home/test.json | jq          # ¡jq filter JSON!
+   osnos:/# cat /home/test.json | jq             # ¡jq filter JSON!
    { "os": "osnos", "self_hosting": ["tcc","lua","jq"], ... }
-   shellsrv:/$ jq -r '.tools[].name' /home/test.json
+   osnos:/# jq -r '.tools[].name' /home/test.json
    tcc
    lua
    jq
    ovi
-   shellsrv:/$ oxsrv &               # ¡FASE 12 — mini-X GUI! 🪟
+   osnos:/# oxsrv &                  # ¡FASE 12 — mini-X GUI! 🪟
    [1] pid=12 &
    # consola desaparece, sale wallpaper samurai, cursor osnos visible.
    # right-click sobre wallpaper → menú estilo Openbox:
@@ -84,7 +89,7 @@ notepad, calculadora, terminal y settings.
    #                     setea wallpaper; click .txt → abre Notepad
    #                     con ese archivo
    # kill <pid-oxsrv>  → consrv + kbdsrv auto-resumen, shell vuelve
-   shellsrv:/$ hello_musl                # ¡FASE 13 — musl libc opcional!
+   osnos:/# hello_musl                # ¡FASE 13.0 — musl libc opcional!
    ============================================
      hello from musl libc on osnos
    ============================================
@@ -425,7 +430,7 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | Microkernel cooperativo + preempt CPL=3, IPC queue de 64 | ✅ |
 | GDT + IDT + TSS, ring 0/3 selectors | ✅ |
 | PMM (bitmap) + VMM (paging 4-niveles propio) + kheap + slab | ✅ |
-| Syscalls Linux x86_64 + osnos-specific (>= 250) | ✅ |
+| Syscalls Linux x86_64 + osnos-specific (>= 500) — `restart_syscall` pattern en `sys_read/poll` para bloqueo correcto | ✅ |
 | `copy_from_user` / `copy_to_user` con fault recovery | ✅ |
 | VFS + ramfs + sysfs + devfs + binfs + aliasfs + fat16 | ✅ |
 | **FASE 10 — Servers en ring 3** (consrv, kbdsrv, shellsrv) | ✅ |
@@ -463,7 +468,8 @@ Resumen alto nivel. Detalle exhaustivo por fase en
 | **🖱️ FASE 11.4 — PS/2 mouse driver + `/dev/mouse0`**: driver polling PS/2 AUX en `src/drivers/mouse.{c,h}` (3-byte packets, sign extension, sync recovery via bit 3, dy invertido para screen coords), `mouse_server` cooperative kernel task (mirror del keyboard feeder) que pushea a un ring de 32 `mouse_event_t {int16 dx, dy; uint8 buttons}` en devfs. `/bin/mousetest` muestra eventos en vivo. Habilitó la línea gráfica (cursor overlay, file managers con click, eventual TinyX). PIC IRQ 12 sigue masked — polling consume ~1 inb/tick. | ✅ |
 | **🪟 FASE 12.0 — Ox mini-X window system**: ring-3 server `/bin/oxsrv` (~700 LOC) owns el framebuffer vía ioctls nuevos `FBIOGET_VSCREENINFO`/`FBIO_BLIT`. Cliente API en `lib/libc/ox.{c,h}` con `ox_init/window_create/draw_rect/draw_text/draw_image/present/poll_event` estilo mini-Xlib. Wire protocol IPC opcodes `0x60-0x7F` (`IPC_OX_CONNECT/WINDOW_CREATE/DRAW_*/EVENT_KEY/MOUSE/EXPOSE/CLOSE/RELOAD_SETTINGS`). 5 apps GUI iniciales: **oxfiles** (file browser con click-to-open), **oxnotepad** (text editor que abre arbitrary path via argv), **oxcalc** (calculadora 4-función), **oxterm** (PTY + uxsh sub-shell, parser ANSI completo: SGR truecolor, cursor positioning, erase), **oxsettings** (wallpaper picker). Wallpapers PPM P6 generados al build (host C + sh script con fallback procedural para samurai/girl si no hay PNGs en `res/wallpapers/source/`). Root menu estilo Openbox via right-click. Coexistencia con consrv/kbdsrv via opcodes nuevos `IPC_CONSOLE_SUSPEND/RESUME` + `IPC_KEYBOARD_SUSPEND/RESUME`: oxsrv los suspende al arrancar, signal handler SIGTERM/SIGINT los resume al exit, watchdog en consrv/kbdsrv auto-resume si `SERVER_OX` desaparece (defensa contra `kill -9`). **Bug crítico fixed** en el camino: `keyboard.c` no chequeaba `STAT_AUX_DATA` del 8042 → bytes del mouse se interpretaban como scancodes (= números random aparecían en apps cuando se movía el mouse). Fix: skip AUX bytes en keyboard_poll. `kbdsrv` opens `/dev/input0` con `O_NONBLOCK`. `ipc_send` ahora rutea SID OR pid directo (server→client events). `sd.img` bumpado 16→32 MiB (wallpapers + GUI ELFs). | ✅ |
 | **📝 FASE 12.1 — Polish UX GUI**: (1) `/bin/uxsh` (~140 LOC) mini-shell para oxterm — builtins `cd pwd clear help exit` + fork/execve para todo lo demás, PATH=/bin auto. (2) oxnotepad acepta path via `argv[1]` — file browser ya pasa el path al click. (3) Parser ANSI completo en oxterm: state machine ESC→CSI→final; soporta `ESC[H/f`, `ESC[A/B/C/D` cursor, `ESC[J/K` erase, `ESC[m` SGR (reset, reverse, 30-37/40-47/90-97/100-107, truecolor 38;2;R;G;B). (4) libc stdio `drain_write` retry on EAGAIN (~200 ms backoff) → output largo (TCC compilando, `cat big.txt`) no se trunca silente. (5) Watchdog auto-resume en consrv/kbdsrv. (6) `oxsrv` coalesce mouse MOVE events a 1/frame para no inundar IPC bajo storm. | ✅ |
-| **🧬 FASE 13.0 — musl libc opt-in (segunda libc)**: musl 1.2.5 vendoreado en `vendor/musl/` (~140K LOC), compila clean con nuestra toolchain (zero patches al árbol upstream). Outputs en `vendor/musl/build-osnos/lib/{libc.a, crt1.o, crti.o, crtn.o}`. **Kernel gaps cerrados**: `SYS_WRITEV=20` (musl stdio escribe exclusivamente vía writev), `SYS_ARCH_PRCTL=158` (code `0x1002` ARCH_SET_FS → `wrmsr MSR_FS_BASE` = TLS pointer, sin esto cualquier acceso a errno crashea), `SYS_SET_TID_ADDRESS=218` (stub). `build_argv_block` extendido con auxv mínimo `[{AT_PAGESZ=6, 4096}, {AT_NULL=0, 0}]` (sin auxv musl lee bytes random como aux keys). Nuevo `elfs/musl.lds` que preserva `.init_array/.fini_array` + agrega PT_TLS. `elfs/tests/hello_musl.c` smoke test: 6/6 lines correctas end-to-end (auxv parse, TLS wrmsr, argv, snprintf con `%f` que la mini-libc no soporta, `%x` width/padding, exit limpio). Apps opt-in vía `USER_ELF_MUSL_SRCS` en GNUmakefile. **Pendiente**: `printf` / `puts` via FILE* layer retorna -1 — la cadena `__ofl_lock` o init lazy de stdout falla; `snprintf + write` directo funcionan perfecto. | ✅ |
+| **🧬 FASE 13.0 — musl libc opt-in (segunda libc)**: musl 1.2.5 vendoreado en `vendor/musl/` (~140K LOC), compila clean con nuestra toolchain (zero patches al árbol upstream). Outputs en `vendor/musl/build-osnos/lib/{libc.a, crt1.o, crti.o, crtn.o}`. **Kernel gaps cerrados**: `SYS_WRITEV=20` (musl stdio escribe exclusivamente vía writev), `SYS_ARCH_PRCTL=158` (code `0x1002` ARCH_SET_FS → `wrmsr MSR_FS_BASE` = TLS pointer, sin esto cualquier acceso a errno crashea), `SYS_SET_TID_ADDRESS=218` (stub). `build_argv_block` extendido con auxv mínimo `[{AT_PAGESZ=6, 4096}, {AT_NULL=0, 0}]` (sin auxv musl lee bytes random como aux keys). Nuevo `elfs/musl.lds` que preserva `.init_array/.fini_array` + agrega PT_TLS. `elfs/tests/hello_musl.c` smoke test: 6/6 lines correctas end-to-end (auxv parse, TLS wrmsr, argv, snprintf con `%f` que la mini-libc no soporta, `%x` width/padding, exit limpio). Apps opt-in vía `USER_ELF_MUSL_SRCS` en GNUmakefile. | ✅ |
+| **🐚 FASE 13.1 — BusyBox ash + login mode + .bashrc-style /home/.ashrc** (default shell de sistema): `/bin/busybox` 1.36.1 linkeado contra musl reemplaza a `shellsrv` como init shell. `proc_execve("/bin/busybox", "sh -l", envp)` con envp pre-poblado `PATH=/bin HOME=/home HISTFILE=/home/.ash_history HISTSIZE=500 TERM=linux` (HISTFILE en envp, NO en /etc/profile, porque ash lo lee antes de cmdloop). Split estilo bash: `/etc/profile` (sourced ONCE en login) sólo trae exports + `ENV=/home/.ashrc`; `/home/.ashrc` (sourced cada shell interactiva via $ENV, mirror exacto de `~/.bashrc`) trae banner ASCII "OSnOS", PS1 verde `osnos:\w# ` y aliases (`ll la l .. h cls`). Usuario edita `.ashrc` con `ovi /home/.ashrc` sin recompilar. In-memory history (up/down arrow) ✓ funciona via FEATURE_EDITING; persistencia a HISTFILE pendiente (binario busybox actual no tiene SAVEHISTORY=y compilado; rebuild bloqueado por cross-compile musl/macOS issues). **4 bugs kernel fixed** para que ash sobreviva: **(1) restart_syscall pattern**: `sys_read`/`sys_poll` rebobinan iret RIP 2 bytes + saved_rax = syscall_nr para que el CPU re-ejecute el syscall al despertar, en vez de longjump-with-rax=0 que ash interpretaba como EOF → exit(0) → infinite respawn loop. Patrón POSIX correcto. **(2) Syscall numbers** osnos-specific 260-268 → 510-518 (chocaban con Linux #262=newfstatat que musl `stat()` invoca). Nuevos: `SYS_LSTAT=6`, `SYS_OPENAT=257`, `SYS_NEWFSTATAT=262`, `SYS_EXIT_GROUP=231`. **(3) `sys_stat` copy_from_user** byte-a-byte hasta NUL (antes pedía 128 B y faulteaba con paths cortos al borde de página). **(4) `VFS_MAX_MOUNTS`** 8→16 (con `/home` aliasfs entraban 9 mounts, el extra perdía). Banner ASCII + welcome aparecen en cada boot/respawn. ↑/↓ recall in-memory history out-of-the-box (FEATURE_EDITING ya estaba on); persistencia cross-reboot a `/home/.ash_history` es best-effort según binario actual de busybox. `shellsrv` queda como fallback si `/bin/busybox` falta (diskless boot). | ✅ |
 | **18/18 tests automatizados** via `/bin/alltest` (kerntest, forktest, waittest, sigtest, sigchldtest, pgrouptest, spawntest, exectest, ofdtest, ptytest, fdedgetest, jobtest, termtest, serialtest, tcctest, luatest, jqtest, libctest) | ✅ |
 | **init-respawn watchdog** — consrv/kbdsrv/shellsrv auto-restart on death | ✅ |
 | Driver ATA PIO + FAT16 read/write + dir-chain extension + NT case-bits + persistencia | ✅ |

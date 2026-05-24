@@ -16,11 +16,18 @@ typedef struct task task_t;
  */
 #define SYS_READ      0
 #define SYS_WRITE     1
+#define SYS_POLL      7   /* BusyBox ash + many POSIX programs       */
 #define SYS_WRITEV   20
 #define SYS_OPEN      2
+#define SYS_OPENAT  257   /* musl opendir() / openat() — required for ls */
+/* SYS_NEWFSTATAT (262) collides with osnos SYS_SERVICE_REGISTER. Moving
+ * SERVICE_REGISTER (and friends) above 500 is FASE 14 work; for now ls
+ * works without stat. */
 #define SYS_CLOSE     3
 #define SYS_STAT      4
 #define SYS_FSTAT     5
+#define SYS_LSTAT     6   /* osnos has no symlinks → alias of stat */
+#define SYS_STATX   332   /* musl can use this; we fail it → fallback to stat */
 #define SYS_MMAP      9
 #define SYS_MUNMAP   11
 #define SYS_LSEEK     8
@@ -73,17 +80,44 @@ typedef struct task task_t;
 #define SYS_ARCH_PRCTL    158   /* TLS — wrmsr MSR_FS_BASE          */
 #define SYS_SET_TID_ADDRESS 218 /* musl __init_libc; trivial stub   */
 
-/* osnos-specific (above 250 to dodge Linux's #201 = time, #228 = clock_gettime). */
-#define SYS_ISATTY            250
-#define SYS_IPC_SEND          260
-#define SYS_IPC_RECV          261
-#define SYS_SERVICE_REGISTER  262
-#define SYS_SERVICE_LOOKUP    263
-#define SYS_TTY_INPUT         264
-#define SYS_TASKINFO          265
-#define SYS_SPAWN             266
-#define SYS_SET_FG            267
-#define SYS_RESUME            268
+/* BusyBox / POSIX userland — stubbed (no real users/permissions). */
+#define SYS_GETUID         102  /* stub → 0 (root)                  */
+#define SYS_GETGID         104  /* stub → 0                         */
+#define SYS_GETEUID        107  /* stub → 0                         */
+#define SYS_GETEGID        108  /* stub → 0                         */
+#define SYS_SETUID         105  /* stub → 0 (no-op)                 */
+#define SYS_SETGID         106  /* stub → 0 (no-op)                 */
+#define SYS_GETGROUPS      115  /* stub → 0 groups                  */
+#define SYS_SETGROUPS      116  /* stub → 0 (no-op)                 */
+#define SYS_UMASK           95  /* stub → returns previous (022)    */
+#define SYS_GETRLIMIT       97  /* stub → unlimited                 */
+#define SYS_SETRLIMIT      160  /* stub → 0 (no-op)                 */
+#define SYS_GETRUSAGE       98  /* stub → zeros                     */
+#define SYS_TIMES          100  /* stub → 0                         */
+#define SYS_SYSINFO         99  /* stub → zeros                     */
+#define SYS_PRCTL          157  /* stub → 0                         */
+#define SYS_UNAME           63  /* fills utsname with osnos info    */
+
+/* osnos-specific. Originally these lived in 260-268, but that range
+ * collides with Linux x86_64 syscalls 260=fchownat, 262=newfstatat
+ * (used by musl `stat`), 263=unlinkat, etc. Moved to 500+ so we never
+ * shadow a real Linux ABI number — critical for running unmodified
+ * musl/glibc binaries (BusyBox, future packages). The previous numbers
+ * are left as deprecated aliases for one transition cycle. */
+#define SYS_ISATTY            500
+#define SYS_IPC_SEND          510
+#define SYS_IPC_RECV          511
+#define SYS_SERVICE_REGISTER  512
+#define SYS_SERVICE_LOOKUP    513
+#define SYS_TTY_INPUT         514
+#define SYS_TASKINFO          515
+#define SYS_SPAWN             516
+#define SYS_SET_FG            517
+#define SYS_RESUME            518
+
+/* Linux fileops at-flavors that musl uses. SYS_NEWFSTATAT (262) is
+ * what musl `stat()` on x86_64 ultimately invokes. */
+#define SYS_NEWFSTATAT        262
 
 /*
  * Saved user GPR set, pushed by int80_entry / syscall_entry on every

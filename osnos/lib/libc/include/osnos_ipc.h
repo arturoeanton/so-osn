@@ -20,16 +20,19 @@
 
 #include "../syscall.h"
 
-/* SYS_* numbers shared with the kernel (src/micro/syscall.h). */
+/* SYS_* numbers shared with the kernel (src/micro/syscall.h).
+ * Moved out of the 260-268 range to dodge Linux x86_64 syscalls
+ * 262=newfstatat (used by musl `stat`), 263=unlinkat, etc. */
 #ifndef SYS_IPC_SEND
-#define SYS_IPC_SEND          260
-#define SYS_IPC_RECV          261
-#define SYS_SERVICE_REGISTER  262
-#define SYS_SERVICE_LOOKUP    263
-#define SYS_TTY_INPUT         264
-#define SYS_SPAWN             266
-#define SYS_SET_FG            267
-#define SYS_RESUME            268
+#define SYS_IPC_SEND          510
+#define SYS_IPC_RECV          511
+#define SYS_SERVICE_REGISTER  512
+#define SYS_SERVICE_LOOKUP    513
+#define SYS_TTY_INPUT         514
+#define SYS_TASKINFO          515
+#define SYS_SPAWN             516
+#define SYS_SET_FG            517
+#define SYS_RESUME            518
 #endif
 
 /*
