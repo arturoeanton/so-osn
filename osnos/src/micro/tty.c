@@ -44,8 +44,16 @@ static void read_buf_push(char c) {
  */
 static void tty_echo_char(char c) {
     if (!(tty_t.c_lflag & TTY_ECHO)) return;
-    char s[2] = { c, 0 };
-    framebuffer_draw_string(s, 0xffffff);
+    /* Use framebuffer_write_bytes (not draw_string) — mismo path que
+     * usan las apps via consrv → /dev/fb, así que el cursor x/y
+     * permanece consistente entre echo (kernel) y output de apps
+     * (ring 3 via stdout). draw_string mantenía cursor pero NO
+     * mirroreaba a serial — write_bytes hace ambos. Sin este cambio,
+     * REPLs de sqlite/lua leían chars sin que el echo se viera en
+     * pantalla porque el ordering de IPC consrv vs el draw directo
+     * dejaba el echo "atrás" del prompt visualmente. */
+    extern void framebuffer_write_bytes(const char *buf, size_t n, uint32_t color);
+    framebuffer_write_bytes(&c, 1, 0xffffff);
 }
 
 static void tty_echo_erase(void) {
