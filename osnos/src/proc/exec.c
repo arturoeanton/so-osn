@@ -207,10 +207,22 @@ static void user_task_resume(task_t *t) {
         }
 
         /* Reroute iretq: rip=handler, rsp=top of restorer slot,
-         * rdi=signum (handler's first arg per SysV ABI). */
+         * rdi=signum (handler's first arg per SysV ABI).
+         *
+         * SA_SIGINFO handlers usan firma de 3 args:
+         *   void h(int sig, siginfo_t *info, void *ucontext)
+         * que en SysV son rdi/rsi/rdx. Apps que installan handler
+         * con SA_SIGINFO (lighttpd, nginx, postgres) leen *rsi como
+         * siginfo. No populamos esa struct todavía pero zeroear rsi
+         * y rdx hace que el handler vea NULL — la mayoría tiene
+         * fallback (lighttpd cmovneq con un global default). Sin
+         * esto rsi era basura de la syscall y movups (rsi+0x70)
+         * page-faulteaba. */
         buf[4]  = handler;        /* rip   */
         buf[1]  = restorer_slot;  /* rsp   */
         buf[10] = (uint64_t)sig;  /* rdi   */
+        buf[9]  = 0;              /* rsi   = NULL siginfo_t */
+        buf[8]  = 0;              /* rdx   = NULL ucontext_t */
 
         t->sig_pending &= ~(1u << (sig - 1));
         break;                    /* one signal per dispatch; rest queued */
@@ -266,21 +278,34 @@ static void user_task_trampoline(void) {
         /* Translate to the actual pending signal: kill_pending is
          * set in tandem with sig_pending for SIGINT/SIGTERM/SIGKILL
          * (see sys_kill / tty_signal). The first bit set in
-         * sig_pending tells us the real signum so we exit with the
-         * POSIX-correct code (128 + sig). Falling back to SIGINT if
-         * sig_pending is somehow empty preserves the prior behaviour
-         * for any legacy code path that still toggles kill_pending
-         * by itself. */
+         * sig_pending tells us the real signum.
+         *
+         * Excepción crítica: si la app INSTALÓ un user handler
+         * (sa_handler != SIG_DFL && != SIG_IGN), NO force-killeamos
+         * — bajamos al código de signal delivery más abajo que va
+         * a invocar el handler. Apps como lighttpd registran SIGINT
+         * para hacer graceful shutdown; sin esta excepción Ctrl+C
+         * los mataba sin darles chance de cerrar sockets, flush
+         * logs, etc. SIGKILL (9) sigue siendo uncatchable. */
         int sig = 2 /* SIGINT default */;
         if (t->sig_pending) {
             for (int s = 1; s <= 31; s++) {
                 if (t->sig_pending & (1u << (s - 1))) { sig = s; break; }
             }
         }
-        t->kill_pending = 0;
-        t->sig_pending &= ~(1u << (sig - 1));
-        proc_exit_current_user(128 + sig);
-        __builtin_unreachable();
+        uint64_t handler = t->sa_handler[sig - 1];
+        int catchable    = (sig != 9 /* SIGKILL */);
+        if (catchable && handler != 0 /* SIG_DFL */ && handler != 1 /* SIG_IGN */) {
+            /* Limpiar kill_pending — dejamos el sig_pending bit
+             * para que el lazo siguiente lo entregue al handler. */
+            t->kill_pending = 0;
+            /* fall through al signal delivery loop abajo */
+        } else {
+            t->kill_pending = 0;
+            t->sig_pending &= ~(1u << (sig - 1));
+            proc_exit_current_user(128 + sig);
+            __builtin_unreachable();
+        }
     }
 
     /*

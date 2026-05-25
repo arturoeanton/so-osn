@@ -268,6 +268,10 @@ void bootstrap_fs(void) {
             "alias dc='busybox dc'\n"
             "alias strings='busybox strings'\n"
             "\n"
+            "# Bare `lighttpd` corre con el config default.\n"
+            "# Pasá flags adicionales (-D para foreground, -t para test config).\n"
+            "alias lighttpd='lighttpd -f /etc/lighttpd/lighttpd.conf'\n"
+            "\n"
             "/bin/banner osnos 2>/dev/null\n"
             "echo 'BusyBox ash on osnos — help for builtins, ls /bin for commands.'\n");
         /* Ox window-system settings (FASE 12). oxsrv reads this at

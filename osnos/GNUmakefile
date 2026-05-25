@@ -202,7 +202,8 @@ USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(BUILD)/elfs/tools/lua.elf \
                  $(BUILD)/elfs/tools/jq.elf \
                  $(BUILD)/elfs/tools/sqlite3.elf \
-                 $(BUILD)/elfs/tools/make.elf
+                 $(BUILD)/elfs/tools/make.elf \
+                 $(BUILD)/elfs/tools/lighttpd.elf
 
 # ---------------------------------------------------------------------------
 # Fase 2 disk-resident: split the embedded set into ROM (small, kept inside
@@ -335,6 +336,9 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBTCC1_A) $(CRTI_O) $(CRTN
 	@# it from the GUI. If left absent, oxsrv falls back to "samurai".
 	printf 'current_wallpaper=samurai\n' > $(SD_TMP)/.oxrc
 	mcopy -i $@ $(SD_TMP)/.oxrc       ::/home/.oxrc
+	@# lighttpd: solo index.html ahora; /etc/lighttpd/ se crea más
+	@# abajo (después de /etc) para mantener orden mmd correcto.
+	mcopy -i $@ -o res/lighttpd/index.html    ::/home/index.html
 	@# Wallpaper PPMs (FASE 12).
 	mcopy -i $@ $(WALLPAPER_TMP)/samurai.ppm ::/home/wallpapers/samurai.ppm
 	mcopy -i $@ $(WALLPAPER_TMP)/girl.ppm    ::/home/wallpapers/girl.ppm
@@ -395,6 +399,9 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBTCC1_A) $(CRTI_O) $(CRTN
 	mcopy -i $@ -o $(SD_TMP)/passwd ::/etc/passwd
 	mcopy -i $@ -o $(SD_TMP)/group  ::/etc/group
 	mcopy -i $@ -o $(SD_TMP)/hosts  ::/etc/hosts
+	@# lighttpd config (FASE 14.5). /etc/lighttpd/ creada acá tras /etc.
+	mmd -i $@ ::/etc/lighttpd 2>/dev/null || true
+	mcopy -i $@ -o res/lighttpd/lighttpd.conf ::/etc/lighttpd/lighttpd.conf
 	@# TCC's own builtin headers (stdarg.h, stddef.h, stdbool.h, ...)
 	@# — preferred over /usr/include/* because they use TCC-native
 	@# va_list, not clang's __builtin_va_list.
@@ -602,6 +609,67 @@ $(BUILD)/elfs/tools/sqlite3.elf: $(BUILD)/$(SQLITE_DIR)/sqlite3.c.o $(BUILD)/$(S
 	mkdir -p "$(dir $@)"
 	$(LD) $(MUSL_LDFLAGS) -T elfs/musl.lds \
 	    $(MUSL_CRT1) $(MUSL_CRTI) $(BUILD)/$(SQLITE_DIR)/sqlite3.c.o $(BUILD)/$(SQLITE_DIR)/shell.c.o \
+	    $(MUSL_LIB) $(MUSL_CRTN) -o $@
+
+# --------------------------------------------------------------------------
+# lighttpd 1.4.76 port — FASE 14.5. Vendor tarball, hand-crafted config.h
+# en build-osnos/, lemon-generated configparser.c, subset de built-in
+# mods (no auth/cgi/SSL/proxy/deflate). Linkea contra musl static.
+# Output: /bin/lighttpd (~1.85 MB).
+# --------------------------------------------------------------------------
+LIGHT_DIR    := vendor/lighttpd
+LIGHT_BUILD  := $(LIGHT_DIR)/build-osnos
+LIGHT_OBJ    := $(BUILD)/vendor/lighttpd/obj
+LIGHT_CFLAGS := -O2 -g -nostdinc -ffreestanding -fno-stack-protector \
+                -fno-PIC -fno-pie -ffunction-sections -fdata-sections \
+                -target x86_64-unknown-none-elf -m64 -march=x86-64 \
+                -mabi=sysv -mno-red-zone \
+                $(addprefix -isystem ,$(MUSL_INC)) \
+                -I $(LIGHT_DIR)/src -I $(LIGHT_BUILD) \
+                -DHAVE_CONFIG_H -w
+
+LIGHT_SRCS := server.c response.c connections.c h1.c sock_addr_cache.c \
+              network.c network_write.c fdevent_impl.c http_range.c \
+              data_config.c configfile.c configparser.c \
+              base64.c buffer.c burl.c log.c http_header.c http_kv.c \
+              keyvalue.c chunk.c http_chunk.c fdevent.c fdevent_fdnode.c \
+              gw_backend.c stat_cache.c http_etag.c array.c algo_md5.c \
+              algo_sha1.c algo_splaytree.c configfile-glue.c \
+              http-header-glue.c http_cgi.c http_date.c plugin.c reqpool.c \
+              request.c sock_addr.c rand.c fdlog_maint.c fdlog.c \
+              sys-setjmp.c ck.c \
+              mod_indexfile.c mod_staticfile.c mod_access.c mod_alias.c \
+              mod_setenv.c mod_expire.c mod_redirect.c mod_simple_vhost.c \
+              mod_evhost.c mod_rewrite.c
+
+LIGHT_OBJS := $(addprefix $(LIGHT_OBJ)/, $(LIGHT_SRCS:.c=.o))
+
+# configparser.c se genera de configparser.y vía lemon (parser
+# generator). Compilamos lemon en host una vez y lo cacheamos.
+$(BUILD)/vendor/lighttpd/lemon:
+	mkdir -p "$(dir $@)"
+	clang -O2 $(LIGHT_DIR)/src/lemon.c -o $@
+
+$(LIGHT_DIR)/src/configparser.c: $(LIGHT_DIR)/src/configparser.y $(BUILD)/vendor/lighttpd/lemon
+	cp $(BUILD)/vendor/lighttpd/lemon $(LIGHT_DIR)/src/lemon-bin
+	cd $(LIGHT_DIR)/src && ./lemon-bin -q configparser.y
+	rm -f $(LIGHT_DIR)/src/lemon-bin
+
+# rand.c necesita -include sys/random.h (no incluye explícito y
+# musl no expone getrandom() implícitamente).
+$(LIGHT_OBJ)/rand.o: $(LIGHT_DIR)/src/rand.c $(LIGHT_BUILD)/config.h
+	mkdir -p "$(dir $@)"
+	$(CC) $(LIGHT_CFLAGS) -include sys/random.h -c $< -o $@
+
+$(LIGHT_OBJ)/%.o: $(LIGHT_DIR)/src/%.c $(LIGHT_BUILD)/config.h $(LIGHT_BUILD)/plugin-static.h
+	mkdir -p "$(dir $@)"
+	$(CC) $(LIGHT_CFLAGS) -c $< -o $@
+
+$(BUILD)/elfs/tools/lighttpd.elf: $(LIGHT_OBJS) elfs/musl.lds \
+        $(MUSL_LIB) $(MUSL_CRT1) $(MUSL_CRTI) $(MUSL_CRTN)
+	mkdir -p "$(dir $@)"
+	$(LD) $(MUSL_LDFLAGS) -T elfs/musl.lds \
+	    $(MUSL_CRT1) $(MUSL_CRTI) $(LIGHT_OBJS) \
 	    $(MUSL_LIB) $(MUSL_CRTN) -o $@
 
 # --------------------------------------------------------------------------

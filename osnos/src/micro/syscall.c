@@ -320,6 +320,15 @@ int64_t sys_write(int fd, const void *buf, size_t count) {
         return (r < 0) ? -(int64_t)(-r) : (int64_t)r;
     }
 
+    /* AF_INET socket — write() === send() para TCP streams. Sin esto
+     * lighttpd/httpd no podían escribir la respuesta sobre el fd
+     * accept'd (usaban read/write, no send/recv). */
+    if (f->is_socket) {
+        int n = sock_send(f->sock_idx, buf, count);
+        if (n < 0) return err(OSNOS_EBADF);
+        return (int64_t)n;
+    }
+
     /* PTY: dispatch to master/slave write. The other side's reader
      * picks bytes up via pty_*_read; canonical mode line-buffering
      * + echo are applied in pty_master_write itself. */
@@ -531,6 +540,17 @@ int64_t sys_read(int fd, void *buf, size_t count) {
     if (f->is_unix_socket) {
         int r = unix_sock_recv(f->unix_idx, buf, count);
         return (r < 0) ? -(int64_t)(-r) : (int64_t)r;
+    }
+
+    /* AF_INET socket — read() === recv(). lighttpd y otros servidores
+     * reales usan read/write directo sobre el fd sin pasar por
+     * sendto/recvfrom. Sin este path, read() de socket caía al path
+     * VFS y EINVAL'eaba en seguida. */
+    if (f->is_socket) {
+        int n = sock_recv(f->sock_idx, buf, count, 0);
+        if (n == -2) return err(OSNOS_EAGAIN);
+        if (n >= 0)  return (int64_t)n;
+        return err(OSNOS_EBADF);
     }
 
     /* PTY read — master and slave have different semantics:
@@ -1361,11 +1381,29 @@ int64_t sys_connect(int fd, const void *addr, uint32_t addrlen) {
  */
 int64_t sys_setsockopt(int fd, int level, int optname,
                         const void *optval, uint32_t optlen) {
-    (void)optval; (void)optlen;
+    (void)optname; (void)optval; (void)optlen;
     osnos_fd_t *f = fd_get(task_current(), fd);
-    if (!f || !f->is_socket) return err(OSNOS_EBADF);
-    /* SOL_SOCKET = 1, SO_REUSEADDR = 2 (Linux numbers, see libc). */
-    if (level == 1 && optname == 2) return 0;
+    if (!f || (!f->is_socket && !f->is_unix_socket)) return err(OSNOS_EBADF);
+    /* Aceptamos como no-op success todos los flags comunes — no
+     * los implementamos pero apps reales (lighttpd, sshd, ...)
+     * fallan o emiten warnings si setsockopt retorna error.
+     *
+     * SOL_SOCKET=1:
+     *   SO_DEBUG=1, SO_REUSEADDR=2, SO_TYPE=3, SO_ERROR=4,
+     *   SO_DONTROUTE=5, SO_BROADCAST=6, SO_SNDBUF=7, SO_RCVBUF=8,
+     *   SO_KEEPALIVE=9, SO_OOBINLINE=10, SO_LINGER=13,
+     *   SO_REUSEPORT=15, SO_RCVLOWAT=18, SO_SNDLOWAT=19,
+     *   SO_RCVTIMEO=20, SO_SNDTIMEO=21
+     * IPPROTO_TCP=6:
+     *   TCP_NODELAY=1, TCP_KEEPIDLE=4, TCP_KEEPINTVL=5,
+     *   TCP_KEEPCNT=6, TCP_FASTOPEN=23, TCP_QUICKACK=12
+     * IPPROTO_IP=0:
+     *   IP_TOS=1, IP_TTL=2, IP_HDRINCL=3, IP_MULTICAST_TTL=33 */
+    if (level == 1 /* SOL_SOCKET */ ||
+        level == 6 /* IPPROTO_TCP */ ||
+        level == 0 /* IPPROTO_IP  */) {
+        return 0;
+    }
     return err(OSNOS_EINVAL);
 }
 
@@ -3170,6 +3208,32 @@ int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
         ws.ws_xpixel = 0;
         ws.ws_ypixel = 0;
         if (copy_to_user(arg, &ws, sizeof(ws)) != OSNOS_OK) return err(OSNOS_EFAULT);
+        return 0;
+    }
+    case 0x540F /* TIOCGPGRP */: {
+        /* tcgetpgrp(fd) — devuelve el pgid del foreground process
+         * group del TTY. Usamos `kernel_fg_pid` como aproximación
+         * (single-pgid model). Si nadie lo seteó, devolvemos pgid
+         * del caller para que apps tipo busybox arranquen sin
+         * romperse. */
+        extern uint64_t kernel_fg_pid;
+        uint32_t pgid = (uint32_t)kernel_fg_pid;
+        if (pgid == 0) pgid = (uint32_t)task_current()->pgid;
+        if (copy_to_user(arg, &pgid, sizeof(pgid)) != OSNOS_OK)
+            return err(OSNOS_EFAULT);
+        return 0;
+    }
+    case 0x5410 /* TIOCSPGRP */: {
+        /* tcsetpgrp(fd, pgid) — la SHELL llama esto antes de cada
+         * fg job para que el TTY entregue Ctrl+C/Z al pgid correcto.
+         * Sin este ioctl, kernel_fg_pid quedaba 0 y tty_signal
+         * silently dropped los signals. Ahora busybox ash puede
+         * routear Ctrl+C a lighttpd/tcc/lua/whatever esté foreground. */
+        extern uint64_t kernel_fg_pid;
+        uint32_t pgid = 0;
+        if (copy_from_user(&pgid, arg, sizeof(pgid)) != OSNOS_OK)
+            return err(OSNOS_EFAULT);
+        kernel_fg_pid = pgid;
         return 0;
     }
     default:

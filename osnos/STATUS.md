@@ -21,44 +21,50 @@ Convenciones:
 OSnOS es un microkernel hobby x86_64 escrito desde cero. Bootea con
 Limine, corre en QEMU, y trae:
 
-- **Kernel ring-0** con ELF loader, paging propio (4 niveles), VFS
-  multi-backend (ramfs + FAT16 + devfs + sysfs + binfs + aliasfs),
-  scheduler preemptivo (50 ms quantum en CPL=3), IPC queue de 64
-  slots, line discipline POSIX, ~70 syscalls compatibles con Linux
-  x86_64 (read/write/open/fork/execve/wait/sigaction/pipe/mmap/
-  socket/select/poll/...).
+- **Kernel ring-0** con ELF loader (ET_EXEC + ET_DYN/PT_INTERP),
+  paging propio (4 niveles), VFS multi-backend (ramfs + FAT16 + devfs
+  + sysfs + binfs + aliasfs), scheduler preemptivo (50 ms quantum en
+  CPL=3), IPC queue de 64 slots, line discipline POSIX, **~80
+  syscalls** compatibles con Linux x86_64 (read/write/open/fork/clone/
+  execve/wait/sigaction/pipe/mmap/shm/socket/AF_UNIX/select/poll/...).
 - **Servidores ring-3**: console (`consrv`), keyboard (`kbdsrv`),
-  mouse feeder, shell (`busybox sh` desde FASE 13.1; antes `shellsrv`
-  custom).
-- **Dos libcs**: una mini hecha en casa (`lib/libc/`) para programas
-  chicos, y **musl 1.2.5 vendoreado** (FASE 13.0) para programas
-  serios. Coexisten — cada ELF opta-in al linkear.
+  mouse feeder, shell (`busybox sh` desde FASE 13.1).
+- **Dos libcs**: mini-libc (`lib/libc/`) para programas chicos, y
+  **musl 1.2.5** (FASE 13.0) — ahora también **shared lib**
+  (`/lib/libc.so` + `/lib/ld-musl-x86_64.so.1`) para dynamic linking
+  (FASE 14.4).
 - **BusyBox 1.36.1** linkeado contra musl (FASE 13.1): ~60 applets
-  (`vi awk sed find diff stat dd md5sum sha256sum base64 hexdump
-  bc dc more tac fold xargs find ...`) accesibles vía aliases en
-  `/home/.ashrc`. Default shell es `busybox sh` con history persistente
-  a `/home/.ash_history`.
-- **Cuatro lenguajes self-host**: C (TCC 0.9.27, FASE 11.0), Lua
-  5.4.7 (FASE 11.2), jq 1.7.1 (FASE 11.3), **SQL via SQLite 3.45.2**
-  (FASE 13.3) — todos como ELFs en `/bin/`, todos funcionales con
-  REPL interactivo (echo + backspace visible) o redirect.
-- **Ox mini-X window system** (FASE 12.0): server ring-3 `/bin/oxsrv`
-  con compositor + 5 apps GUI (oxnotepad, oxcalc, oxterm, oxfiles,
-  oxsettings), wallpapers PPM, root menu Openbox-style. Opt-in
-  (usuario lanza `oxsrv` desde el shell).
-- **Console serial dual** (UART 16550 COM1): boot headless con
-  `./build_and_run.sh headless` para CI; framebuffer + serial siempre
-  en paralelo, panic backtrace persiste en serial.log.
-- **18/18 tests automatizados** via `/bin/alltest` (kernel + libc + ports).
-- **Bug fixes recientes** que destrabaron el camino hacia REPLs
-  interactivos usables: FS_BASE save/restore en task switch +
-  reset en execve (bug #9), echo y backspace via `framebuffer_write_bytes`
-  consistente con el path de apps (bugs #10 + #11), restart_syscall
-  pattern en sys_read/poll (bug #2 cuando portamos BusyBox).
+  accesibles vía aliases en `/home/.ashrc`. Default shell es
+  `busybox sh` con history persistente.
+- **Cinco lenguajes / self-hosting completo**: C (TCC 0.9.27,
+  FASE 11.0), Lua 5.4.7 (FASE 11.2), jq 1.7.1 (FASE 11.3), SQL via
+  SQLite 3.45.2 (FASE 13.3), **POSIX make (pdpmake) — `cd /home &&
+  make hello && ./hello` compila con tcc desde adentro** (FASE 14.1).
+- **Ox mini-X window system** (FASE 12.0): server + 5 apps GUI.
+- **🎉 lighttpd 1.4.76** (FASE 14.5) — webserver real sirviendo
+  HTTP/1.1 sobre `/home`; `curl http://localhost:8080/` → 200 OK.
+- **POSIX IPC moderno** (FASE 14.2-14.4): AF_UNIX SOCK_STREAM,
+  `shm_open` + `mmap(MAP_SHARED, fd)` con shared memory cross-fork,
+  dynamic linking via `ld-musl.so` (apps `.so`-linked corren).
+- **Console serial dual** (UART 16550 COM1) para boot headless / CI.
+- **21/21 tests automatizados** via `/bin/alltest` (incluye
+  unixtest, shmtest, hello_dyn). Cada test con timeout de 60s para
+  que un cuelgue no bloquee la suite.
+- **Bug fixes recientes notables**: (a) `rdmsr FS_BASE` en
+  `sys_fork`/`sys_clone` (el snapshot stale daba NULL deref en
+  musl `__post_Fork`'s `__get_tp`); (b) `kill_pending` ya no force-
+  exit-ea si la app instaló handler (lighttpd graceful shutdown via
+  Ctrl+C); (c) `TIOCSPGRP`/`TIOCGPGRP` ioctls para que `tcsetpgrp`
+  rute Ctrl+C al pgid correcto; (d) `SA_SIGINFO` handlers reciben
+  rsi/rdx = NULL (antes eran basura → page fault); (e) execve
+  resetea `sa_handler[]` a SIG_DFL (POSIX); (f) `sys_execve`
+  preserva argv boundaries; (g) `sys_read`/`write` AF_INET dispatch.
 
 **Pitch en una frase**: hobby OS x86_64 que corre BusyBox + SQLite +
-Lua + jq + TCC, todos compilados nativos contra musl, con un mini-X
-window system propio, todo desde un microkernel escrito desde cero.
+Lua + jq + TCC + **make + lighttpd**, todos compilados nativos contra
+musl (static y dynamic), con AF_UNIX + POSIX SHM + dynamic linking
+funcionales, y un mini-X window system propio — todo desde un
+microkernel escrito desde cero.
 
 ---
 
@@ -80,17 +86,25 @@ window system propio, todo desde un microkernel escrito desde cero.
 |---|---|---|
 | Task table (16 slots) + scheduler preemptivo | ✅ | longjmp resume pattern |
 | **`block_restart_syscall` pattern** en sys_read / sys_poll | ✅ | Bloquea via iret rewind, no longjmp con rax=0 (FASE 13.1) |
-| **`fs_base` save/restore en task switch + reset en execve** | ✅ | Per-task TLS pointer (FASE 13.3) |
+| **`fs_base` save/restore en task switch + rdmsr live en fork** | ✅ | Per-task TLS pointer; rdmsr en sys_fork/sys_clone evita stale snapshot que NULL-derefeaba musl `__post_Fork` |
 | Per-task fd table (16 fds) + OFD pool (128) | ✅ | Shared offsets POSIX |
 | pipe / dup / dup2 / fcntl | ✅ | FD_CLOEXEC per-fd |
-| `mmap`/`munmap` anónimo + brk/sbrk | ✅ | mmap_regions tracking |
-| Signal delivery (sigaction, sigreturn, EINTR) | ✅ | Sigframe en user stack |
+| `mmap`/`munmap` anónimo + brk/sbrk | ✅ | mmap_regions tracking + shm_backed flag |
+| **`mmap(MAP_SHARED, fd_shm)` con fork preserva pages compartidas** | ✅ | Fork fixup re-mappea phys pages del parent (FASE 14.3) |
+| Signal delivery (sigaction, sigreturn, EINTR) | ✅ | Sigframe en user stack; rdi/rsi/rdx = sig/NULL/NULL (SA_SIGINFO compatible) |
+| **`kill_pending` honra user handler** | ✅ | Ctrl+C en apps con SIGINT handler hace graceful shutdown, no force-exit (FASE 14.5 polish) |
+| **`sa_handler[]` reset a SIG_DFL en execve** | ✅ | POSIX violation fix — antes child heredaba handlers cuyos pointers vivían en text del binario viejo |
 | SIGCHLD automático + waitpid + WIFEXITED/SIGNALED | ✅ | TASK_ZOMBIE state |
-| Process groups + sessions + Ctrl+C fan-out a pgid | ✅ | WUNTRACED/WCONTINUED |
+| Process groups + sessions + Ctrl+C fan-out a pgid | ✅ | WUNTRACED/WCONTINUED; **`TIOCSPGRP`/`TIOCGPGRP`** ioctls (FASE 14.5 polish) |
 | PTY pairs (`/dev/ptmx` + `/dev/pts/N`, pool 8) | ✅ | Canon/raw, ECHO, TIOCS* ioctls |
 | **POSIX line discipline TTY** + echo + backspace consistentes | ✅ | Echo via `framebuffer_write_bytes` mismo path que apps (FASE 13.3 fix) |
+| **`SYS_CLONE` real** (`CLONE_VM`, `CLONE_VFORK`, `SIGCHLD`) | ✅ | Para musl `posix_spawn`; pml4 sharing via lookup-refcount (FASE 14.1) |
+| **`sys_execve` preserva argv boundaries** | ✅ | Array-based path (no flat-join + re-tokenize) — `sh -c "echo HELLO"` ahora ve 3 argv correctos (FASE 14.1) |
+| **`sys_read`/`write` dispatch AF_INET + AF_UNIX** | ✅ | Read/write directo sobre stream sockets (lighttpd usa este path) |
+| **`sys_setsockopt` permisivo** | ✅ | SOL_SOCKET/IPPROTO_TCP/IPPROTO_IP = no-op success (acepta TCP_NODELAY etc.) (FASE 14.5) |
+| **Auxv completo** (AT_PHDR/PHENT/PHNUM/BASE/ENTRY/RANDOM) | ✅ | Para que ld-musl.so pueda parsear (FASE 14.4) |
 | IPC queue 64 × 1024 B + service registry | ✅ | Routing por SID o pid directo |
-| `init-respawn` watchdog para servers | ✅ | consrv/kbdsrv/shellsrv auto-restart |
+| `init-respawn` watchdog para servers | ✅ | consrv/kbdsrv/busybox auto-restart |
 
 ### Sistema de archivos
 | Subsistema | Estado | Notas |
@@ -110,10 +124,19 @@ window system propio, todo desde un microkernel escrito desde cero.
 | Subsistema | Estado | Notas |
 |---|---|---|
 | RTL8139 driver + ARP + IPv4 + ICMP + UDP + TCP | ✅ | PCI bus scan |
-| Sockets POSIX (socket/bind/listen/accept/connect/send/recv/select) | ✅ | |
+| Sockets POSIX (socket/bind/listen/accept/connect/send/recv/select) | ✅ | read/write directo soportado (FASE 14.5) |
 | DNS resolver + getaddrinfo (vía slirp 10.0.2.3) | ✅ | |
 | `/bin/httpd` sirviendo FAT16 sobre HTTP | ✅ | hostfwd 8080 |
+| **`/bin/lighttpd` 1.4.76 webserver real** | ✅ | poll-based, 10 builtin mods, sirve `/home` (FASE 14.5) |
 | Demos (`/bin/tcpclient`, `udptest`, `echotcp`, `selectserver`) | ✅ | |
+
+### POSIX IPC + dynamic linking (FASE 14)
+| Subsistema | Estado | Notas |
+|---|---|---|
+| **AF_UNIX SOCK_STREAM** (`/bin/unixtest` smoke) | ✅ | Pool 32 sockets + 16 paths bound + ring buffers 4 KiB; sin abstract namespace (FASE 14.2) |
+| **POSIX `shm_open` + `mmap(MAP_SHARED, fd)`** (`/bin/shmtest`) | ✅ | Pool 16 objetos × 256 páginas; shared memory cross-fork verificado (FASE 14.3) |
+| **Dynamic linking via `ld-musl-x86_64.so.1`** (`/bin/hello_dyn`) | ✅ | PT_INTERP + auxv completo; apps `.so`-linked corren (FASE 14.4) |
+| **`/lib/libc.so` + `/lib/ld-musl-x86_64.so.1`** staged en sd.img | ✅ | musl rebuilt con shared support; mismo binario es libc.so y el dynamic linker |
 
 ### Userland — shell + comandos
 | Componente | Estado | Notas |
@@ -131,13 +154,14 @@ window system propio, todo desde un microkernel escrito desde cero.
 | `tail -f` (`/bin/tail`) | ✅ | Poll loop 200 ms con EAGAIN/EINTR |
 | `/bin/term` + `/bin/minishell` | ✅ | Sub-shell interactivo en PTY (showcase POSIX) |
 
-### Self-hosting (4 lenguajes)
+### Self-hosting (5 lenguajes + make)
 | Componente | Estado | Notas |
 |---|---|---|
 | **`/bin/tcc` — TinyCC 0.9.27** | ✅ | C compiler; produce ELFs estáticos runnable contra `/lib/libc.a` (FASE 11.0) |
 | **`/bin/lua` — Lua 5.4.7** | ✅ | REPL + scripts (FASE 11.2) |
 | **`/bin/jq` — jq 1.7.1** | ✅ | Filter/transformer JSON (FASE 11.3) |
 | **`/bin/sqlite3` — SQLite 3.45.2** | ✅ | SQL engine completo + `/home/demo.db` (15 books + view + indices) preseeded (FASE 13.3) |
+| **`/bin/make` — pdpmake 1.4.1 (POSIX make)** | ✅ | `cd /home && make hello && ./hello` compila con tcc end-to-end (FASE 14.1) |
 
 ### Window system (Ox)
 | Componente | Estado | Notas |
@@ -154,13 +178,19 @@ window system propio, todo desde un microkernel escrito desde cero.
 
 ### Limitaciones conocidas
 - ❌ SMP (multi-core)
-- ❌ Copy-on-write para fork (hoy full page copy)
-- ❌ File-backed mmap (solo anonymous)
+- ❌ Copy-on-write para fork (hoy full page copy; shm-backed regiones SÍ comparten físico)
+- ❌ File-backed mmap de archivos regulares (solo anonymous + MAP_SHARED sobre shm fd)
 - ❌ Real X11/tinyX (Ox es protocolo IPC propio; pero los ioctls + `<linux/fb.h>` están listos para un futuro port)
-- ⚠️ TTY global compartido entre tasks (no per-PTY real) — mitigado con anti-clobber de tcsetattr y echo via path compartido, pero un fork+exec a un programa que necesite raw mode no convive bien con un parent que también raw
+- ❌ IPv6, epoll, kqueue, sendfile, inotify
+- ❌ PIE main / ET_DYN executable con load offset random (solo el interpreter es ET_DYN)
+- ❌ RTLD_LAZY / dlopen / dlsym / DT_NEEDED transitivo (musl los expone pero no probamos cargar libs adicionales)
+- ❌ `epoll_*` syscalls (lighttpd usa el fallback `poll`)
+- ⚠️ lighttpd con `&` background falla por `sh: can't open '/dev/null'` raro de busybox — workaround: correr foreground
+- ⚠️ TTY global compartido entre tasks (no per-PTY real) — mitigado con anti-clobber de tcsetattr y echo via path compartido
 - ⚠️ Single FP state HW para múltiples tasks — FXSAVE/FXRSTOR per-task implementado pero no extensivamente testeado
-- ⚠️ sqlite3 con SQL en argv tiene argv passing issues; workaround: stdin redirect (`echo "SQL" \| sqlite3` o `sqlite3 db < q.sql`)
-- ⚠️ sqlite3 exit limpio puede page-faultear en musl atexit cleanup (no afecta a ash — gracias al fix de FS_BASE)
+- ⚠️ sqlite3 con SQL en argv tiene argv passing issues residuales (workaround: stdin redirect)
+- ⚠️ sqlite3 exit limpio puede page-faultear en musl atexit cleanup (cosmético; no afecta a ash gracias al fix FS_BASE)
+- ⚠️ `SA_SIGINFO` handlers reciben `siginfo_t *` = NULL (no populamos struct; apps con null-check ok, apps que lo asumen non-null pueden faultear)
 
 ---
 
@@ -171,6 +201,12 @@ y bugs notables encontrados.
 
 | Fase | Subsistema | LOC aprox |
 |------|-----------|-----------|
+| **FASE 14.5 polish — Ctrl+C catchable + TIOCSPGRP + SA_SIGINFO null-args** | (1) **`kill_pending` honra user handler**: antes `proc_exit_current_user(128+sig)` se llamaba siempre si kill_pending=1. Ahora si la app instaló handler (sa_handler ≠ DFL ≠ IGN) y sig ≠ SIGKILL, fall-through al signal delivery loop para invocar el handler. (2) **`TIOCGPGRP`/`TIOCSPGRP` ioctls**: busybox ash llama `tcsetpgrp(STDIN, pgid_of_fg_job)`; sin estos ioctls fallaba con ENOTTY y `kernel_fg_pid` quedaba 0, tty_signal silently dropped. Ahora `tcsetpgrp` actualiza `kernel_fg_pid` y Ctrl+C rutea correctamente. (3) **SA_SIGINFO compat**: handlers con signature 3-arg `void h(int, siginfo_t *, void *)` leían rsi/rdx con basura de la syscall → page fault al primer `movups (rsi+0x70)`. Fix: zerar buf[8]/buf[9] (rdx/rsi = NULL) en signal delivery. Apps con NULL-check (lighttpd cmovneq) usan fallback. (4) **Verificado**: lighttpd Ctrl+C → graceful shutdown (exit=0). | 60 |
+| **FASE 14.5 — lighttpd 1.4.76 port (real HTTP server)** | (1) **`vendor/lighttpd/`** (124 .c, ~106K LOC) sin autotools/cmake: hand-craft `build-osnos/config.h` (30 HAVE_* matching musl), `plugin-static.h` (10 builtin mods), `lemon` compilado en host genera `configparser.c`. (2) **fdevent backend = poll** (no epoll). (3) Output `/bin/lighttpd` 1.85 MB ELF estático. (4) **Kernel fix #1 — sys_read/write dispatch AF_INET**: era omisión; httpd viejo usaba sendto/recvfrom directo, lighttpd usa read/write standard. Fix: ramos sock_recv/sock_send también en sys_read/write. (5) **Kernel fix #2 — sys_setsockopt permisivo**: ahora acepta no-op success todos los flags bajo SOL_SOCKET/IPPROTO_TCP/IPPROTO_IP. (6) **Config seedeada** en `/etc/lighttpd/lighttpd.conf`, alias `lighttpd='lighttpd -f /etc/lighttpd/lighttpd.conf'` en `.ashrc`. (7) **Verificado**: `curl http://localhost:8080/` → HTTP 200 OK + body, múltiples paths (`/index.html`, `/hello.c`, `/demo.sql`). | 350 |
+| **FASE 14.4 — Dynamic linking via ld-musl.so** | (1) **musl rebuild con shared**: `./configure` sin `--disable-shared`; `lib/libc.so` (882 KB ELF DYN) sirve a la vez como libc.so y como dynamic linker (`ld-musl-x86_64.so.1`). Manual `ld.lld` link (clang chokeaba con `-Wa,--noexecstack`). (2) **Stubs compiler-rt** (`__mulxc3`/`__mulsc3`/`__muldc3`) linkeados a libc.so para que ld.so no reporte undefined symbols. (3) **`elf_load_dyn(main, interp)` + `elf_get_interp`**: detecta PT_INTERP en main, carga interpreter en `INTERP_LOAD_BASE=0x40000000`, devuelve `elf_load_result_t` con e_entry, phdr_user_va, phnum, phentsize, interp_base. (4) **Auxv extendido** (8 pairs): AT_PHDR/PHENT/PHNUM/PAGESZ/BASE/ENTRY/RANDOM/NULL. (5) **`proc_execve_replace_argv`** detecta PT_INTERP y rutea a `elf_load_dyn` + `build_argv_block_argv_dyn`. (6) **sd.img bump 32→64 MiB** para acomodar libc.so duplicado. (7) **`elfs/tests/hello_dyn.c`** verificado: `/bin/hello_dyn` → "hello from dynamic linker on osnos!". | 700 |
+| **FASE 14.3 — POSIX SHM (`shm_open` + `mmap MAP_SHARED`)** | (1) **`src/micro/shm.{c,h}`** (~170 LOC): pool 16 objetos × 256 páginas = 1 MiB. Estado `refcount + unlinked` (POSIX: persiste hasta unlink + último close). (2) **OFD extendido** con `is_shm + shm_ref`. (3) **Syscalls** `SYS_SHM_OPEN=519`/`SYS_SHM_UNLINK=520`; `sys_ftruncate` dispatchea a `shm_truncate`. (4) **`sys_mmap` con MAP_SHARED fd-backed**: vmm_map las páginas físicas del shm_obj sin pmm_alloc, `shm_backed=1` en `mmap_regions` para que munmap solo vmm_unmap. (5) **🔥 Fix crítico en `sys_fork`**: `address_space_clone` clonaba shm pages; fix re-mappea phys originales del parent. Sin esto, write del child invisible al parent. (6) **mini-libc gap-fill**: `ftruncate` wrapper + `shm_open`/`shm_unlink`. (7) **`elfs/tests/shmtest.c`** verifica round-trip shared cross-fork. | 250 |
+| **FASE 14.2 — AF_UNIX SOCK_STREAM** | (1) **`src/include/osnos_unix_abi.h`** + **`lib/libc/include/sys/un.h`**: sockaddr_un layout-compat Linux. (2) **`src/micro/unix_sock.{c,h}`** (~270 LOC): pool 32 sockets + 16 paths bound, ring buffers 4 KiB por dir, backlog 8. Estados UNUSED/UNBOUND/LISTENING/CONNECTED/DISCONNECTED. Sin abstract namespace ni SOCK_DGRAM. (3) **OFD extendido** con `is_unix_socket + unix_idx` paralelos a is_socket. (4) **Dispatch en syscalls**: sys_socket/bind/listen/connect/accept/read/write/sendto/recvfrom/fd_readable ramifican por familia. (5) **Errno extendido**: EISCONN=106, ENOTCONN=107. (6) **`elfs/tests/unixtest.c`** verifica PING/PONG roundtrip parent↔forked child. | 300 |
+| **FASE 14.1 — POSIX make (pdpmake) — self-hosting build** | (1) **`vendor/pdpmake/`** 1.4.1 (~3.4K LOC) contra mini-libc → `/bin/make`. (2) **mini-libc gap-fill** (`posix_extras.c`): getopt, stpcpy, popen/pclose, utimensat stub. Nuevos headers `<strings.h>`, `<glob.h>` (GLOB_NOMATCH stub), `<ar.h>`. `<sys/stat.h>` rediseñada con `st_atim/mtim/ctim` (struct timespec) + macros legacy `st_atime` → `st_atim.tv_sec`. (3) **`resolve_path`** helper en sys_open/stat/access/mkdir/rmdir/unlink/rename/chdir — relative paths resuelven contra `task->cwd`. (4) **Exec preserva cwd** si ya está seteado (caso fork+exec); antes lo reseteaba siempre. (5) **getopt convención GNU**: `optind=0` = "reset + arranca en argv[1]" (sin esto pdpmake decía `make: don't know how to make make`). (6) **`/bin/sh` = copia de busybox** (busybox dispatcha por argv[0]). (7) **🔥 Bug — sys_execve aplanaba argv en string + re-tokenizaba** rompiendo args con espacios: nueva `proc_execve_replace_argv(path, argv[], envp)` + `build_argv_block_argv` que consumen array directo. (8) **🔥 `SYS_CLONE` real** con CLONE_VM + CLONE_VFORK para musl `posix_spawn`. PML4 sharing via lookup-refcount. (9) **🔥 execve resetea `sa_handler[]` a SIG_DFL** (POSIX violation fix — antes child heredaba handlers de ash que vivían en text de busybox). (10) Verificado: `cd /home && make hello && /home/hello` end-to-end. | 800 |
 | **FASE 13.3 — SQLite 3.45.2 port (cuarto lenguaje self-host: SQL) + bug fixes profundos** | (1) **`vendor/sqlite/`** amalgamation (sqlite3.c ~250K LOC + shell.c + sqlite3.h). Linkeado contra musl. Output `/bin/sqlite3` ~5 MB ELF estático. (2) **4 syscalls nuevos**: `SYS_FSYNC=74`/`FDATASYNC=75` (stubs, FAT16 ya es sync), `SYS_FTRUNCATE=77` (real, vía vfs_read+pad+rewrite), `SYS_GETTIMEOFDAY=96` (alias clock_gettime con conversion), `SYS_GETRANDOM=318` (PRNG xorshift seeded por timer). (3) **`sys_fcntl` extendido**: F_SETLK/F_GETLK/F_SETLKW/F_OFD_* retornan 0 (single-process, advisory locks no aplican); F_DUPFD_CLOEXEC mappeado. (4) **Bumps**: `EXEC_VFS_BLOB_MAX` 2→16 MiB; `KHEAP_MAX_BYTES` 4→32 MiB (sqlite ELF 5 MB no entraba). (5) **SQLite CFLAGS**: THREADSAFE=0, OMIT_LOAD_EXTENSION, OMIT_WAL, DEFAULT_LOCKING_MODE=1 (exclusive), DEFAULT_TEMP_STORE=2 (memory), NO_SYNC=1, DEFAULT_MMAP_SIZE=0. (6) **`res/demo.sql` + `res/demo.db`** shipped a `/home/demo.db` (15 books + 4 users + 6 checkouts + view + indices). (7) **🔥 Bug crítico #9 — FS_BASE save/restore + reset en execve** (`task.{c,h}` + `exec.c` + `syscall.c`): `arch_prctl(ARCH_SET_FS)` escribe MSR_FS_BASE globalmente en el CPU; sin save/restore per-task ash heredaba el FS_BASE de sqlite3 y page-faulteaba en `__errno_location` post-wait. Tres patches: (a) `uint64_t fs_base` en task_t + rdmsr/wrmsr en task_run_next; (b) reset a 0 en proc_execve (ambos paths — task_create_user_elf + in-place exec); (c) copy del parent al child en sys_fork. **Sin estos 3, NINGÚN programa musl-linked spawneado desde ash sobrevivía a su parent**. (8) **🔥 Bug #10 + #11 — echo y backspace REPL**: `tty_echo_char` usaba `framebuffer_draw_string` directo (sin serial mirror; cursor distinto al path de apps via consrv). Fix: usar `framebuffer_write_bytes` (mismo cursor, mismo serial mirror). `tty_echo_erase` igual: secuencia `"\b \b"` via write_bytes (cursor atrás, sobreescribe con espacio, cursor atrás). **Sin estos fixes, REPLs de sqlite/lua tenían stdin funcional pero CERO eco visual** — usuario tipeaba a ciegas. (9) **`page_fault` log mejorado**: agregado task name + pid + cr2 + rip (`*** task 'busybox' pid=6 killed: Page fault cr2=0x... rip=0x...`) — critical para diagnosticar #9 (descubrir que ash, no sqlite3, era quien faulteaba). (10) **Verificación end-to-end**: `sqlite3 :memory: < q.sql` con `SELECT 99` → `99`; `sqlite3 /home/demo.db` REPL interactivo con `.tables`, `SELECT title FROM books`, `.quit` todos con echo + backspace visibles; ash sobrevive a múltiples runs de sqlite3 sin respawnear. **Cuarto lenguaje self-host**: C + Lua + jq + SQL. | 900 |
 | **FASE 13.2 — BusyBox rebuild con history file + ~30 applets nuevos** | (1) **Bug crítico del wrapper `osnos-cc-wrapper.sh`**: compile mode no pasaba `-target x86_64-unknown-none-elf` → clang on macOS producía Mach-O ARM64 nativo, no ELF x86_64. ld.lld rechazaba con "unknown file type". Fix: agregado `-target` + `-U__APPLE__ -D__linux__` (evita rama BSD de `include/platform.h` que requiere `<machine/endian.h>` macOS-only) + musl includes injectados via `-isystem` (busybox no las pasa por default) + filtrado de flags clang-only del link path (`-finline-limit`, `-falign-*`, `-Wp,*`) + branch separada para preprocess (`-E -xc -MM -dM`). (2) **`.config` actualizada**: `FEATURE_EDITING=y` + `EDITING_HISTORY=500` + `EDITING_SAVEHISTORY=y` + `EDITING_SAVE_ON_EXIT=y` + `EDITING_FANCY_PROMPT=y` (PS1 `\w` expansion) + ~30 applets nuevos. (3) **STANDALONE_SHELL deshabilitado** (bug de dispatch multi-arg). En vez de eso `/home/.ashrc` define `alias vi='busybox vi'`, etc — FAT16 no soporta symlinks así que el approach Linux-style "/bin/vi → /bin/busybox" no aplica. (4) **`history` builtin** + persistencia cross-reboot. (5) **Verificado**: `sed s/x/y/`, `awk -F: ...`, `find -type f`, `stat /home/README.TXT`, `base64`, `md5sum`, `bc -e "5*5"` funcionales. **FASE 12 TUI del roadmap original superseded** — BusyBox cubre vi/less/sed/awk/find/etc. | 800 |
 | **FASE 13.1 — BusyBox ash como init shell + login mode + .bashrc-style /home/.ashrc** | (1) **`vendor/busybox/`** — BusyBox 1.36.1 vendored, linkeado contra musl via `osnos-cc-wrapper.sh`. (2) **🔥 Bug crítico #1 — restart_syscall pattern**: `sys_read` + `sys_poll` loopeaban con `sys_nanosleep()`; pero nanosleep hace `sched_resume_jump()` (longjmp al scheduler) y deja al task con `saved_rax=0` apuntando al RIP user-space POST-syscall. ash llamaba read(0), kernel longjumpeaba, ash recibía read=0 → EOF → exit(0) → watchdog respawn → loop infinito. Fix: `block_restart_syscall(wakeup_ms, syscall_nr)` stampa iret frame con `rip -= 2` + `saved_rax = syscall_nr`. CPU re-ejecuta el syscall al despertar — patrón POSIX restart_syscall. (3) **🔥 Bug crítico #2 — colisión de syscall numbers**: osnos vivían en 260-268; chocaban con Linux #262=newfstatat (que musl `stat()` invoca). Movidos a 510-518. Nuevos mappings: `SYS_LSTAT=6`, `SYS_OPENAT=257`, `SYS_NEWFSTATAT=262`, `SYS_EXIT_GROUP=231`. (4) **🔥 Bug #3 — `sys_stat` faulteaba con paths cortos**: `copy_from_user(kpath, path, OSNOS_PATH_MAX)` pedía 128 bytes; fix: copy byte-a-byte hasta NUL. (5) **🔥 Bug #4 — `VFS_MAX_MOUNTS=8` insuficiente**: con 9 mounts `/home` no entraba. Bumpado a 16. (6) **Login shell + split estilo bash**: `proc_execve("/bin/busybox", "sh -l", envp)`. `/etc/profile` sourced ONCE → exports + `ENV=/home/.ashrc`. `/home/.ashrc` sourced cada shell interactiva (mirror exacto de ~/.bashrc) → PS1 verde `osnos:\w# ` + aliases + banner. (7) **Verificado**: ash sobrevive como init shell, `echo $((100*7))=700`, `for i in a b c`, `ls /etc` via aliasfs, pipes, redir, glob, todo POSIX. | 800 |
@@ -191,14 +227,14 @@ y bugs notables encontrados.
 
 ---
 
-## Inventario actual (snapshot post-FASE-13.3)
+## Inventario actual (snapshot post-FASE-14.5)
 
-- **Kernel ELF**: ~1.5 MB stripped (`build/kernel`)
-- **sd.img**: 32 MiB FAT16, ~98 ELFs en `/bin/` + sysroot completo en `/lib/` + `/usr/include/`
+- **Kernel ELF**: ~1.6 MB stripped (`build/kernel`)
+- **sd.img**: **64 MiB** FAT16, ~104 ELFs en `/bin/` + sysroot completo en `/lib/` (libc.a + crt + libtcc1.a + **libc.so + ld-musl-x86_64.so.1**) + `/usr/include/`
 - **ISO bootable**: ~19 MB (`build/osnos-x86_64.iso`)
 - **Memoria total esperada**: 2 GiB de RAM (`-m 2G` en QEMU)
-- **Boot time**: ~3-4 segundos (kernel + spawn servers + ash banner)
-- **Tests automated**: 18/18 PASS via `/bin/alltest`
+- **Boot time**: ~3-4 segundos (kernel + spawn servers + ash banner, sin segfault al startup)
+- **Tests automated**: **21/21 PASS** via `/bin/alltest` (kerntest, fork/wait/sig/sigchld/pgroup/spawn/exec/ofd/pty/fdedge/job/term/serial/tcc/lua/jq/libc/**unix/shm/hello_dyn**); cada test con timeout 60s para que un cuelgue no bloquee la suite
 
 ---
 
@@ -283,11 +319,34 @@ Trabajo:
 
 **Out of scope**: PIE main (ET_DYN executable cargado con load offset random). RTLD_LAZY (lazy bind via PLT trampolines — hoy todo se relocata eagerly). dlopen/dlsym (musl los expone via libc.so pero no probamos cargar libs dynamic adicionales). Multiple .so deps (DT_NEEDED transitivo).
 
-#### FASE 14.5 — Ox extendido + Ox-as-X11 (pendiente)
-- ❌ Ox compite con nano-X (botones reales, widget tree, propiedades).
-- ❌ Capa de traducción protocol X11-wire ↔ IPC Ox (analogía: "Ox a X11 como osnos a Linux ABI").
+#### FASE 14.5 — lighttpd 1.4.76 port (real HTTP server) — ✅ **CERRADA**
 
-#### FASE 14.6 — `xeyes` (test del camino completo)
+`curl http://localhost:8080/index.html` → `HTTP/1.1 200 OK` con headers completos y body servido desde `/home`. lighttpd compila + bind:80 + accept + read request + serve static + close — todo el path HTTP funciona.
+
+Trabajo:
+
+- ✅ **`vendor/lighttpd/`** — lighttpd 1.4.76 (124 .c files, ~106K LOC). No corremos su build system (autotools/cmake); en su lugar **hand-craft** del build:
+  - **`vendor/lighttpd/build-osnos/config.h`** — 30 `HAVE_*` defines que coinciden con musl en osnos. Excluido todo lo grande (epoll, kqueue, SSL, PCRE, zlib, IPv6, posix_spawn, sendfile, inotify, brotli/zstd/deflate, lua plugins). `LIGHTTPD_STATIC` para link estático sin dlopen.
+  - **`vendor/lighttpd/build-osnos/plugin-static.h`** — hand-crafted PLUGIN_INIT macros para 10 built-in mods incluidos (mod_indexfile, mod_staticfile, mod_access, mod_alias, mod_setenv, mod_expire, mod_redirect, mod_simple_vhost, mod_evhost, mod_rewrite).
+  - **lemon parser**: compilamos `vendor/lighttpd/src/lemon.c` en host, lo usamos para generar `configparser.c` desde `configparser.y` (~85 KB output).
+  - **fdevent backend = poll** (no epoll): `HAVE_POLL + HAVE_SYS_POLL_H` defined, lighttpd's `fdevent_impl.h` selecciona `FDEVENT_USE_POLL` automáticamente. `strings lighttpd.elf | grep poll` confirma poll path elegido en runtime.
+- ✅ **`GNUmakefile` recipe**: 52 source files compilados con MUSL_CFLAGS + lighttpd config. Output `/bin/lighttpd` ~1.85 MB ELF estático.
+- ✅ **🔥 Kernel: `sys_read`/`sys_write` dispatch a AF_INET sockets**: era una omisión existente — `sys_read(fd)` solo soportaba pipe/PTY/file/AF_UNIX; AF_INET caía al path VFS y devolvía EINVAL. `/bin/httpd` viejo funcionaba porque usaba `sendto`/`recvfrom` directo. lighttpd usa `read`/`write` (standard POSIX para stream sockets) y necesitaba el dispatch. Fix: ramos `sock_recv`/`sock_send` también en sys_read/sys_write.
+- ✅ **Kernel: `sys_setsockopt` permisivo**: antes solo aceptaba `SO_REUSEADDR`. Ahora acepta como no-op success cualquier flag bajo `SOL_SOCKET`, `IPPROTO_TCP`, `IPPROTO_IP` (suficiente para que `TCP_NODELAY` etc. no aborten lighttpd al startup). Real implementación queda pendiente; el no-op alcanza para HTTP serving.
+- ✅ **`res/lighttpd/lighttpd.conf`**: config mínimo (server.document-root=/home, server.port=80, server.modules=mod_indexfile+mod_staticfile, MIME types comunes, errorlog=/home/lighttpd.log para inspección post-mortem).
+- ✅ **`/etc/lighttpd/lighttpd.conf`** + **`/home/index.html`** seeded en sd.img.
+- ✅ **End-to-end verificado**: corremos `/bin/lighttpd -f /etc/lighttpd/lighttpd.conf -D` foreground; desde el host `curl http://localhost:8080/` (via QEMU hostfwd) recibe `HTTP/1.1 200 OK` + body. Múltiples paths probados (`/index.html`, `/hello.c`, `/demo.sql`).
+
+**Limitaciones**: lighttpd en background con `&` falla por `sh: can't open '/dev/null'` (busybox redirect path raro — no es lighttpd). Workaround actual: correr foreground o usar `osn_spawn` desde otro proceso. `server.upload-dirs` requiere directorio en FAT16; `/home` funciona, `/tmp` no porque no hay tmpfs mount. PHP/CGI/FastCGI no compilados (necesitarían fork+execve+pipe roundtrips, todo funcionaría pero scope creep).
+
+#### FASE 14.6 — Ox extendido o nano-X (pendiente)
+Tres caminos posibles, decisión abierta:
+- **A** — xeyes-via-Ox: cliente nativo Ox que dibuja dos círculos siguiendo al cursor. ~150 LOC. Demuestra que la infra GUI ya alcanza sin meter X11.
+- **B** — Vendorizar nano-X (~20K LOC) sobre FBDEV. Abre API Xlib-like real. 1-2 sesiones.
+- **C** — X11 wire protocol mínimo bind a `/tmp/.X11-unix/X0` (AF_UNIX ya tenemos), traduce a Ox. Permite xeyes Linux unmodified. Múltiples sesiones (spec X11 enorme).
+
+#### FASE 14.7 — `xeyes` (test del camino completo)
+Depende de 14.6 (B o C).
 
 ### FASE 14-misc — Quality of life menores
 - ❌ Per-PTY termios real (cada shell/REPL su propio termios, no global)
@@ -295,7 +354,9 @@ Trabajo:
 - ❌ Fix de page fault en musl atexit (sqlite3 sale limpio cosmético)
 - ❌ Habilitar más BusyBox: `top` `ps` `free` `uptime` (necesitan `/proc`)
 - ❌ Implementar `/proc` synthetic (al menos `/proc/<pid>/cmdline`, `/proc/meminfo`)
-- ❌ Chip-8 emulator (último item pendiente del roadmap original gráfico)
+- ❌ Implementar `siginfo_t` real para SA_SIGINFO handlers (hoy = NULL; apps con assumed-non-null faultean)
+- ❌ Implementar `/dev/stderr` symlink real (lighttpd y otros lo asumen)
+- ❌ tmpfs mount en `/tmp` (hoy solo ramfs en `/`)
 
 ### FASE 15 — Drivers a ring 3 (item pendiente del FASE 11 original)
 - ❌ IRQ delegation por IPC desde kernel-side handlers
