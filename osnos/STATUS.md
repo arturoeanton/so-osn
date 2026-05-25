@@ -358,6 +358,31 @@ Sesión "de un saque": 8 items resueltos sin regresiones. `alltest` sigue **21/2
 - ✅ **BusyBox aplicación masiva: 116 applets totales (era 65)**: enabled `.config` + fixeado el wrapper `osnos-cc-wrapper.sh` (filtra `-Wl,-Map,*`, `--warn-common`, etc. que ld.lld rechaza). Rebuild produce binary de 1.45 MB. Aliases agregados a `/home/.ashrc`. **51 nuevos applets**: networking (`wget`, `nc`, `ping`, `traceroute`, `ifconfig`, `netstat`, `route`, `arp`, `hostname`, `telnet`, `microcom`, `nslookup`, `ftpgetput`); archives (`tar`, `gzip`, `gunzip`, `zcat`, `bzip2`, `bunzip2`, `bzcat`, `xz`, `unxz`, `xzcat`, `ar`, `lzma`, `unlzma`); fs/perms (`chmod`, `chown`, `chgrp`, `ln`, `mkfifo`, `mknod`, `mktemp`, `mountpoint`, `sync`, `fsync`, `truncate`, `install`, `chroot`); process/user (`id`, `whoami`, `groups`, `who`, `users`, `tty`, `pidof`, `pgrep`, `pkill`, `watch`, `setsid`, `nice`, `nohup`, `nproc`, `time`, `last`); text/filter (`nl`, `od`, `split`, `comm`, `paste`, `join`, `fmt`, `expand`, `unexpand`, `shuf`, `yes`, `less`, `ed`, `uuencode`, `uudecode`, `ipcalc`). **Stubs syscall agregados** en syscall.c para `getpriority/setpriority`, `sched_setparam/get`, `sched_setscheduler/get`, `sched_yield`, `setrlimit/getrlimit`, `prctl`, `setresuid/gid`, `setuid/gid`, `sync` — todos retornan 0 (single-task no priority/perms). Sin estos stubs, `nice -n 5 echo hi` daba ENOSYS. Verificado: `nice -n 5 echo hi` → `hi`, `pgrep -l bus` → `6 busybox`, `whoami` → `root`, `id` → `uid=0(root) gid=0(root)`, `nproc` → `1`, `nl` numera líneas, `gzip|gunzip|wc` roundtrip 12 bytes, `paste a.txt b.txt` tab-joined correcto.
 - ✅ **`/proc` synthetic filesystem** (`src/fs/procfs.{c,h}`, ~420 LOC): mount en `/proc`. Top-level: `meminfo` (PMM stats), `uptime`, `loadavg`, `cpuinfo`, `stat`, `version`. Per-pid: `/proc/<pid>/{cmdline,comm,stat,status}` enumerando task table. `/proc/self` alias del task actual. **`/proc/net/{dev,route,tcp,udp}`** para que `route -n`, `netstat -tan`, `ifconfig` (parcial) puedan leer la net info. **🔥 Bug fixed**: trailing-slash form `/proc/<pid>/` también devuelve PROC_PID_DIR. Verificado: `cat /proc/meminfo` muestra MemTotal=2096480 kB, `top` muestra 8 procesos, `route -n` muestra default via 10.0.2.2.
 - ✅ **`/etc/resolv.conf` seeded** en sd.img con `nameserver 10.0.2.3` (QEMU slirp DNS) + fallback 8.8.8.8. `/etc/hosts` extendido con `10.0.2.2 host`. Apps que leen el resolver config ahora encuentran lo necesario. (DNS sobre el wire requiere más kernel network stack work — los apps DNS-dependientes como `nslookup`/`ping <hostname>`/`wget <hostname>` necesitan UDP outbound contra slirp que todavía no anda 100%.)
+
+#### FASE 14-misc-2 — Network ioctls SIOCGIF* — ✅ **CERRADA**
+
+`ifconfig` ahora muestra info completa de eth0 + lo. Para apps Linux que enumeran interfaces via ioctl.
+
+- ✅ **`net_iface_ioctl()`** en `sys_ioctl` (`src/micro/syscall.c`, ~160 LOC): handler para todo el rango `0x8910-0x8950` (Linux SIOCG*/SIOCS*) cuando se llama sobre socket fd (AF_INET o AF_UNIX). Maneja:
+  - **SIOCGIFCONF=0x8912**: enumera interfaces (`lo`, `eth0`) en formato `struct ifreq[]`. Devuelve `ifc_len` total para 2 interfaces (80 bytes), o si user pidió size=0 devuelve needed size.
+  - **SIOCGIFADDR/NETMASK/BRDADDR=0x8915/891b/8919**: devuelve IP/máscara/broadcast en `sockaddr_in` embebido. eth0 toma de `net_local_ip()` + `net_local_netmask()`, lo es 127.0.0.1/255.0.0.0.
+  - **SIOCGIFHWADDR=0x8927**: MAC desde `net_local_mac()` (RTL8139 driver). lo es 00:00:00:00:00:00.
+  - **SIOCGIFFLAGS=0x8913**: emite flags Linux (IFF_UP=1, IFF_BROADCAST=2, IFF_LOOPBACK=8, IFF_RUNNING=64, IFF_MULTICAST=0x1000). eth0=BROADCAST|RUNNING|MULTICAST|UP; lo=LOOPBACK|RUNNING|UP.
+  - **SIOCGIFMTU=0x8921**: 1500 para eth0, 65536 para lo.
+  - **SIOCGIFINDEX=0x8933**: 1=lo, 2=eth0.
+  - **SIOCSIF\* (set variants)**: retornan EPERM — no permitimos reconfigurar via ioctl.
+- ✅ **BusyBox `.config`**: enabled `FEATURE_IFCONFIG_STATUS`, `FEATURE_IFCONFIG_HW`, `FEATURE_IFCONFIG_BROADCAST_PLUS`, `FEATURE_NETSTAT_WIDE`, `FEATURE_NETSTAT_PRG`. Rebuild de busybox.
+- ✅ **Verificado end-to-end**:
+  ```
+  osnos:/# ifconfig -a
+  eth0  Link encap:Ethernet  HWaddr 52:54:00:12:34:56
+        inet addr:10.0.2.15  Bcast:10.0.2.255  Mask:255.255.255.0
+        UP BROADCAST RUNNING MULTICAST  MTU:1500
+  lo    Link encap:Ethernet  HWaddr 00:00:00:00:00:00
+        inet addr:127.0.0.1  Mask:255.0.0.0
+        UP LOOPBACK RUNNING  MTU:65536
+  ```
+- ✅ alltest 21/21 PASS sin regresiones.
 - ✅ **`siginfo_t` real para SA_SIGINFO** (`src/proc/exec.c`): 128 bytes plantados en user stack ENCIMA del sigframe (`siginfo_va = (orig_rsp - 128) & ~15`). Populamos `si_signo + si_errno=0 + si_code=0`. Handler recibe `rsi = siginfo_va`. sys_rt_sigreturn sin cambios. Apps SA_SIGINFO-aware (lighttpd, postgres, sshd) ahora reciben pointer válido en vez de NULL.
 - ✅ **`/dev/stderr` + `/dev/stdin`/`/dev/stdout`/`/dev/console`**: 4 entradas más en `devfs`. Backend delega a `tty_dev_read/write` (mismo path que `/dev/tty`). Apps Linux que abren `/dev/stderr` para logs ahora funcionan.
 - ✅ **tmpfs en `/tmp`**: `vfs_mount("/tmp", &ramfs_vfs_ops, 0)` en bootstrap. Reusa el backend ramfs pero longest-prefix dispatch envía `/tmp/*` aquí. Verificado: `echo "test" > /tmp/test.txt && cat /tmp/test.txt` → "test".

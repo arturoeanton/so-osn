@@ -3082,9 +3082,212 @@ int64_t sys_fcntl(int fd, int cmd, int64_t arg) {
 #define TTY_TIOCGPTN   0x80045430u    /* get pts number */
 #define TTY_TIOCSPTLCK 0x40045431u    /* lock pts (no-op for us) */
 
+/* Network interface ioctl dispatch — Linux SIOC* numbers.
+ * Apps tipo ifconfig/route/netstat/ip llaman estos sobre cualquier
+ * socket fd (AF_INET típicamente). El kernel inspecciona el request
+ * y maneja con la info de eth0/lo.
+ *
+ * Soportamos: SIOCGIFCONF (enumerate), SIOCGIFFLAGS (UP/RUNNING/etc),
+ * SIOCGIFADDR (IP), SIOCGIFNETMASK, SIOCGIFBRDADDR, SIOCGIFHWADDR
+ * (MAC), SIOCGIFMTU, SIOCGIFINDEX. Set variants (SIOCSIF*) retornan
+ * EPERM por ahora — no permitimos reconfigurar interfaces. */
+#define IFNAMSIZ 16
+struct osnos_ifreq_pad {
+    char ifr_name[IFNAMSIZ];
+    union {
+        struct {
+            uint16_t sa_family;
+            char     sa_data[14];
+        } ifr_addr;
+        int16_t  ifr_flags;
+        int      ifr_ifindex;
+        int      ifr_mtu;
+        char     ifr_pad[24];
+    } u;
+};
+struct osnos_ifconf {
+    int    ifc_len;
+    void  *ifc_buf;
+};
+
+/* Flags: IFF_UP=1, IFF_BROADCAST=2, IFF_LOOPBACK=8, IFF_RUNNING=64,
+ * IFF_MULTICAST=0x1000 (Linux values). */
+static int net_iface_ioctl(uint64_t request, void *arg) {
+    extern uint32_t net_local_ip(void);
+    extern uint32_t net_local_netmask(void);
+    extern const uint8_t *net_local_mac(void);
+
+    static const struct {
+        const char *name;
+        int         loopback;
+        int         index;
+    } ifs[] = {
+        { "lo",   1, 1 },
+        { "eth0", 0, 2 },
+    };
+    const int IF_COUNT = 2;
+
+    switch (request) {
+    case 0x8912 /* SIOCGIFCONF */: {
+        struct osnos_ifconf k;
+        if (copy_from_user(&k, arg, sizeof(k)) != OSNOS_OK) return -(int64_t)OSNOS_EFAULT;
+        /* Tamaño que necesitamos: IF_COUNT * sizeof(ifreq). En Linux
+         * ifreq es 40 bytes (16 name + 24 union). */
+        int needed = IF_COUNT * 40;
+        if (k.ifc_len < needed) {
+            /* User pidió "how big?" via ifc_len=0 → devolver needed. */
+            k.ifc_len = needed;
+            if (copy_to_user(arg, &k, sizeof(k)) != OSNOS_OK) return -(int64_t)OSNOS_EFAULT;
+            return 0;
+        }
+        uint32_t ip      = net_local_ip();
+        uint8_t  buf[40 * 2] = {0};
+        for (int i = 0; i < IF_COUNT; i++) {
+            uint8_t *entry = buf + i * 40;
+            const char *n = ifs[i].name;
+            for (size_t j = 0; j < 16 && n[j]; j++) entry[j] = n[j];
+            /* sockaddr_in en union: family=2 (AF_INET), port=0,
+             * sin_addr = IP (network byte order). */
+            entry[16] = 2;     /* AF_INET */
+            entry[17] = 0;
+            entry[18] = 0; entry[19] = 0;       /* port */
+            if (ifs[i].loopback) {
+                /* 127.0.0.1 = 0x7f000001 → network = 7F 00 00 01 */
+                entry[20] = 127; entry[21] = 0; entry[22] = 0; entry[23] = 1;
+            } else {
+                entry[20] = (uint8_t)(ip >> 24);
+                entry[21] = (uint8_t)(ip >> 16);
+                entry[22] = (uint8_t)(ip >>  8);
+                entry[23] = (uint8_t)(ip);
+            }
+        }
+        if (copy_to_user(k.ifc_buf, buf, (size_t)needed) != OSNOS_OK)
+            return -(int64_t)OSNOS_EFAULT;
+        k.ifc_len = needed;
+        if (copy_to_user(arg, &k, sizeof(k)) != OSNOS_OK) return -(int64_t)OSNOS_EFAULT;
+        return 0;
+    }
+    case 0x8913 /* SIOCGIFFLAGS */:
+    case 0x8915 /* SIOCGIFADDR */:
+    case 0x891b /* SIOCGIFNETMASK */:
+    case 0x8919 /* SIOCGIFBRDADDR */:
+    case 0x8927 /* SIOCGIFHWADDR */:
+    case 0x8921 /* SIOCGIFMTU */:
+    case 0x8933 /* SIOCGIFINDEX */:
+    {
+        struct osnos_ifreq_pad r;
+        if (copy_from_user(&r, arg, sizeof(r)) != OSNOS_OK) return -(int64_t)OSNOS_EFAULT;
+        /* Encontrar interface por nombre (primero 16 bytes). */
+        int found = -1;
+        for (int i = 0; i < IF_COUNT; i++) {
+            const char *n = ifs[i].name;
+            int match = 1;
+            for (size_t j = 0; j < 16; j++) {
+                if (r.ifr_name[j] != n[j]) { match = 0; break; }
+                if (n[j] == 0) break;
+            }
+            if (match) { found = i; break; }
+        }
+        if (found < 0) return -(int64_t)OSNOS_ENOENT;
+
+        uint32_t ip      = net_local_ip();
+        uint32_t mask    = net_local_netmask();
+        const uint8_t *mac = net_local_mac();
+
+        for (int i = 0; i < (int)sizeof(r.u); i++) ((char *)&r.u)[i] = 0;
+
+        switch (request) {
+        case 0x8913: { /* GIFFLAGS */
+            int16_t flags = 0x1 /* IFF_UP */ | 0x40 /* IFF_RUNNING */;
+            if (ifs[found].loopback) flags |= 0x8;       /* IFF_LOOPBACK */
+            else                     flags |= 0x2 | 0x1000; /* BROADCAST + MULTICAST */
+            r.u.ifr_flags = flags;
+            break;
+        }
+        case 0x8915: { /* GIFADDR */
+            r.u.ifr_addr.sa_family = 2;       /* AF_INET */
+            uint8_t *p = (uint8_t *)&r.u.ifr_addr.sa_data;
+            p[0] = 0; p[1] = 0;               /* port */
+            if (ifs[found].loopback) {
+                p[2] = 127; p[3] = 0; p[4] = 0; p[5] = 1;
+            } else {
+                p[2] = (uint8_t)(ip >> 24); p[3] = (uint8_t)(ip >> 16);
+                p[4] = (uint8_t)(ip >>  8); p[5] = (uint8_t)(ip);
+            }
+            break;
+        }
+        case 0x891b: { /* GIFNETMASK */
+            r.u.ifr_addr.sa_family = 2;
+            uint8_t *p = (uint8_t *)&r.u.ifr_addr.sa_data;
+            p[0] = 0; p[1] = 0;
+            if (ifs[found].loopback) {
+                p[2] = 255; p[3] = 0; p[4] = 0; p[5] = 0;
+            } else {
+                p[2] = (uint8_t)(mask >> 24); p[3] = (uint8_t)(mask >> 16);
+                p[4] = (uint8_t)(mask >>  8); p[5] = (uint8_t)(mask);
+            }
+            break;
+        }
+        case 0x8919: { /* GIFBRDADDR */
+            r.u.ifr_addr.sa_family = 2;
+            uint8_t *p = (uint8_t *)&r.u.ifr_addr.sa_data;
+            p[0] = 0; p[1] = 0;
+            if (ifs[found].loopback) {
+                p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+            } else {
+                uint32_t brd = (ip & mask) | ~mask;
+                p[2] = (uint8_t)(brd >> 24); p[3] = (uint8_t)(brd >> 16);
+                p[4] = (uint8_t)(brd >>  8); p[5] = (uint8_t)(brd);
+            }
+            break;
+        }
+        case 0x8927: { /* GIFHWADDR */
+            r.u.ifr_addr.sa_family = 1;   /* ARPHRD_ETHER */
+            uint8_t *p = (uint8_t *)&r.u.ifr_addr.sa_data;
+            if (ifs[found].loopback) {
+                for (int j = 0; j < 6; j++) p[j] = 0;
+            } else {
+                for (int j = 0; j < 6; j++) p[j] = mac[j];
+            }
+            break;
+        }
+        case 0x8921: { /* GIFMTU */
+            r.u.ifr_mtu = ifs[found].loopback ? 65536 : 1500;
+            break;
+        }
+        case 0x8933: { /* GIFINDEX */
+            r.u.ifr_ifindex = ifs[found].index;
+            break;
+        }
+        }
+        if (copy_to_user(arg, &r, sizeof(r)) != OSNOS_OK) return -(int64_t)OSNOS_EFAULT;
+        return 0;
+    }
+    /* Set variants — no permitimos reconfig por ahora. */
+    case 0x8914 /* SIOCSIFFLAGS */:
+    case 0x8916 /* SIOCSIFADDR */:
+    case 0x891c /* SIOCSIFNETMASK */:
+    case 0x891a /* SIOCSIFBRDADDR */:
+    case 0x8924 /* SIOCSIFHWADDR */:
+    case 0x8922 /* SIOCSIFMTU */:
+        return -(int64_t)OSNOS_EPERM;
+    }
+    return -(int64_t)OSNOS_ENOTTY;   /* not handled */
+}
+
 int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
     osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f) return err(OSNOS_EBADF);
+
+    /* Network ioctls — válidos sobre cualquier socket fd. Linux
+     * permite estos en sockets de cualquier familia (AF_INET típico).
+     * Tratamos sockets INET y AF_UNIX igual. */
+    if ((f->is_socket || f->is_unix_socket) &&
+        ((request >= 0x8910 && request <= 0x8950))) {
+        int64_t r = net_iface_ioctl(request, arg);
+        if (r != -(int64_t)OSNOS_ENOTTY) return r;
+        /* If not handled, fall through. */
+    }
 
     /* /dev/fb0 ioctls (FASE 12 — ox window system).
      * Detected by exact path match so we don't have to add a new
