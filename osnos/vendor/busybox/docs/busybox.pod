@@ -83,12 +83,12 @@ Currently available applets include:
 
 	[, [[, ash, awk, base64, basename, bc, cat, cksum, cp, cpio, cut,
 	date, dc, dd, df, diff, dirname, du, echo, env, envdir, envuidgid,
-	expand, factor, false, find, fold, grep, head, hexdump, ls, lsattr,
-	lsmod, lsof, lspci, lsscsi, lsusb, md5sum, mkdir, more, mv, patch,
-	printf, pwd, pwdx, readlink, realpath, rev, rm, rmdir, rmmod, sed,
-	sh, sha1sum, sha256sum, sleep, sort, stat, strings, tac, tail, test,
-	timeout, touch, tr, traceroute, tree, true, truncate, uniq, vi, wc,
-	xargs
+	expand, factor, false, find, fold, free, grep, head, hexdump, kill,
+	killall, ls, lsattr, lsmod, lsof, lspci, lsscsi, lsusb, md5sum,
+	mkdir, more, mv, patch, printf, ps, pwd, pwdx, readlink, realpath,
+	rev, rm, rmdir, rmmod, sed, sh, sha1sum, sha256sum, sleep, sort,
+	stat, strings, tac, tail, test, timeout, top, touch, tr, traceroute,
+	tree, true, truncate, uniq, uptime, vi, wc, xargs
 
 =head1 COMMAND DESCRIPTIONS
 
@@ -195,6 +195,10 @@ find [-HL] [PATH]... [OPTIONS] [ACTIONS]
 
 fold [-bs] [-w WIDTH] [FILE]...
 
+=item B<free>
+
+free
+
 =item B<grep>
 
 grep [-HhnlLoqvsrRiwFE] [-m N] { PATTERN | -e PATTERN... | -f FILE... } [FILE]...
@@ -206,6 +210,14 @@ head [OPTIONS] [FILE]...
 =item B<hexdump>
 
 hexdump [-bcdoxCv] [-e FMT] [-f FMT_FILE] [-n LEN] [-s OFS] [FILE]...
+
+=item B<kill>
+
+kill [-l] [-SIG] PID...
+
+=item B<killall>
+
+killall [-lq] [-SIG] PROCESS_NAME...
 
 =item B<ls>
 
@@ -251,6 +263,10 @@ patch [-RNE] [-p N] [-i DIFF] [ORIGFILE [PATCHFILE]]
 =item B<printf>
 
 printf FORMAT [ARG]...
+
+=item B<ps>
+
+ps
 
 =item B<pwd>
 
@@ -329,6 +345,10 @@ tail [OPTIONS] [FILE]...
 
 timeout [-s SIG] [-k KILL_SECS] SECS PROG ARGS
 
+=item B<top>
+
+top [-b] [-n COUNT] [-d SECONDS]
+
 =item B<touch>
 
 touch [-ch] FILE...
@@ -350,6 +370,10 @@ truncate [-c] -s SIZE FILE...
 =item B<uniq>
 
 uniq [-cduiz] [-f,s,w N] [FILE [OUTFILE]]
+
+=item B<uptime>
+
+uptime
 
 =item B<vi>
 

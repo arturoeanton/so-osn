@@ -62,12 +62,12 @@
 
 <pre><code>[, [[, ash, awk, base64, basename, bc, cat, cksum, cp, cpio, cut,
 date, dc, dd, df, diff, dirname, du, echo, env, envdir, envuidgid,
-expand, factor, false, find, fold, grep, head, hexdump, ls, lsattr,
-lsmod, lsof, lspci, lsscsi, lsusb, md5sum, mkdir, more, mv, patch,
-printf, pwd, pwdx, readlink, realpath, rev, rm, rmdir, rmmod, sed,
-sh, sha1sum, sha256sum, sleep, sort, stat, strings, tac, tail, test,
-timeout, touch, tr, traceroute, tree, true, truncate, uniq, vi, wc,
-xargs</code></pre>
+expand, factor, false, find, fold, free, grep, head, hexdump, kill,
+killall, ls, lsattr, lsmod, lsof, lspci, lsscsi, lsusb, md5sum,
+mkdir, more, mv, patch, printf, ps, pwd, pwdx, readlink, realpath,
+rev, rm, rmdir, rmmod, sed, sh, sha1sum, sha256sum, sleep, sort,
+stat, strings, tac, tail, test, timeout, top, touch, tr, traceroute,
+tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 
 <h1 id="COMMAND-DESCRIPTIONS">COMMAND DESCRIPTIONS</h1>
 
@@ -223,6 +223,12 @@ xargs</code></pre>
 <p>fold [-bs] [-w WIDTH] [FILE]...</p>
 
 </dd>
+<dt id="free"><b>free</b></dt>
+<dd>
+
+<p>free</p>
+
+</dd>
 <dt id="grep"><b>grep</b></dt>
 <dd>
 
@@ -239,6 +245,18 @@ xargs</code></pre>
 <dd>
 
 <p>hexdump [-bcdoxCv] [-e FMT] [-f FMT_FILE] [-n LEN] [-s OFS] [FILE]...</p>
+
+</dd>
+<dt id="kill"><b>kill</b></dt>
+<dd>
+
+<p>kill [-l] [-SIG] PID...</p>
+
+</dd>
+<dt id="killall"><b>killall</b></dt>
+<dd>
+
+<p>killall [-lq] [-SIG] PROCESS_NAME...</p>
 
 </dd>
 <dt id="ls"><b>ls</b></dt>
@@ -305,6 +323,12 @@ xargs</code></pre>
 <dd>
 
 <p>printf FORMAT [ARG]...</p>
+
+</dd>
+<dt id="ps"><b>ps</b></dt>
+<dd>
+
+<p>ps</p>
 
 </dd>
 <dt id="pwd"><b>pwd</b></dt>
@@ -421,6 +445,12 @@ xargs</code></pre>
 <p>timeout [-s SIG] [-k KILL_SECS] SECS PROG ARGS</p>
 
 </dd>
+<dt id="top"><b>top</b></dt>
+<dd>
+
+<p>top [-b] [-n COUNT] [-d SECONDS]</p>
+
+</dd>
 <dt id="touch"><b>touch</b></dt>
 <dd>
 
@@ -449,6 +479,12 @@ xargs</code></pre>
 <dd>
 
 <p>uniq [-cduiz] [-f,s,w N] [FILE [OUTFILE]]</p>
+
+</dd>
+<dt id="uptime"><b>uptime</b></dt>
+<dd>
+
+<p>uptime</p>
 
 </dd>
 <dt id="vi"><b>vi</b></dt>

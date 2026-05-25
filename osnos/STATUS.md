@@ -348,15 +348,21 @@ Tres caminos posibles, decisión abierta:
 #### FASE 14.7 — `xeyes` (test del camino completo)
 Depende de 14.6 (B o C).
 
-### FASE 14-misc — Quality of life menores
-- ❌ Per-PTY termios real (cada shell/REPL su propio termios, no global)
-- ❌ Fix de argv passing en sqlite3 (debug por qué SQL en argv se trunca)
-- ❌ Fix de page fault en musl atexit (sqlite3 sale limpio cosmético)
-- ❌ Habilitar más BusyBox: `top` `ps` `free` `uptime` (necesitan `/proc`)
-- ❌ Implementar `/proc` synthetic (al menos `/proc/<pid>/cmdline`, `/proc/meminfo`)
-- ❌ Implementar `siginfo_t` real para SA_SIGINFO handlers (hoy = NULL; apps con assumed-non-null faultean)
-- ❌ Implementar `/dev/stderr` symlink real (lighttpd y otros lo asumen)
-- ❌ tmpfs mount en `/tmp` (hoy solo ramfs en `/`)
+#### FASE 14-misc — Quality of life menores — ✅ **CERRADA**
+
+Sesión "de un saque": 8 items resueltos sin regresiones. `alltest` sigue **21/21 PASS**. Verificado end-to-end con tests integrales de FASE 14.1-14.5.
+
+- ✅ **Per-PTY termios real**: agregados `task_t.tty_termios_valid + tty_iflag/oflag/cflag/lflag/line/cc[19]`. `sys_ioctl TCGETS` para fd 0/1/2 snapshot del global al primer call + return de task's struct. `TCSETS/TCSETSW/TCSETSF` actualizan task's struct + sync al global. En task switch (`task_run_next`), si task entrante tiene `tty_termios_valid=1`, restaura via `tty_restore_from(struct)`. fork copia parent's struct. Cada task ahora "ve" su propio modo raw/canon/echo al ser dispatched. (`src/micro/task.{c,h}`, `src/micro/tty.{c,h}`, `src/micro/syscall.c`)
+- ✅ **sqlite3 argv passing**: ya estaba resuelto por el fix `sys_execve preserves argv boundaries` (FASE 14.1). Verificado: `sqlite3 /home/demo.db "SELECT title FROM books WHERE year > 1980 ORDER BY year LIMIT 3"` devuelve 3 filas correctas con exit=0.
+- ✅ **Page fault en musl atexit (sqlite3 exit limpio)**: ya estaba resuelto por los fixes acumulados (FS_BASE rdmsr, kill_pending catchable, sa_handler reset). Verificado: 3 invocaciones de sqlite3 seguidas exitcode=0 sin page fault.
+- ✅ **BusyBox `top`/`ps`/`free`/`uptime`/`kill`/`killall`**: enabled en `.config`, fixeado el wrapper `osnos-cc-wrapper.sh` (filtra `-Wl,-Map,*`, `--warn-common`, etc. que ld.lld rechaza). Rebuild de busybox produce binary de ~1.32 MB con 6 applets nuevos. Aliases agregados a `/home/.ashrc`. Verificado: `ps` lista 8 tasks, `top -b -n 1` muestra Mem/Load/PID table, `free` muestra mem totals, `uptime` muestra "load average: 0.00, 0.00, 0.00".
+- ✅ **`/proc` synthetic filesystem** (`src/fs/procfs.{c,h}`, ~360 LOC): mount en `/proc`. Top-level files: `meminfo` (MemTotal/MemFree/MemAvailable/Slab desde PMM), `uptime`, `loadavg`, `cpuinfo`, `stat`, `version`. Per-pid dirs `/proc/<pid>/{cmdline,comm,stat,status}` enumerando task table. `/proc/self` alias del task actual. readdir enumera top files + dirs por task vivo. **🔥 Bug fixed**: trailing-slash form `/proc/<pid>/` también devuelve PROC_PID_DIR (sin esto top fallaba con "no process info in /proc" porque hace stat("/proc/PID/")). Verificado: `cat /proc/meminfo` muestra MemTotal=2096480 kB, `top` muestra 8 procesos.
+- ✅ **`siginfo_t` real para SA_SIGINFO** (`src/proc/exec.c`): 128 bytes plantados en user stack ENCIMA del sigframe (`siginfo_va = (orig_rsp - 128) & ~15`). Populamos `si_signo + si_errno=0 + si_code=0`. Handler recibe `rsi = siginfo_va`. sys_rt_sigreturn sin cambios. Apps SA_SIGINFO-aware (lighttpd, postgres, sshd) ahora reciben pointer válido en vez de NULL.
+- ✅ **`/dev/stderr` + `/dev/stdin`/`/dev/stdout`/`/dev/console`**: 4 entradas más en `devfs`. Backend delega a `tty_dev_read/write` (mismo path que `/dev/tty`). Apps Linux que abren `/dev/stderr` para logs ahora funcionan.
+- ✅ **tmpfs en `/tmp`**: `vfs_mount("/tmp", &ramfs_vfs_ops, 0)` en bootstrap. Reusa el backend ramfs pero longest-prefix dispatch envía `/tmp/*` aquí. Verificado: `echo "test" > /tmp/test.txt && cat /tmp/test.txt` → "test".
+
+### FASE 14-pendings — Quality of life remaining
+- ❌ Chip-8 emulator (último item pendiente del roadmap original gráfico)
 
 ### FASE 15 — Drivers a ring 3 (item pendiente del FASE 11 original)
 - ❌ IRQ delegation por IPC desde kernel-side handlers

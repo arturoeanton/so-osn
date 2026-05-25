@@ -108,6 +108,19 @@ void bootstrap_fs(void) {
     /* devfs at "/dev" — synthetic character devices. */
     vfs_mount("/dev", &devfs_vfs_ops, 0);
 
+    /* /proc — synthetic. Lectura on-demand: meminfo, uptime, loadavg,
+     * cpuinfo, stat, version, /proc/<pid>/{cmdline,comm,stat,status}.
+     * Para busybox top/ps/free/uptime. */
+    extern const vfs_ops_t procfs_vfs_ops;
+    vfs_mount("/proc", &procfs_vfs_ops, 0);
+
+    /* tmpfs at "/tmp" — RAM-backed scratch. Comparte el pool global
+     * de ramfs (mismo backend) pero el longest-prefix dispatcheo
+     * lleva /tmp-slash-anything aquí en vez del / root. Apps Linux
+     * que asumen /tmp writable (pid files, sockets, temp uploads)
+     * ahora pueden crear files. FAT16 no tiene /tmp por diseño. */
+    vfs_mount("/tmp", &ramfs_vfs_ops, 0);
+
     /* /sd — FAT16 on the ATA primary master, when present. Mounting
      * only if the parser bound to a valid BPB keeps the mount table
      * tidy when there's no disk attached. */
@@ -267,6 +280,11 @@ void bootstrap_fs(void) {
             "alias bc='busybox bc'\n"
             "alias dc='busybox dc'\n"
             "alias strings='busybox strings'\n"
+            "alias top='busybox top'\n"
+            "alias ps='busybox ps'\n"
+            "alias free='busybox free'\n"
+            "alias uptime='busybox uptime'\n"
+            "alias kill='busybox kill'\n"
             "\n"
             "# Bare `lighttpd` corre con el config default.\n"
             "# Pasá flags adicionales (-D para foreground, -t para test config).\n"

@@ -1,12 +1,12 @@
 /* This is a generated file, don't edit */
 
-#define NUM_APPLETS 74
+#define NUM_APPLETS 80
 #define KNOWN_APPNAME_OFFSETS 4
 
 const uint16_t applet_nameofs[] ALIGN2 = {
-81,
-192,
-293,
+89,
+210,
+324,
 };
 
 const char applet_names[] ALIGN1 = ""
@@ -38,9 +38,12 @@ const char applet_names[] ALIGN1 = ""
 "false" "\0"
 "find" "\0"
 "fold" "\0"
+"free" "\0"
 "grep" "\0"
 "head" "\0"
 "hexdump" "\0"
+"kill" "\0"
+"killall" "\0"
 "ls" "\0"
 "lsattr" "\0"
 "lsmod" "\0"
@@ -54,6 +57,7 @@ const char applet_names[] ALIGN1 = ""
 "mv" "\0"
 "patch" "\0"
 "printf" "\0"
+"ps" "\0"
 "pwd" "\0"
 "pwdx" "\0"
 "readlink" "\0"
@@ -74,6 +78,7 @@ const char applet_names[] ALIGN1 = ""
 "tail" "\0"
 "test" "\0"
 "timeout" "\0"
+"top" "\0"
 "touch" "\0"
 "tr" "\0"
 "traceroute" "\0"
@@ -81,6 +86,7 @@ const char applet_names[] ALIGN1 = ""
 "true" "\0"
 "truncate" "\0"
 "uniq" "\0"
+"uptime" "\0"
 "vi" "\0"
 "wc" "\0"
 "xargs" "\0"
@@ -112,52 +118,58 @@ const char applet_names[] ALIGN1 = ""
 #define APPLET_NO_false 25
 #define APPLET_NO_find 26
 #define APPLET_NO_fold 27
-#define APPLET_NO_grep 28
-#define APPLET_NO_head 29
-#define APPLET_NO_hexdump 30
-#define APPLET_NO_ls 31
-#define APPLET_NO_lsattr 32
-#define APPLET_NO_lsmod 33
-#define APPLET_NO_lsof 34
-#define APPLET_NO_lspci 35
-#define APPLET_NO_lsscsi 36
-#define APPLET_NO_lsusb 37
-#define APPLET_NO_md5sum 38
-#define APPLET_NO_mkdir 39
-#define APPLET_NO_more 40
-#define APPLET_NO_mv 41
-#define APPLET_NO_patch 42
-#define APPLET_NO_printf 43
-#define APPLET_NO_pwd 44
-#define APPLET_NO_pwdx 45
-#define APPLET_NO_readlink 46
-#define APPLET_NO_realpath 47
-#define APPLET_NO_rev 48
-#define APPLET_NO_rm 49
-#define APPLET_NO_rmdir 50
-#define APPLET_NO_rmmod 51
-#define APPLET_NO_sed 52
-#define APPLET_NO_sh 53
-#define APPLET_NO_sha1sum 54
-#define APPLET_NO_sha256sum 55
-#define APPLET_NO_sleep 56
-#define APPLET_NO_sort 57
-#define APPLET_NO_stat 58
-#define APPLET_NO_strings 59
-#define APPLET_NO_tac 60
-#define APPLET_NO_tail 61
-#define APPLET_NO_test 62
-#define APPLET_NO_timeout 63
-#define APPLET_NO_touch 64
-#define APPLET_NO_tr 65
-#define APPLET_NO_traceroute 66
-#define APPLET_NO_tree 67
-#define APPLET_NO_true 68
-#define APPLET_NO_truncate 69
-#define APPLET_NO_uniq 70
-#define APPLET_NO_vi 71
-#define APPLET_NO_wc 72
-#define APPLET_NO_xargs 73
+#define APPLET_NO_free 28
+#define APPLET_NO_grep 29
+#define APPLET_NO_head 30
+#define APPLET_NO_hexdump 31
+#define APPLET_NO_kill 32
+#define APPLET_NO_killall 33
+#define APPLET_NO_ls 34
+#define APPLET_NO_lsattr 35
+#define APPLET_NO_lsmod 36
+#define APPLET_NO_lsof 37
+#define APPLET_NO_lspci 38
+#define APPLET_NO_lsscsi 39
+#define APPLET_NO_lsusb 40
+#define APPLET_NO_md5sum 41
+#define APPLET_NO_mkdir 42
+#define APPLET_NO_more 43
+#define APPLET_NO_mv 44
+#define APPLET_NO_patch 45
+#define APPLET_NO_printf 46
+#define APPLET_NO_ps 47
+#define APPLET_NO_pwd 48
+#define APPLET_NO_pwdx 49
+#define APPLET_NO_readlink 50
+#define APPLET_NO_realpath 51
+#define APPLET_NO_rev 52
+#define APPLET_NO_rm 53
+#define APPLET_NO_rmdir 54
+#define APPLET_NO_rmmod 55
+#define APPLET_NO_sed 56
+#define APPLET_NO_sh 57
+#define APPLET_NO_sha1sum 58
+#define APPLET_NO_sha256sum 59
+#define APPLET_NO_sleep 60
+#define APPLET_NO_sort 61
+#define APPLET_NO_stat 62
+#define APPLET_NO_strings 63
+#define APPLET_NO_tac 64
+#define APPLET_NO_tail 65
+#define APPLET_NO_test 66
+#define APPLET_NO_timeout 67
+#define APPLET_NO_top 68
+#define APPLET_NO_touch 69
+#define APPLET_NO_tr 70
+#define APPLET_NO_traceroute 71
+#define APPLET_NO_tree 72
+#define APPLET_NO_true 73
+#define APPLET_NO_truncate 74
+#define APPLET_NO_uniq 75
+#define APPLET_NO_uptime 76
+#define APPLET_NO_vi 77
+#define APPLET_NO_wc 78
+#define APPLET_NO_xargs 79
 
 #ifndef SKIP_applet_main
 int (*const applet_main[])(int argc, char **argv) = {
@@ -189,9 +201,12 @@ factor_main,
 false_main,
 find_main,
 fold_main,
+free_main,
 grep_main,
 head_main,
 hexdump_main,
+kill_main,
+kill_main,
 ls_main,
 lsattr_main,
 lsmod_main,
@@ -205,6 +220,7 @@ more_main,
 mv_main,
 patch_main,
 printf_main,
+ps_main,
 pwd_main,
 pwdx_main,
 readlink_main,
@@ -225,6 +241,7 @@ tac_main,
 tail_main,
 test_main,
 timeout_main,
+top_main,
 touch_main,
 tr_main,
 traceroute_main,
@@ -232,6 +249,7 @@ tree_main,
 true_main,
 truncate_main,
 uniq_main,
+uptime_main,
 vi_main,
 wc_main,
 xargs_main,

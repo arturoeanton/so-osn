@@ -3,6 +3,7 @@
 #include <stddef.h>
 
 #include "fpu.h"
+#include "tty.h"
 
 static task_t tasks[MAX_TASKS];
 
@@ -140,6 +141,19 @@ void task_run_next(void) {
                 __asm__ volatile ("wrmsr"
                     :
                     : "a"(lo), "d"(hi), "c"(0xC0000100));
+            }
+            /* Per-task termios sync (FASE 14-misc): si el task tiene
+             * su propio snapshot, instalarlo en el global tty_t.
+             * Así cada task "ve" su propio modo (raw/canon/echo)
+             * mientras está dispatched. */
+            if (task->pml4 && task->tty_termios_valid) {
+                extern void tty_restore_from(const struct osnos_termios *in);
+                struct osnos_termios tmp;
+                tmp.c_iflag = task->tty_iflag; tmp.c_oflag = task->tty_oflag;
+                tmp.c_cflag = task->tty_cflag; tmp.c_lflag = task->tty_lflag;
+                tmp.c_line  = task->tty_line;
+                for (size_t k = 0; k < NCCS; k++) tmp.c_cc[k] = task->tty_cc[k];
+                tty_restore_from(&tmp);
             }
         }
 

@@ -243,14 +243,30 @@ static osnos_status_t tty_dev_write(const char *buf, size_t buf_size) {
     return OSNOS_OK;
 }
 
+/* /dev/stdin, /dev/stdout, /dev/stderr — apps Linux (lighttpd,
+ * sshd, etc.) frecuentemente abren estos paths para logs o redir.
+ * Como devfs no soporta symlinks, los implementamos como entries
+ * que delegan al mismo backend que la consola (framebuffer + serial
+ * mirror) para write, y al stdin path para read. */
+static osnos_status_t stdio_dev_read(char *buf, size_t buf_size, size_t *out) {
+    return tty_dev_read(buf, buf_size, out);
+}
+static osnos_status_t stdio_dev_write(const char *buf, size_t buf_size) {
+    return tty_dev_write(buf, buf_size);
+}
+
 static const devfs_dev_t devices[] = {
-    { "null",   null_read,    null_write    },
-    { "zero",   zero_read,    zero_write    },
-    { "fb0",    fb0_read,     fb0_write     },
-    { "input0", input0_read,  input0_write  },
-    { "mouse0", mouse0_read,  mouse0_write  },
-    { "ttyS0",  ttyS0_read,   ttyS0_write   },
-    { "tty",    tty_dev_read, tty_dev_write }
+    { "null",   null_read,     null_write     },
+    { "zero",   zero_read,     zero_write     },
+    { "fb0",    fb0_read,      fb0_write      },
+    { "input0", input0_read,   input0_write   },
+    { "mouse0", mouse0_read,   mouse0_write   },
+    { "ttyS0",  ttyS0_read,    ttyS0_write    },
+    { "tty",    tty_dev_read,  tty_dev_write  },
+    { "stdin",  stdio_dev_read, stdio_dev_write },
+    { "stdout", stdio_dev_read, stdio_dev_write },
+    { "stderr", stdio_dev_read, stdio_dev_write },
+    { "console", stdio_dev_read, stdio_dev_write }
 };
 
 #define DEVFS_DEV_COUNT (sizeof(devices) / sizeof(devices[0]))

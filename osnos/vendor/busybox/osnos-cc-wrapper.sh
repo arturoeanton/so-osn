@@ -66,6 +66,7 @@ for a in "$@"; do
         -isystem|-nostdinc|-MMD|-MP) ;;
         -U__APPLE__|-D__linux__|-D__linux) ;;
         /*musl/include|/*musl/arch/*|/*musl/build-osnos/*|/*freestnd-c-hdrs/*) ;;
+        -Wl,-Map,*|-Wl,--warn-common|-Wl,--verbose|-Wl,--sort-common|-Wl,--sort-section=*|-Wl,--gc-sections|-Wl,-z,*) ;;
         -Wl,*) args="$args ${a#-Wl,}" ;;
         -o)  out_next=1 ;;
         *)   args="$args $a" ;;

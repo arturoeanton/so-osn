@@ -11,6 +11,18 @@
 
 static struct osnos_termios tty_t;
 
+/* Sync helpers entre el global tty_t y la struct por-task. Usados
+ * por sys_ioctl TCGETS/TCSETS sobre /dev/tty + por el scheduler
+ * cuando cambia el task corriendo. */
+void tty_snapshot_into(struct osnos_termios *out) {
+    if (!out) return;
+    *out = tty_t;
+}
+void tty_restore_from(const struct osnos_termios *in) {
+    if (!in) return;
+    tty_t = *in;
+}
+
 static char     read_buf[TTY_READ_BUF];
 static size_t   read_head, read_tail, read_count;
 

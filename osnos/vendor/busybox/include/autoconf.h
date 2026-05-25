@@ -2,7 +2,7 @@
  * Automatically generated C config: don't edit
  * Busybox version: 1.36.1
  */
-#define AUTOCONF_TIMESTAMP "2026-05-24 11:39:13 -03"
+#define AUTOCONF_TIMESTAMP "2026-05-24 21:49:19 -03"
 
 #define CONFIG_HAVE_DOT_CONFIG 1
 #define ENABLE_HAVE_DOT_CONFIG 1
@@ -4464,10 +4464,14 @@
 #define ENABLE_FEATURE_SHOW_THREADS 0
 #define IF_FEATURE_SHOW_THREADS(...)
 #define IF_NOT_FEATURE_SHOW_THREADS(...) __VA_ARGS__
-#undef CONFIG_FREE
-#define ENABLE_FREE 0
-#define IF_FREE(...)
-#define IF_NOT_FREE(...) __VA_ARGS__
+#define CONFIG_FREE 1
+#define ENABLE_FREE 1
+#ifdef MAKE_SUID
+# define IF_FREE(...) __VA_ARGS__ "CONFIG_FREE"
+#else
+# define IF_FREE(...) __VA_ARGS__
+#endif
+#define IF_NOT_FREE(...)
 #undef CONFIG_FUSER
 #define ENABLE_FUSER 0
 #define IF_FUSER(...)
@@ -4476,14 +4480,22 @@
 #define ENABLE_IOSTAT 0
 #define IF_IOSTAT(...)
 #define IF_NOT_IOSTAT(...) __VA_ARGS__
-#undef CONFIG_KILL
-#define ENABLE_KILL 0
-#define IF_KILL(...)
-#define IF_NOT_KILL(...) __VA_ARGS__
-#undef CONFIG_KILLALL
-#define ENABLE_KILLALL 0
-#define IF_KILLALL(...)
-#define IF_NOT_KILLALL(...) __VA_ARGS__
+#define CONFIG_KILL 1
+#define ENABLE_KILL 1
+#ifdef MAKE_SUID
+# define IF_KILL(...) __VA_ARGS__ "CONFIG_KILL"
+#else
+# define IF_KILL(...) __VA_ARGS__
+#endif
+#define IF_NOT_KILL(...)
+#define CONFIG_KILLALL 1
+#define ENABLE_KILLALL 1
+#ifdef MAKE_SUID
+# define IF_KILLALL(...) __VA_ARGS__ "CONFIG_KILLALL"
+#else
+# define IF_KILLALL(...) __VA_ARGS__
+#endif
+#define IF_NOT_KILLALL(...)
 #undef CONFIG_KILLALL5
 #define ENABLE_KILLALL5 0
 #define IF_KILLALL5(...)
@@ -4536,10 +4548,14 @@
 #define ENABLE_FEATURE_POWERTOP_INTERACTIVE 0
 #define IF_FEATURE_POWERTOP_INTERACTIVE(...)
 #define IF_NOT_FEATURE_POWERTOP_INTERACTIVE(...) __VA_ARGS__
-#undef CONFIG_PS
-#define ENABLE_PS 0
-#define IF_PS(...)
-#define IF_NOT_PS(...) __VA_ARGS__
+#define CONFIG_PS 1
+#define ENABLE_PS 1
+#ifdef MAKE_SUID
+# define IF_PS(...) __VA_ARGS__ "CONFIG_PS"
+#else
+# define IF_PS(...) __VA_ARGS__
+#endif
+#define IF_NOT_PS(...)
 #undef CONFIG_FEATURE_PS_WIDE
 #define ENABLE_FEATURE_PS_WIDE 0
 #define IF_FEATURE_PS_WIDE(...)
@@ -4580,10 +4596,14 @@
 #define ENABLE_BB_SYSCTL 0
 #define IF_BB_SYSCTL(...)
 #define IF_NOT_BB_SYSCTL(...) __VA_ARGS__
-#undef CONFIG_TOP
-#define ENABLE_TOP 0
-#define IF_TOP(...)
-#define IF_NOT_TOP(...) __VA_ARGS__
+#define CONFIG_TOP 1
+#define ENABLE_TOP 1
+#ifdef MAKE_SUID
+# define IF_TOP(...) __VA_ARGS__ "CONFIG_TOP"
+#else
+# define IF_TOP(...) __VA_ARGS__
+#endif
+#define IF_NOT_TOP(...)
 #undef CONFIG_FEATURE_TOP_INTERACTIVE
 #define ENABLE_FEATURE_TOP_INTERACTIVE 0
 #define IF_FEATURE_TOP_INTERACTIVE(...)
@@ -4612,10 +4632,14 @@
 #define ENABLE_FEATURE_TOPMEM 0
 #define IF_FEATURE_TOPMEM(...)
 #define IF_NOT_FEATURE_TOPMEM(...) __VA_ARGS__
-#undef CONFIG_UPTIME
-#define ENABLE_UPTIME 0
-#define IF_UPTIME(...)
-#define IF_NOT_UPTIME(...) __VA_ARGS__
+#define CONFIG_UPTIME 1
+#define ENABLE_UPTIME 1
+#ifdef MAKE_SUID
+# define IF_UPTIME(...) __VA_ARGS__ "CONFIG_UPTIME"
+#else
+# define IF_UPTIME(...) __VA_ARGS__
+#endif
+#define IF_NOT_UPTIME(...)
 #undef CONFIG_FEATURE_UPTIME_UTMP_SUPPORT
 #define ENABLE_FEATURE_UPTIME_UTMP_SUPPORT 0
 #define IF_FEATURE_UPTIME_UTMP_SUPPORT(...)

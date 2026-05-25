@@ -278,6 +278,31 @@ typedef struct task {
     int       pml4_shared;
 
     /*
+     * Per-task termios snapshot para la kernel TTY (fd 0/1/2 default).
+     *
+     * Antes había un solo `tty_t` global; sys_ioctl TCGETS/TCSETS sobre
+     * /dev/tty veían/modificaban ese global. Resultado: si task A seteaba
+     * raw mode, todas las otras tasks tambien lo veían — y peor, si A
+     * salía abnormal el TTY quedaba en raw para todos.
+     *
+     * Ahora cada task tiene su propia struct termios; TCGETS devuelve
+     * esto, TCSETS lo modifica. En task switch sync-eamos el global
+     * tty_t desde la struct del task entrante (si es ring-3) → cada
+     * task "ve" su propio termios al activarse.
+     *
+     * Tasks freshly-created lo heredan del global actual (snapshot at
+     * task_create). Fork inherits del parent. Execve preserva (POSIX).
+     *
+     * `tty_termios_valid` marca si ya fue inicializada (vs zeros). */
+    int       tty_termios_valid;
+    uint32_t  tty_iflag;
+    uint32_t  tty_oflag;
+    uint32_t  tty_cflag;
+    uint32_t  tty_lflag;
+    uint8_t   tty_line;
+    uint8_t   tty_cc[19];   /* NCCS = 19 */
+
+    /*
      * Anonymous mmap regions. Bump-allocator: mmap_next points at
      * the next free virtual address, mmap_regions[] remembers each
      * live region so munmap can free its pages. VA isn't reclaimed

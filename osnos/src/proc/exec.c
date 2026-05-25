@@ -182,11 +182,24 @@ static void user_task_resume(task_t *t) {
         }
 
         /* User handler: build sigframe on the user stack, redirect.
-         * Stack layout (grows down):
-         *   [high]  signal_frame_t (160 B = orig iret + 15 GPRs)
-         *   [low ]  restorer addr  ← new RSP (8-mod-16 for SysV ABI) */
+         *
+         * Stack layout (grows DOWN, addresses ↓):
+         *   [high]  orig_rsp
+         *           siginfo_t (128 B)        ← siginfo_va, pasada en rsi
+         *           signal_frame_t (160 B)   ← sigframe_base
+         *           restorer addr            ← new RSP (8-mod-16)
+         *   [low ]  ...handler stack grows here, NO clobbera siginfo
+         *
+         * siginfo va ARRIBA del sigframe (no abajo del restorer) para
+         * que el handler que use red-zone o crezca su frame no la pise.
+         *
+         * sys_rt_sigreturn no necesita cambios: cuando el handler hace
+         * ret, rsp = restorer_slot + 8 = sigframe_base. La trampolina
+         * hace syscall con ese rsp y sigreturn lee el sigframe desde
+         * ahí (sin saber del siginfo de más arriba). */
         uint64_t orig_rsp      = buf[1];
-        uint64_t sigframe_base = (orig_rsp - sizeof(signal_frame_t)) & ~15ULL;
+        uint64_t siginfo_va    = (orig_rsp - 128) & ~15ULL;
+        uint64_t sigframe_base = (siginfo_va - sizeof(signal_frame_t)) & ~15ULL;
         uint64_t restorer_slot = sigframe_base - 8;
 
         signal_frame_t f;
@@ -197,32 +210,36 @@ static void user_task_resume(task_t *t) {
         f.r8  = buf[12]; f.r9 = buf[13]; f.r10 = buf[14]; f.r11 = buf[15];
         f.r12 = buf[16]; f.r13 = buf[17]; f.r14 = buf[18]; f.r15 = buf[19];
 
+        /* Construir siginfo_t mínima. Layout musl x86_64: si_signo,
+         * si_errno, si_code, pad, then union. Populate solo lo crítico:
+         * si_signo (handler usa para identificar) + si_code (SI_USER=0
+         * para kill, SI_KERNEL=128 para tty/fault) + zeros. */
+        uint8_t siginfo_buf[128];
+        for (int i = 0; i < 128; i++) siginfo_buf[i] = 0;
+        /* musl: int si_signo, si_errno, si_code (3 × 4 bytes = 12). */
+        *(int *)&siginfo_buf[0]  = sig;
+        *(int *)&siginfo_buf[4]  = 0;          /* si_errno */
+        *(int *)&siginfo_buf[8]  = 0;          /* si_code = SI_USER */
+
         if (!write_other_user(t->pml4, sigframe_base, &f, sizeof(f)) ||
+            !write_other_user(t->pml4, siginfo_va, siginfo_buf, 128) ||
             !write_other_user(t->pml4, restorer_slot, &restorer, 8)) {
             /* User stack unmapped at the spot we'd push the frame —
-             * drop the signal silently. Continuing without consuming
-             * the bit would loop infinitely; clear and move on. */
+             * drop the signal silently. */
             t->sig_pending &= ~(1u << (sig - 1));
             continue;
         }
 
         /* Reroute iretq: rip=handler, rsp=top of restorer slot,
-         * rdi=signum (handler's first arg per SysV ABI).
-         *
-         * SA_SIGINFO handlers usan firma de 3 args:
-         *   void h(int sig, siginfo_t *info, void *ucontext)
-         * que en SysV son rdi/rsi/rdx. Apps que installan handler
-         * con SA_SIGINFO (lighttpd, nginx, postgres) leen *rsi como
-         * siginfo. No populamos esa struct todavía pero zeroear rsi
-         * y rdx hace que el handler vea NULL — la mayoría tiene
-         * fallback (lighttpd cmovneq con un global default). Sin
-         * esto rsi era basura de la syscall y movups (rsi+0x70)
-         * page-faulteaba. */
-        buf[4]  = handler;        /* rip   */
-        buf[1]  = restorer_slot;  /* rsp   */
-        buf[10] = (uint64_t)sig;  /* rdi   */
-        buf[9]  = 0;              /* rsi   = NULL siginfo_t */
-        buf[8]  = 0;              /* rdx   = NULL ucontext_t */
+         * rdi=signum, rsi=siginfo_va (SA_SIGINFO arg2), rdx=NULL
+         * (ucontext_t no implementado — handlers que lo usen para
+         * leer registros viejos no van a funcionar, pero ese es un
+         * subset chico; la mayoría solo lee siginfo). */
+        buf[4]  = handler;            /* rip */
+        buf[1]  = restorer_slot;      /* rsp */
+        buf[10] = (uint64_t)sig;      /* rdi */
+        buf[9]  = siginfo_va;         /* rsi */
+        buf[8]  = 0;                  /* rdx = NULL ucontext_t */
 
         t->sig_pending &= ~(1u << (sig - 1));
         break;                    /* one signal per dispatch; rest queued */

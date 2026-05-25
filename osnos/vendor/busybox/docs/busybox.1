@@ -133,7 +133,7 @@
 .\" ========================================================================
 .\"
 .IX Title "BUSYBOX 1"
-.TH BUSYBOX 1 "2026-05-24" "version 1.36.1" "busybox"
+.TH BUSYBOX 1 "2026-05-25" "version 1.36.1" "busybox"
 .\" For nroff, turn off justification.  Always turn off hyphenation; it makes
 .\" way too many mistakes in technical documents.
 .if n .ad l
@@ -222,12 +222,12 @@ Currently available applets include:
 .Vb 8
 \&        [, [[, ash, awk, base64, basename, bc, cat, cksum, cp, cpio, cut,
 \&        date, dc, dd, df, diff, dirname, du, echo, env, envdir, envuidgid,
-\&        expand, factor, false, find, fold, grep, head, hexdump, ls, lsattr,
-\&        lsmod, lsof, lspci, lsscsi, lsusb, md5sum, mkdir, more, mv, patch,
-\&        printf, pwd, pwdx, readlink, realpath, rev, rm, rmdir, rmmod, sed,
-\&        sh, sha1sum, sha256sum, sleep, sort, stat, strings, tac, tail, test,
-\&        timeout, touch, tr, traceroute, tree, true, truncate, uniq, vi, wc,
-\&        xargs
+\&        expand, factor, false, find, fold, free, grep, head, hexdump, kill,
+\&        killall, ls, lsattr, lsmod, lsof, lspci, lsscsi, lsusb, md5sum,
+\&        mkdir, more, mv, patch, printf, ps, pwd, pwdx, readlink, realpath,
+\&        rev, rm, rmdir, rmmod, sed, sh, sha1sum, sha256sum, sleep, sort,
+\&        stat, strings, tac, tail, test, timeout, top, touch, tr, traceroute,
+\&        tree, true, truncate, uniq, uptime, vi, wc, xargs
 .Ve
 .SH "COMMAND DESCRIPTIONS"
 .IX Header "COMMAND DESCRIPTIONS"
@@ -307,6 +307,9 @@ find [\-HL] [\s-1PATH\s0]... [\s-1OPTIONS\s0] [\s-1ACTIONS\s0]
 .IP "\fBfold\fR" 4
 .IX Item "fold"
 fold [\-bs] [\-w \s-1WIDTH\s0] [\s-1FILE\s0]...
+.IP "\fBfree\fR" 4
+.IX Item "free"
+free
 .IP "\fBgrep\fR" 4
 .IX Item "grep"
 grep [\-HhnlLoqvsrRiwFE] [\-m N] { \s-1PATTERN\s0 | \-e \s-1PATTERN...\s0 | \-f \s-1FILE...\s0 } [\s-1FILE\s0]...
@@ -316,6 +319,12 @@ head [\s-1OPTIONS\s0] [\s-1FILE\s0]...
 .IP "\fBhexdump\fR" 4
 .IX Item "hexdump"
 hexdump [\-bcdoxCv] [\-e \s-1FMT\s0] [\-f \s-1FMT_FILE\s0] [\-n \s-1LEN\s0] [\-s \s-1OFS\s0] [\s-1FILE\s0]...
+.IP "\fBkill\fR" 4
+.IX Item "kill"
+kill [\-l] [\-SIG] \s-1PID...\s0
+.IP "\fBkillall\fR" 4
+.IX Item "killall"
+killall [\-lq] [\-SIG] \s-1PROCESS_NAME...\s0
 .IP "\fBls\fR" 4
 .IX Item "ls"
 ls [\-1AaCxdlins] [\s-1FILE\s0]...
@@ -350,6 +359,9 @@ patch [\-RNE] [\-p N] [\-i \s-1DIFF\s0] [\s-1ORIGFILE\s0 [\s-1PATCHFILE\s0]]
 .IP "\fBprintf\fR" 4
 .IX Item "printf"
 printf \s-1FORMAT\s0 [\s-1ARG\s0]...
+.IP "\fBps\fR" 4
+.IX Item "ps"
+ps
 .IP "\fBpwd\fR" 4
 .IX Item "pwd"
 pwd
@@ -408,6 +420,9 @@ tail [\s-1OPTIONS\s0] [\s-1FILE\s0]...
 .IP "\fBtimeout\fR" 4
 .IX Item "timeout"
 timeout [\-s \s-1SIG\s0] [\-k \s-1KILL_SECS\s0] \s-1SECS PROG ARGS\s0
+.IP "\fBtop\fR" 4
+.IX Item "top"
+top [\-b] [\-n \s-1COUNT\s0] [\-d \s-1SECONDS\s0]
 .IP "\fBtouch\fR" 4
 .IX Item "touch"
 touch [\-ch] \s-1FILE...\s0
@@ -425,6 +440,9 @@ truncate [\-c] \-s \s-1SIZE FILE...\s0
 .IP "\fBuniq\fR" 4
 .IX Item "uniq"
 uniq [\-cduiz] [\-f,s,w N] [\s-1FILE\s0 [\s-1OUTFILE\s0]]
+.IP "\fBuptime\fR" 4
+.IX Item "uptime"
+uptime
 .IP "\fBvi\fR" 4
 .IX Item "vi"
 vi [\-c \s-1CMD\s0] [\-R] [\-H] [\s-1FILE\s0]...

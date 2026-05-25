@@ -132,6 +132,17 @@ void   tty_clear(void);
 int    tty_get_termios(struct osnos_termios *out);
 int    tty_set_termios(const struct osnos_termios *in);
 
+/* Per-task termios sync helpers (FASE 14-misc).
+ *
+ * tty_snapshot_into: copia el estado actual del kernel TTY hacia
+ *   `out`. Usado al crear un task — el task arranca con un snapshot
+ *   del termios al momento de spawn.
+ * tty_restore_from: hace el opuesto — instala `in` como el estado
+ *   actual del kernel TTY. Usado en task switch (scheduler) cuando
+ *   el fg task cambia, así cada task "ve" su propio termios. */
+void tty_snapshot_into(struct osnos_termios *out);
+void tty_restore_from(const struct osnos_termios *in);
+
 /* Diagnostic counters (visible in /sys/meminfo). */
 uint64_t tty_chars_in(void);
 uint64_t tty_lines_out(void);

@@ -2162,6 +2162,17 @@ int64_t sys_fork(void) {
         parent->fs_base  = live_fs;
     }
 
+    /* Per-task termios: child hereda del parent. Si parent nunca
+     * llamó TCSETS (valid=0), child arranca igual de "no opinion" y
+     * usará el global default. */
+    child->tty_termios_valid = parent->tty_termios_valid;
+    child->tty_iflag = parent->tty_iflag;
+    child->tty_oflag = parent->tty_oflag;
+    child->tty_cflag = parent->tty_cflag;
+    child->tty_lflag = parent->tty_lflag;
+    child->tty_line  = parent->tty_line;
+    for (size_t k = 0; k < NCCS; k++) child->tty_cc[k] = parent->tty_cc[k];
+
     /* Both kill_pending / stop_pending stay 0 in the child. Even if
      * the parent had them set (mid-Ctrl+C), fork should give the
      * child a clean slate so a forked grandchild can survive. */
@@ -3183,7 +3194,26 @@ int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
     switch (request) {
     case TTY_TCGETS: {
         struct osnos_termios t;
-        if (tty_get_termios(&t) != 0) return err(OSNOS_EIO);
+        /* Per-task termios snapshot: si el task ya tiene su propia
+         * struct (TCSETS la inicializó o la heredó de fork), devolver
+         * esa. Sino, snapshot del global ahora + marcar valid. */
+        task_t *cur = task_current();
+        if (cur && !cur->tty_termios_valid) {
+            tty_snapshot_into(&t);
+            cur->tty_iflag = t.c_iflag; cur->tty_oflag = t.c_oflag;
+            cur->tty_cflag = t.c_cflag; cur->tty_lflag = t.c_lflag;
+            cur->tty_line  = t.c_line;
+            for (size_t i = 0; i < NCCS; i++) cur->tty_cc[i] = t.c_cc[i];
+            cur->tty_termios_valid = 1;
+        }
+        if (cur) {
+            t.c_iflag = cur->tty_iflag; t.c_oflag = cur->tty_oflag;
+            t.c_cflag = cur->tty_cflag; t.c_lflag = cur->tty_lflag;
+            t.c_line  = cur->tty_line;
+            for (size_t i = 0; i < NCCS; i++) t.c_cc[i] = cur->tty_cc[i];
+        } else {
+            if (tty_get_termios(&t) != 0) return err(OSNOS_EIO);
+        }
         if (copy_to_user(arg, &t, sizeof(t)) != OSNOS_OK) return err(OSNOS_EFAULT);
         return 0;
     }
@@ -3191,12 +3221,30 @@ int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
     case TTY_TCSETSW: {
         struct osnos_termios t;
         if (copy_from_user(&t, arg, sizeof(t)) != OSNOS_OK) return err(OSNOS_EFAULT);
+        /* Update per-task struct + sync global (hardware-side line
+         * discipline necesita ver los nuevos flags para echo/ISIG). */
+        task_t *cur = task_current();
+        if (cur) {
+            cur->tty_iflag = t.c_iflag; cur->tty_oflag = t.c_oflag;
+            cur->tty_cflag = t.c_cflag; cur->tty_lflag = t.c_lflag;
+            cur->tty_line  = t.c_line;
+            for (size_t i = 0; i < NCCS; i++) cur->tty_cc[i] = t.c_cc[i];
+            cur->tty_termios_valid = 1;
+        }
         tty_set_termios(&t);
         return 0;
     }
     case TTY_TCSETSF: {
         struct osnos_termios t;
         if (copy_from_user(&t, arg, sizeof(t)) != OSNOS_OK) return err(OSNOS_EFAULT);
+        task_t *cur = task_current();
+        if (cur) {
+            cur->tty_iflag = t.c_iflag; cur->tty_oflag = t.c_oflag;
+            cur->tty_cflag = t.c_cflag; cur->tty_lflag = t.c_lflag;
+            cur->tty_line  = t.c_line;
+            for (size_t i = 0; i < NCCS; i++) cur->tty_cc[i] = t.c_cc[i];
+            cur->tty_termios_valid = 1;
+        }
         tty_set_termios(&t);
         tty_clear();      /* TCSETSF also drops pending input */
         return 0;
