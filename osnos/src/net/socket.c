@@ -3,6 +3,7 @@
 #include "../micro/task.h"
 #include "../micro/timer.h"
 #include "eth.h"
+#include "ip.h"
 #include "tcp.h"
 #include "udp.h"
 
@@ -21,6 +22,7 @@ typedef struct {
 typedef struct {
     bool             used;
     int              type;
+    int              protocol;   /* solo para type == SOCK_RAW */
     uint32_t         local_ip;
     uint16_t         local_port;
     sock_rx_slot_t   rx[SOCK_RX_QUEUE_DEPTH];
@@ -97,6 +99,12 @@ static sock_t *sock_at(int sd) {
     return &socks[sd];
 }
 
+int sock_type(int sd) {
+    sock_t *s = sock_at(sd);
+    if (!s) return -1;
+    return s->type;
+}
+
 int sock_create(int type) {
     if (type != OSNOS_SOCK_DGRAM && type != OSNOS_SOCK_STREAM) return -1;
 
@@ -105,6 +113,7 @@ int sock_create(int type) {
         sock_t *s = &socks[i];
         s->used       = true;
         s->type       = type;
+        s->protocol   = 0;
         s->local_ip   = 0;
         s->local_port = 0;
         s->rx_head    = 0;
@@ -134,6 +143,67 @@ int sock_create(int type) {
         return i;
     }
     return -1;
+}
+
+int sock_create_raw(int protocol) {
+    for (int i = 0; i < SOCK_MAX; i++) {
+        if (socks[i].used) continue;
+        sock_t *s = &socks[i];
+        s->used        = true;
+        s->type        = OSNOS_SOCK_RAW;
+        s->protocol    = protocol;
+        s->local_ip    = 0;
+        s->local_port  = 0;
+        s->rx_head     = 0;
+        s->rx_tail     = 0;
+        s->rx_count    = 0;
+        s->tcp_state   = TCP_CLOSED;
+        s->remote_ip   = 0;
+        s->remote_port = 0;
+        s->parent_sd   = -1;
+        s->accept_q_count = 0;
+        s->zombie      = false;
+        s->peer_fin    = false;
+        for (int k = 0; k < SOCK_RX_QUEUE_DEPTH; k++) s->rx[k].valid = false;
+        return i;
+    }
+    return -1;
+}
+
+int sock_raw_sendto(int sd, const void *payload, size_t len, uint32_t dst_ip) {
+    sock_t *s = sock_at(sd);
+    if (!s || s->type != OSNOS_SOCK_RAW) return -1;
+    if (!ip_send(dst_ip, (uint8_t)s->protocol, payload, len)) return -1;
+    return (int)len;
+}
+
+void sock_raw_deliver(uint8_t protocol, const uint8_t *ip_packet,
+                       size_t len, uint32_t src_ip) {
+    /* Linux entrega el paquete IPv4 completo (header + payload) a los
+     * raw sockets. ping(8) parsea el IP header para extraer TTL/etc. */
+    for (int i = 0; i < SOCK_MAX; i++) {
+        sock_t *s = &socks[i];
+        if (!s->used) continue;
+        if (s->type != OSNOS_SOCK_RAW) continue;
+        if (s->protocol != protocol) continue;
+
+        cli();
+        if (s->rx_count >= SOCK_RX_QUEUE_DEPTH) {
+            sti();
+            continue;                       /* drop, no error path */
+        }
+        sock_rx_slot_t *slot = &s->rx[s->rx_head];
+        size_t n = len;
+        if (n > SOCK_RX_MAX_DGRAM) n = SOCK_RX_MAX_DGRAM;
+        slot->src_ip   = src_ip;
+        slot->src_port = 0;
+        slot->len      = (uint16_t)n;
+        for (size_t k = 0; k < n; k++) slot->data[k] = ip_packet[k];
+        slot->valid = true;
+        s->rx_head = (uint8_t)((s->rx_head + 1) % SOCK_RX_QUEUE_DEPTH);
+        s->rx_count++;
+        sti();
+    }
 }
 
 static bool port_in_use(uint16_t port) {
@@ -207,7 +277,7 @@ bool sock_readable(int sd) {
     volatile sock_t *s = (volatile sock_t *)sock_at(sd);
     if (!s) return false;
 
-    if (s->type == OSNOS_SOCK_DGRAM) {
+    if (s->type == OSNOS_SOCK_DGRAM || s->type == OSNOS_SOCK_RAW) {
         return s->rx_count > 0;
     }
     if (s->type == OSNOS_SOCK_STREAM) {
@@ -230,7 +300,8 @@ int sock_recvfrom(int sd, void *buf, size_t buf_len,
                    uint32_t timeout_ms) {
     sock_t *s = sock_at(sd);
     if (!s) return -1;
-    if (s->local_port == 0) return -1;     /* unbound */
+    /* RAW sockets no usan port. Solo UDP requiere bind explícito. */
+    if (s->type != OSNOS_SOCK_RAW && s->local_port == 0) return -1;
 
     volatile sock_t *vs = (volatile sock_t *)s;
     uint64_t deadline = timer_ms() + timeout_ms;
@@ -340,6 +411,24 @@ int sock_connect(int sd, uint32_t dst_ip, uint16_t dst_port,
     (void)timeout_ms;     /* kept for ABI symmetry; libc owns the timeout */
     sock_t *s = sock_at(sd);
     if (!s) return -1;
+
+    /* UDP connect — POSIX: solo recordamos el peer default para
+     * que send()/recv() funcionen sin pasar addr cada vez. No hay
+     * handshake real (UDP es connectionless). Apps Linux como
+     * nslookup, glibc/musl resolver hacen connect() antes de
+     * send()/recv() en sockets UDP. */
+    if (s->type == OSNOS_SOCK_DGRAM) {
+        if (dst_ip == 0 || dst_port == 0) return -1;
+        if (s->local_port == 0) {
+            if (sock_bind(sd, 0, 0) != 0) return -1;
+        }
+        cli();
+        s->remote_ip   = dst_ip;
+        s->remote_port = dst_port;
+        sti();
+        return 0;
+    }
+
     if (s->type != OSNOS_SOCK_STREAM) return -1;
 
     if (s->tcp_state == TCP_ESTABLISHED) return 0;
@@ -802,6 +891,18 @@ void sock_tcp_handle_segment(uint32_t src_ip, uint16_t src_port,
 int sock_recv(int sd, void *buf, size_t buf_len, uint32_t timeout_ms) {
     sock_t *s = sock_at(sd);
     if (!s) return -1;
+
+    /* UDP recv() — delega a recvfrom. recvfrom retorna 0 si timeout
+     * expira sin datos; pero para read() POSIX 0 = EOF (que UDP no
+     * tiene). Coercionamos a -2 = EAGAIN sentinel para que sys_read
+     * lo traduzca a errno=EAGAIN. */
+    if (s->type == OSNOS_SOCK_DGRAM) {
+        uint32_t src_ip; uint16_t src_port;
+        int r = sock_recvfrom(sd, buf, buf_len, &src_ip, &src_port, timeout_ms);
+        if (r == 0) return -2;
+        return r;
+    }
+
     if (s->type != OSNOS_SOCK_STREAM) return -1;
 
     volatile sock_t *vs = (volatile sock_t *)s;
@@ -834,6 +935,13 @@ int sock_recv(int sd, void *buf, size_t buf_len, uint32_t timeout_ms) {
 int sock_send(int sd, const void *buf, size_t len) {
     sock_t *s = sock_at(sd);
     if (!s) return -1;
+
+    /* UDP send() — usa el peer registrado por connect(). */
+    if (s->type == OSNOS_SOCK_DGRAM) {
+        if (s->remote_ip == 0 || s->remote_port == 0) return -1;
+        return sock_sendto(sd, buf, len, s->remote_ip, s->remote_port);
+    }
+
     if (s->type != OSNOS_SOCK_STREAM) return -1;
     if (s->tcp_state != TCP_ESTABLISHED && s->tcp_state != TCP_CLOSE_WAIT) {
         return -1;

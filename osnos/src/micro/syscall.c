@@ -1252,8 +1252,17 @@ static void pack_sockaddr_in(void *addr, uint32_t ip, uint16_t port) {
     for (int i = 8; i < 16; i++) p[i] = 0;
 }
 
-int64_t sys_socket(int domain, int type, int protocol) {
-    (void)protocol;
+int64_t sys_socket(int domain, int type_raw, int protocol) {
+    /* Linux x86_64 bundles SOCK_CLOEXEC=02000000 (0x80000) y
+     * SOCK_NONBLOCK=00004000 (0x800) en el type arg. musl's
+     * res_msend pasa SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK (=0x80802).
+     * Antes solo aceptábamos type == OSNOS_SOCK_DGRAM (2) o STREAM (1)
+     * y EAFNOSUPPORT'eábamos cualquier cosa con flags. */
+    int type        = type_raw & 0xff;          /* base type */
+    int sock_flags  = type_raw & ~0xff;          /* flags */
+    int want_cloexec = (sock_flags & 0x80000) != 0;
+    int want_nonblock= (sock_flags & 0x800)   != 0;
+
     /* AF_UNIX: nuestra propia tabla unix_sock_t. SOCK_STREAM solo. */
     if (domain == 1 /* OSNOS_AF_UNIX */) {
         if (type != OSNOS_SOCK_STREAM) return err(OSNOS_EAFNOSUPPORT);
@@ -1264,15 +1273,21 @@ int64_t sys_socket(int domain, int type, int protocol) {
         osnos_fd_t *f = fd_get(task_current(), fd);
         f->is_unix_socket = true;
         f->unix_idx       = ux;
+        if (want_cloexec)  fd_set_flags(task_current(), fd, OSNOS_FD_CLOEXEC);
+        if (want_nonblock) f->flags |= 0x800;
         return (int64_t)fd;
     }
 
     if (domain != AF_INET_LX) return err(OSNOS_EAFNOSUPPORT);
-    if (type != OSNOS_SOCK_DGRAM && type != OSNOS_SOCK_STREAM) {
+    if (type != OSNOS_SOCK_DGRAM &&
+        type != OSNOS_SOCK_STREAM &&
+        type != OSNOS_SOCK_RAW) {
         return err(OSNOS_EAFNOSUPPORT);
     }
 
-    int sd = sock_create(type);
+    int sd = (type == OSNOS_SOCK_RAW)
+             ? sock_create_raw(protocol)
+             : sock_create(type);
     if (sd < 0) return err(OSNOS_EMFILE);
 
     int fd = fd_alloc(task_current());
@@ -1284,6 +1299,8 @@ int64_t sys_socket(int domain, int type, int protocol) {
     osnos_fd_t *f = fd_get(task_current(), fd);
     f->is_socket = true;
     f->sock_idx  = sd;
+    if (want_cloexec)  fd_set_flags(task_current(), fd, OSNOS_FD_CLOEXEC);
+    if (want_nonblock) f->flags |= 0x800;
     return (int64_t)fd;
 }
 
@@ -3754,6 +3771,17 @@ int64_t sys_sendto(int fd, const void *buf, size_t len, int flags,
     }
     if (!f->is_socket) return err(OSNOS_EBADF);
 
+    /* Raw IP: encapsular en IP con el protocol del socket. */
+    if (sock_type(f->sock_idx) == OSNOS_SOCK_RAW) {
+        uint32_t ip = 0; uint16_t port = 0;
+        if (dst_addr == NULL || addrlen == 0) return err(OSNOS_EINVAL);
+        int64_t e;
+        if (!unpack_sockaddr_in(dst_addr, addrlen, &ip, &port, &e)) return e;
+        int n = sock_raw_sendto(f->sock_idx, buf, len, ip);
+        if (n < 0) return err(OSNOS_EIO);
+        return (int64_t)n;
+    }
+
     /* On a stream socket dst_addr is ignored — connection is already
      * pinned by accept/connect. Lets libc send() forward verbatim. */
     if (dst_addr == NULL || addrlen == 0) {
@@ -3797,32 +3825,153 @@ int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
     }
     if (!f->is_socket) return err(OSNOS_EBADF);
 
-    /* Stream sockets ignore src_addr (use getpeername). Non-blocking
-     * single-shot; libc loops with nanosleep on EAGAIN. */
-    int n = sock_recv(f->sock_idx, buf, len, 0);
-    if (n == -2) return err(OSNOS_EAGAIN);
-    if (n >= 0) {
+    /* UDP/RAW: ir directo a sock_recvfrom para preservar src_ip/src_port —
+     * sock_recv consume el datagram pero descarta el peer, lo que rompe
+     * a musl getaddrinfo (su resolver rechaza respuestas cuyo from no
+     * coincide con el nameserver configurado). */
+    int stype = sock_type(f->sock_idx);
+    if (stype == OSNOS_SOCK_DGRAM || stype == OSNOS_SOCK_RAW) {
+        uint32_t src_ip = 0;
+        uint16_t src_port = 0;
+        int n = sock_recvfrom(f->sock_idx, buf, len, &src_ip, &src_port, 0);
+        if (n == -2) return err(OSNOS_EAGAIN);
+        if (n < 0)   return err(OSNOS_EBADF);
         if (src_addr && addrlen_ptr) {
             uint32_t *alenp = (uint32_t *)addrlen_ptr;
-            *alenp = 0;
+            if (*alenp >= 16) {
+                pack_sockaddr_in(src_addr, src_ip, src_port);
+                *alenp = 16;
+            }
         }
         return (int64_t)n;
     }
-    /* sock_recv returned -1 → not a stream socket; try datagram path. */
 
-    uint32_t src_ip = 0;
-    uint16_t src_port = 0;
-    n = sock_recvfrom(f->sock_idx, buf, len, &src_ip, &src_port, 0);
+    /* TCP: src_addr es ignorado (POSIX: usar getpeername). */
+    int n = sock_recv(f->sock_idx, buf, len, 0);
     if (n == -2) return err(OSNOS_EAGAIN);
     if (n < 0)   return err(OSNOS_EBADF);
-
     if (src_addr && addrlen_ptr) {
         uint32_t *alenp = (uint32_t *)addrlen_ptr;
-        if (*alenp >= 16) {
-            pack_sockaddr_in(src_addr, src_ip, src_port);
-            *alenp = 16;
-        }
+        *alenp = 0;
     }
+    return (int64_t)n;
+}
+
+/* ------------------------------------------------------------------ */
+/* sendmsg / recvmsg — Linux 46 / 47. musl's resolver (res_msend) usa  */
+/* recvmsg para leer replies UDP. Sin esto, getaddrinfo nunca matcha  */
+/* la respuesta y nslookup/wget fallan con "bad address".              */
+/* ------------------------------------------------------------------ */
+
+struct osnos_iovec {
+    void  *iov_base;
+    size_t iov_len;
+};
+
+struct osnos_msghdr {
+    void   *msg_name;       /* sockaddr opcional */
+    uint32_t msg_namelen;
+    struct osnos_iovec *msg_iov;
+    uint64_t msg_iovlen;
+    void   *msg_control;
+    uint64_t msg_controllen;
+    int     msg_flags;
+};
+
+int64_t sys_sendmsg(int fd, const void *u_msg, int flags) {
+    struct osnos_msghdr kmsg;
+    if (!u_msg) return err(OSNOS_EFAULT);
+    if (copy_from_user(&kmsg, (void *)u_msg, sizeof(kmsg)) != OSNOS_OK)
+        return err(OSNOS_EFAULT);
+
+    /* Solo soportamos iovlen == 1 (musl res_msend usa esto). */
+    if (kmsg.msg_iovlen != 1 || !kmsg.msg_iov) return err(OSNOS_EINVAL);
+    struct osnos_iovec kiov;
+    if (copy_from_user(&kiov, kmsg.msg_iov, sizeof(kiov)) != OSNOS_OK)
+        return err(OSNOS_EFAULT);
+
+    /* Slurp iov payload into a kernel buffer for sock_sendto. */
+    if (kiov.iov_len > 1024) return err(OSNOS_EINVAL);
+    uint8_t buf[1024];
+    if (kiov.iov_len > 0) {
+        if (copy_from_user(buf, kiov.iov_base, kiov.iov_len) != OSNOS_OK)
+            return err(OSNOS_EFAULT);
+    }
+
+    return sys_sendto(fd, buf, kiov.iov_len, flags,
+                      kmsg.msg_name, kmsg.msg_namelen);
+}
+
+int64_t sys_recvmsg(int fd, void *u_msg, int flags) {
+    struct osnos_msghdr kmsg;
+    if (!u_msg) return err(OSNOS_EFAULT);
+    if (copy_from_user(&kmsg, u_msg, sizeof(kmsg)) != OSNOS_OK)
+        return err(OSNOS_EFAULT);
+    if (kmsg.msg_iovlen != 1 || !kmsg.msg_iov) return err(OSNOS_EINVAL);
+    struct osnos_iovec kiov;
+    if (copy_from_user(&kiov, kmsg.msg_iov, sizeof(kiov)) != OSNOS_OK)
+        return err(OSNOS_EFAULT);
+
+    if (kiov.iov_len > 1024) kiov.iov_len = 1024;
+    uint8_t buf[1024];
+
+    /* Llamar a sys_recvfrom usando un addrlen scratch en kernel. */
+    uint32_t addr_buf[8] = {0};            /* hasta sockaddr_in6 (28 B) */
+    uint32_t alen = kmsg.msg_namelen;
+    if (alen > sizeof(addr_buf)) alen = sizeof(addr_buf);
+    uint32_t alen_io = alen;
+
+    osnos_fd_t *f = fd_get(task_current(), fd);
+    if (!f) return err(OSNOS_EBADF);
+    if (!f->is_socket && !f->is_unix_socket) return err(OSNOS_EBADF);
+
+    /* Path UDP/RAW directo para preservar src. */
+    if (f->is_socket &&
+        (sock_type(f->sock_idx) == OSNOS_SOCK_DGRAM ||
+         sock_type(f->sock_idx) == OSNOS_SOCK_RAW)) {
+        uint32_t src_ip = 0;
+        uint16_t src_port = 0;
+        int n = sock_recvfrom(f->sock_idx, buf, kiov.iov_len,
+                              &src_ip, &src_port, 0);
+        if (n == -2) return err(OSNOS_EAGAIN);
+        if (n < 0)   return err(OSNOS_EBADF);
+        if (n > 0 && kiov.iov_base) {
+            if (copy_to_user(kiov.iov_base, buf, (size_t)n) != OSNOS_OK)
+                return err(OSNOS_EFAULT);
+        }
+        if (kmsg.msg_name && alen_io >= 16) {
+            pack_sockaddr_in(addr_buf, src_ip, src_port);
+            if (copy_to_user(kmsg.msg_name, addr_buf, 16) != OSNOS_OK)
+                return err(OSNOS_EFAULT);
+            kmsg.msg_namelen = 16;
+        } else {
+            kmsg.msg_namelen = 0;
+        }
+        kmsg.msg_flags = 0;
+        if (copy_to_user(u_msg, &kmsg, sizeof(kmsg)) != OSNOS_OK)
+            return err(OSNOS_EFAULT);
+        (void)flags;
+        return (int64_t)n;
+    }
+
+    /* TCP / unix fallback usa sock_recv (sin direccion). */
+    int n;
+    if (f->is_unix_socket) {
+        n = unix_sock_recv(f->unix_idx, buf, kiov.iov_len);
+    } else {
+        n = sock_recv(f->sock_idx, buf, kiov.iov_len, 0);
+        if (n == -2) return err(OSNOS_EAGAIN);
+    }
+    if (n < 0) return err(OSNOS_EBADF);
+    if (n > 0 && kiov.iov_base) {
+        if (copy_to_user(kiov.iov_base, buf, (size_t)n) != OSNOS_OK)
+            return err(OSNOS_EFAULT);
+    }
+    kmsg.msg_namelen = 0;
+    kmsg.msg_flags = 0;
+    if (copy_to_user(u_msg, &kmsg, sizeof(kmsg)) != OSNOS_OK)
+        return err(OSNOS_EFAULT);
+    (void)flags;
     return (int64_t)n;
 }
 
@@ -4210,6 +4359,44 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
                 (int)frame->r10,
                 (void *)frame->r8,
                 (void *)frame->r9));
+        case SYS_SENDMSG:
+            return pack(sys_sendmsg(
+                (int)frame->rdi,
+                (const void *)frame->rsi,
+                (int)frame->rdx));
+        case SYS_RECVMSG:
+            return pack(sys_recvmsg(
+                (int)frame->rdi,
+                (void *)frame->rsi,
+                (int)frame->rdx));
+        case SYS_GETSOCKNAME:
+        case SYS_GETPEERNAME: {
+            /* Stubs: returns 0 + addrlen=0. musl algunos paths solo
+             * verifican que la syscall no falla con ENOSYS. */
+            void *u_alen = (void *)frame->rdx;
+            if (u_alen) {
+                uint32_t zero = 0;
+                copy_to_user(u_alen, &zero, sizeof(zero));
+            }
+            return pack(0);
+        }
+        case SYS_GETSOCKOPT: {
+            /* Stub: devuelve 0 (sin opciones). musl SO_ERROR returns 0
+             * para "no error", lo que es el caso comun post-connect. */
+            void *u_optval = (void *)frame->r8;
+            void *u_optlen = (void *)frame->r9;
+            if (u_optval && u_optlen) {
+                uint32_t alen = 0;
+                copy_from_user(&alen, u_optlen, sizeof(alen));
+                if (alen >= 4) {
+                    int zero = 0;
+                    copy_to_user(u_optval, &zero, sizeof(zero));
+                    alen = 4;
+                    copy_to_user(u_optlen, &alen, sizeof(alen));
+                }
+            }
+            return pack(0);
+        }
         case SYS_POLL:
             return pack(sys_poll(
                 (void *)frame->rdi,

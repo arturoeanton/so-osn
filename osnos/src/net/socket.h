@@ -27,9 +27,25 @@
  * pass these through verbatim. */
 #define OSNOS_SOCK_STREAM   1   /* TCP — 8.5.5 */
 #define OSNOS_SOCK_DGRAM    2   /* UDP */
+#define OSNOS_SOCK_RAW      3   /* RAW IP — usado por ping (ICMP) */
 
 /* Returns >=0 socket descriptor, -1 on full. */
 int  sock_create(int type);
+
+/* Crea un raw socket (AF_INET, SOCK_RAW) atado a `protocol` (IPPROTO_*).
+ * Reply matching usa el campo protocol del IP header. */
+int  sock_create_raw(int protocol);
+
+/* Send raw: encapsula `payload`(payload_len) en IP con s->protocol. */
+int  sock_raw_sendto(int sd, const void *payload, size_t len, uint32_t dst_ip);
+
+/* Hook llamado desde ip_handle: distribuye el paquete IPv4 entero
+ * (header + payload) a cualquier raw socket cuyo protocol matchea. */
+void sock_raw_deliver(uint8_t protocol, const uint8_t *ip_packet,
+                       size_t len, uint32_t src_ip);
+
+/* Returns OSNOS_SOCK_* for `sd`, or -1 on invalid descriptor. */
+int  sock_type(int sd);
 
 /* Bind a UDP socket to local (ip, port). ip=0 means INADDR_ANY (accept
  * any of our local IPs — only one today). port=0 picks an ephemeral

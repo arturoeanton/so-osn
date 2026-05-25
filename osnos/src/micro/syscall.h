@@ -78,9 +78,14 @@ typedef struct task task_t;
 #define SYS_ACCEPT     43
 #define SYS_SENDTO     44
 #define SYS_RECVFROM   45
+#define SYS_SENDMSG    46
+#define SYS_RECVMSG    47
 #define SYS_BIND       49
 #define SYS_LISTEN     50
+#define SYS_GETSOCKNAME 51
+#define SYS_GETPEERNAME 52
 #define SYS_SETSOCKOPT 54
+#define SYS_GETSOCKOPT 55
 
 /* musl libc bootstrap requirements. */
 #define SYS_ARCH_PRCTL    158   /* TLS — wrmsr MSR_FS_BASE          */

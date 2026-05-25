@@ -2,7 +2,7 @@
  * Automatically generated C config: don't edit
  * Busybox version: 1.36.1
  */
-#define AUTOCONF_TIMESTAMP "2026-05-25 00:00:53 -03"
+#define AUTOCONF_TIMESTAMP "2026-05-25 01:05:04 -03"
 
 #define CONFIG_HAVE_DOT_CONFIG 1
 #define ENABLE_HAVE_DOT_CONFIG 1
@@ -4356,10 +4356,14 @@
 #define ENABLE_PING6 0
 #define IF_PING6(...)
 #define IF_NOT_PING6(...) __VA_ARGS__
-#undef CONFIG_FEATURE_FANCY_PING
-#define ENABLE_FEATURE_FANCY_PING 0
-#define IF_FEATURE_FANCY_PING(...)
-#define IF_NOT_FEATURE_FANCY_PING(...) __VA_ARGS__
+#define CONFIG_FEATURE_FANCY_PING 1
+#define ENABLE_FEATURE_FANCY_PING 1
+#ifdef MAKE_SUID
+# define IF_FEATURE_FANCY_PING(...) __VA_ARGS__ "CONFIG_FEATURE_FANCY_PING"
+#else
+# define IF_FEATURE_FANCY_PING(...) __VA_ARGS__
+#endif
+#define IF_NOT_FEATURE_FANCY_PING(...)
 #undef CONFIG_PSCAN
 #define ENABLE_PSCAN 0
 #define IF_PSCAN(...)

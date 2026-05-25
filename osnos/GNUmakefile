@@ -170,6 +170,8 @@ USER_ELF_LIBC_SRCS := \
     elfs/tests/ofdtest.c \
     elfs/tests/ptytest.c \
     elfs/tests/unixtest.c \
+    elfs/tests/udp_send.c \
+    elfs/tests/udp_connect.c \
     elfs/tests/shmtest.c \
     elfs/tests/fdedgetest.c \
     elfs/tests/jobtest.c \

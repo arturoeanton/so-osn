@@ -76,16 +76,30 @@ COMMON OPTIONS
 COMMANDS
     Currently available applets include:
 
-            [, [[, ash, awk, base64, basename, bc, cat, cksum, cp, cpio, cut,
-            date, dc, dd, df, diff, dirname, du, echo, env, envdir, envuidgid,
-            expand, factor, false, find, fold, free, grep, head, hexdump, kill,
-            killall, ls, lsattr, lsmod, lsof, lspci, lsscsi, lsusb, md5sum,
-            mkdir, more, mv, patch, printf, ps, pwd, pwdx, readlink, realpath,
-            rev, rm, rmdir, rmmod, sed, sh, sha1sum, sha256sum, sleep, sort,
-            stat, strings, tac, tail, test, timeout, top, touch, tr, traceroute,
-            tree, true, truncate, uniq, uptime, vi, wc, xargs
+            [, [[, ar, arp, ash, awk, base64, basename, bc, bunzip2, bzcat,
+            bzip2, cat, chgrp, chmod, chown, chroot, cksum, comm, cp, cpio, cut,
+            date, dc, dd, df, diff, dirname, du, echo, ed, env, envdir,
+            envuidgid, expand, factor, false, find, fold, free, fsync, ftpget,
+            ftpput, grep, groups, gunzip, gzip, head, hexdump, hostname, id,
+            ifconfig, install, ipcalc, kill, killall, less, ln, ls, lsattr,
+            lsmod, lsof, lspci, lsscsi, lsusb, lzma, md5sum, microcom, mkdir,
+            mkfifo, mknod, mktemp, more, mountpoint, mv, nc, netstat, nice, nl,
+            nohup, nproc, nslookup, od, paste, patch, pgrep, pidof, ping, pkill,
+            printf, ps, pwd, pwdx, readlink, realpath, rev, rm, rmdir, rmmod,
+            route, sed, setsid, sh, sha1sum, sha256sum, shuf, sleep, sort,
+            split, stat, strings, sync, tac, tail, tar, telnet, test, time,
+            timeout, top, touch, tr, traceroute, tree, true, truncate, tty,
+            unexpand, uniq, unlzma, unxz, uptime, uudecode, uuencode, vi, watch,
+            wc, wget, whoami, xargs, xz, xzcat, yes, zcat
 
 COMMAND DESCRIPTIONS
+    ar  ar x|p|t [-ov] ARCHIVE [FILE]...
+
+    arp arp [-vn] [-H HWTYPE] [-i IF] -a [HOSTNAME] [-v] [-i IF] -d HOSTNAME
+        [pub] [-v] [-H HWTYPE] [-i IF] -s HOSTNAME HWADDR [temp] [-v] [-H
+        HWTYPE] [-i IF] -s HOSTNAME HWADDR [netmask MASK] pub [-v] [-H
+        HWTYPE] [-i IF] -Ds HOSTNAME IFACE [netmask MASK] pub
+
     ash ash [-il] [-|+Cabefmnuvx] [-|+o OPT]... [-c 'SCRIPT' [ARG0 ARGS] |
         FILE ARGS | -s ARGS]
 
@@ -99,10 +113,34 @@ COMMAND DESCRIPTIONS
 
     bc  bc [-sqlw] [FILE]...
 
+    bunzip2
+        bunzip2 [-cfk] [FILE]...
+
+    bzcat
+        bzcat [FILE]...
+
+    bzip2
+        bzip2 [-cfkdt123456789] [FILE]...
+
     cat cat [FILE]...
+
+    chgrp
+        chgrp [-Rh]... GROUP FILE...
+
+    chmod
+        chmod [-R] MODE[,MODE]... FILE...
+
+    chown
+        chown [-Rh]... USER[:[GRP]] FILE...
+
+    chroot
+        chroot NEWROOT [PROG ARGS]
 
     cksum
         cksum FILE...
+
+    comm
+        comm [-123] FILE1 FILE2
 
     cp  cp [-arPLHpfinlsTu] SOURCE DEST or: cp [-arPLHpfinlsu] SOURCE... {
         -t DIRECTORY | DIRECTORY }
@@ -132,6 +170,8 @@ COMMAND DESCRIPTIONS
     echo
         echo [ARG]...
 
+    ed  ed [-p PROMPT] [-s] [FILE]
+
     env env [-i0] [-u NAME]... [-] [NAME=VALUE]... [PROG ARGS]
 
     envdir
@@ -155,9 +195,27 @@ COMMAND DESCRIPTIONS
     free
         free
 
+    fsync
+        fsync [-d] FILE...
+
+    ftpget
+        ftpget [OPTIONS] HOST [LOCAL_FILE] REMOTE_FILE
+
+    ftpput
+        ftpput [OPTIONS] HOST [REMOTE_FILE] LOCAL_FILE
+
     grep
         grep [-HhnlLoqvsrRiwFE] [-m N] { PATTERN | -e PATTERN... | -f
         FILE... } [FILE]...
+
+    groups
+        groups [USER]
+
+    gunzip
+        gunzip [-cfkt] [FILE]...
+
+    gzip
+        gzip [-cfkdt] [FILE]...
 
     head
         head [OPTIONS] [FILE]...
@@ -166,11 +224,31 @@ COMMAND DESCRIPTIONS
         hexdump [-bcdoxCv] [-e FMT] [-f FMT_FILE] [-n LEN] [-s OFS]
         [FILE]...
 
+    hostname
+        hostname [-sidf] [HOSTNAME | -F FILE]
+
+    id  id [-ugGnr] [USER]
+
+    ifconfig
+        ifconfig [-a] [IFACE] [ADDRESS]
+
+    install
+        install [-cdDsp] [-o USER] [-g GRP] [-m MODE] [-t DIR] [SOURCE]...
+        DEST
+
+    ipcalc
+        ipcalc [-bnm] ADDRESS [NETMASK]
+
     kill
         kill [-l] [-SIG] PID...
 
     killall
         killall [-lq] [-SIG] PROCESS_NAME...
+
+    less
+        less [-EFNh~] [FILE]...
+
+    ln  ln [-sfnbtv] [-S SUF] TARGET... LINK|DIR
 
     ls  ls [-1AaCxdlins] [FILE]...
 
@@ -186,20 +264,74 @@ COMMAND DESCRIPTIONS
     lspci
         lspci [-mk]
 
+    lzma
+        lzma -d [-cfk] [FILE]...
+
     md5sum
         md5sum [FILE]...
+
+    microcom
+        microcom [-d DELAY_MS] [-t TIMEOUT_MS ] [-s SPEED] [-X] TTY
 
     mkdir
         mkdir [-m MODE] [-p] DIRECTORY...
 
+    mkfifo
+        mkfifo [-m MODE] NAME
+
+    mknod
+        mknod [-m MODE] NAME TYPE [MAJOR MINOR]
+
+    mktemp
+        mktemp [-dt] [-p DIR] [TEMPLATE]
+
     more
         more [FILE]...
+
+    mountpoint
+        mountpoint [-q] { [-dn] DIR | -x DEVICE }
 
     mv  mv [-finT] SOURCE DEST or: mv [-fin] SOURCE... { -t DIRECTORY |
         DIRECTORY }
 
+    nc  nc [IPADDR PORT]
+
+    netstat
+        netstat [-ral] [-tuwx] [-enWp]
+
+    nice
+        nice [-n ADJUST] [PROG ARGS]
+
+    nl  nl [OPTIONS] [FILE]...
+
+    nohup
+        nohup PROG ARGS
+
+    nproc
+        nproc
+
+    nslookup
+        nslookup HOST [DNS_SERVER]
+
+    od  od [-aBbcDdeFfHhIiLlOovXx] [FILE]
+
+    paste
+        paste [-d LIST] [-s] [FILE]...
+
     patch
         patch [-RNE] [-p N] [-i DIFF] [ORIGFILE [PATCHFILE]]
+
+    pgrep
+        pgrep [-flanovx] [-s SID|-P PPID|PATTERN]
+
+    pidof
+        pidof [NAME]...
+
+    ping
+        ping [OPTIONS] HOST
+
+    pkill
+        pkill [-l|-SIGNAL] [-xfvnoe] [-s SID|-P PPID|PATTERN]
 
     printf
         printf FORMAT [ARG]...
@@ -227,8 +359,15 @@ COMMAND DESCRIPTIONS
     rmmod
         rmmod [-wfa] [MODULE]...
 
+    route
+        route [-ne] [{add|del} [-net|-host] TARGET [netmask MASK] [gw
+        GATEWAY] [metric N] [mss BYTES] [window BYTES] [reject] [IFACE]]
+
     sed sed [-i[SFX]] [-nrE] [-f FILE]... [-e CMD]... [FILE]... or: sed
         [-i[SFX]] [-nrE] CMD [FILE]...
+
+    setsid
+        setsid [-c] PROG ARGS
 
     sh  sh [-il] [-|+Cabefmnuvx] [-|+o OPT]... [-c 'SCRIPT' [ARG0 ARGS] |
         FILE ARGS | -s ARGS]
@@ -239,11 +378,17 @@ COMMAND DESCRIPTIONS
     sha256sum
         sha256sum [FILE]...
 
+    shuf
+        shuf [-n NUM] [-o FILE] [-z] [FILE | -e [ARG...] | -i L-H]
+
     sleep
         sleep N
 
     sort
         sort [-nru] [FILE]...
+
+    split
+        split [OPTIONS] [INPUT [PREFIX]]
 
     stat
         stat [-lt] FILE...
@@ -251,10 +396,21 @@ COMMAND DESCRIPTIONS
     strings
         strings [-fo] [-t o|d|x] [-n LEN] [FILE]...
 
+    sync
+        sync
+
     tac tac [FILE]...
 
     tail
         tail [OPTIONS] [FILE]...
+
+    tar tar x|t [-avokO] [-f TARFILE] [-C DIR] [FILE]...
+
+    telnet
+        telnet HOST [PORT]
+
+    time
+        time [-vpa] [-o FILE] PROG ARGS
 
     timeout
         timeout [-s SIG] [-k KILL_SECS] SECS PROG ARGS
@@ -274,18 +430,55 @@ COMMAND DESCRIPTIONS
     truncate
         truncate [-c] -s SIZE FILE...
 
+    tty tty
+
+    unexpand
+        unexpand [-fa][-t N] [FILE]...
+
     uniq
         uniq [-cduiz] [-f,s,w N] [FILE [OUTFILE]]
+
+    unlzma
+        unlzma [-cfk] [FILE]...
+
+    unxz
+        unxz [-cfk] [FILE]...
 
     uptime
         uptime
 
+    uudecode
+        uudecode [-o OUTFILE] [INFILE]
+
+    uuencode
+        uuencode [-m] [FILE] STORED_FILENAME
+
     vi  vi [-c CMD] [-R] [-H] [FILE]...
+
+    watch
+        watch [-n SEC] [-t] PROG ARGS
 
     wc  wc [-clwL] [FILE]...
 
+    wget
+        wget [-cqS] [-O FILE] [-o LOGFILE] [-Y on/off] [-P DIR] [-U AGENT]
+        URL...
+
+    whoami
+        whoami
+
     xargs
         xargs [OPTIONS] [PROG ARGS]
+
+    xz  xz -d [-cfk] [FILE]...
+
+    xzcat
+        xzcat [FILE]...
+
+    yes yes [STRING]
+
+    zcat
+        zcat [FILE]...
 
 LIBC NSS
     GNU Libc (glibc) uses the Name Service Switch (NSS) to configure the

@@ -857,7 +857,7 @@ static const char bbconfig_config[] ALIGN1 =
 "# CONFIG_FEATURE_NTP_AUTH is not set\n"
 "CONFIG_PING=y\n"
 "# CONFIG_PING6 is not set\n"
-"# CONFIG_FEATURE_FANCY_PING is not set\n"
+"CONFIG_FEATURE_FANCY_PING=y\n"
 "# CONFIG_PSCAN is not set\n"
 "CONFIG_ROUTE=y\n"
 "# CONFIG_SLATTACH is not set\n"

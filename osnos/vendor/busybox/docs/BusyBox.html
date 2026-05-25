@@ -60,19 +60,38 @@
 
 <p>Currently available applets include:</p>
 
-<pre><code>[, [[, ash, awk, base64, basename, bc, cat, cksum, cp, cpio, cut,
-date, dc, dd, df, diff, dirname, du, echo, env, envdir, envuidgid,
-expand, factor, false, find, fold, free, grep, head, hexdump, kill,
-killall, ls, lsattr, lsmod, lsof, lspci, lsscsi, lsusb, md5sum,
-mkdir, more, mv, patch, printf, ps, pwd, pwdx, readlink, realpath,
-rev, rm, rmdir, rmmod, sed, sh, sha1sum, sha256sum, sleep, sort,
-stat, strings, tac, tail, test, timeout, top, touch, tr, traceroute,
-tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
+<pre><code>[, [[, ar, arp, ash, awk, base64, basename, bc, bunzip2, bzcat,
+bzip2, cat, chgrp, chmod, chown, chroot, cksum, comm, cp, cpio, cut,
+date, dc, dd, df, diff, dirname, du, echo, ed, env, envdir,
+envuidgid, expand, factor, false, find, fold, free, fsync, ftpget,
+ftpput, grep, groups, gunzip, gzip, head, hexdump, hostname, id,
+ifconfig, install, ipcalc, kill, killall, less, ln, ls, lsattr,
+lsmod, lsof, lspci, lsscsi, lsusb, lzma, md5sum, microcom, mkdir,
+mkfifo, mknod, mktemp, more, mountpoint, mv, nc, netstat, nice, nl,
+nohup, nproc, nslookup, od, paste, patch, pgrep, pidof, ping, pkill,
+printf, ps, pwd, pwdx, readlink, realpath, rev, rm, rmdir, rmmod,
+route, sed, setsid, sh, sha1sum, sha256sum, shuf, sleep, sort,
+split, stat, strings, sync, tac, tail, tar, telnet, test, time,
+timeout, top, touch, tr, traceroute, tree, true, truncate, tty,
+unexpand, uniq, unlzma, unxz, uptime, uudecode, uuencode, vi, watch,
+wc, wget, whoami, xargs, xz, xzcat, yes, zcat</code></pre>
 
 <h1 id="COMMAND-DESCRIPTIONS">COMMAND DESCRIPTIONS</h1>
 
 <dl>
 
+<dt id="ar"><b>ar</b></dt>
+<dd>
+
+<p>ar x|p|t [-ov] ARCHIVE [FILE]...</p>
+
+</dd>
+<dt id="arp"><b>arp</b></dt>
+<dd>
+
+<p>arp [-vn] [-H HWTYPE] [-i IF] -a [HOSTNAME] [-v] [-i IF] -d HOSTNAME [pub] [-v] [-H HWTYPE] [-i IF] -s HOSTNAME HWADDR [temp] [-v] [-H HWTYPE] [-i IF] -s HOSTNAME HWADDR [netmask MASK] pub [-v] [-H HWTYPE] [-i IF] -Ds HOSTNAME IFACE [netmask MASK] pub</p>
+
+</dd>
 <dt id="ash"><b>ash</b></dt>
 <dd>
 
@@ -103,16 +122,64 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <p>bc [-sqlw] [FILE]...</p>
 
 </dd>
+<dt id="bunzip2"><b>bunzip2</b></dt>
+<dd>
+
+<p>bunzip2 [-cfk] [FILE]...</p>
+
+</dd>
+<dt id="bzcat"><b>bzcat</b></dt>
+<dd>
+
+<p>bzcat [FILE]...</p>
+
+</dd>
+<dt id="bzip2"><b>bzip2</b></dt>
+<dd>
+
+<p>bzip2 [-cfkdt123456789] [FILE]...</p>
+
+</dd>
 <dt id="cat"><b>cat</b></dt>
 <dd>
 
 <p>cat [FILE]...</p>
 
 </dd>
+<dt id="chgrp"><b>chgrp</b></dt>
+<dd>
+
+<p>chgrp [-Rh]... GROUP FILE...</p>
+
+</dd>
+<dt id="chmod"><b>chmod</b></dt>
+<dd>
+
+<p>chmod [-R] MODE[,MODE]... FILE...</p>
+
+</dd>
+<dt id="chown"><b>chown</b></dt>
+<dd>
+
+<p>chown [-Rh]... USER[:[GRP]] FILE...</p>
+
+</dd>
+<dt id="chroot"><b>chroot</b></dt>
+<dd>
+
+<p>chroot NEWROOT [PROG ARGS]</p>
+
+</dd>
 <dt id="cksum"><b>cksum</b></dt>
 <dd>
 
 <p>cksum FILE...</p>
+
+</dd>
+<dt id="comm"><b>comm</b></dt>
+<dd>
+
+<p>comm [-123] FILE1 FILE2</p>
 
 </dd>
 <dt id="cp"><b>cp</b></dt>
@@ -181,6 +248,12 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <p>echo [ARG]...</p>
 
 </dd>
+<dt id="ed"><b>ed</b></dt>
+<dd>
+
+<p>ed [-p PROMPT] [-s] [FILE]</p>
+
+</dd>
 <dt id="env"><b>env</b></dt>
 <dd>
 
@@ -229,10 +302,46 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <p>free</p>
 
 </dd>
+<dt id="fsync"><b>fsync</b></dt>
+<dd>
+
+<p>fsync [-d] FILE...</p>
+
+</dd>
+<dt id="ftpget"><b>ftpget</b></dt>
+<dd>
+
+<p>ftpget [OPTIONS] HOST [LOCAL_FILE] REMOTE_FILE</p>
+
+</dd>
+<dt id="ftpput"><b>ftpput</b></dt>
+<dd>
+
+<p>ftpput [OPTIONS] HOST [REMOTE_FILE] LOCAL_FILE</p>
+
+</dd>
 <dt id="grep"><b>grep</b></dt>
 <dd>
 
 <p>grep [-HhnlLoqvsrRiwFE] [-m N] { PATTERN | -e PATTERN... | -f FILE... } [FILE]...</p>
+
+</dd>
+<dt id="groups"><b>groups</b></dt>
+<dd>
+
+<p>groups [USER]</p>
+
+</dd>
+<dt id="gunzip"><b>gunzip</b></dt>
+<dd>
+
+<p>gunzip [-cfkt] [FILE]...</p>
+
+</dd>
+<dt id="gzip"><b>gzip</b></dt>
+<dd>
+
+<p>gzip [-cfkdt] [FILE]...</p>
 
 </dd>
 <dt id="head"><b>head</b></dt>
@@ -247,6 +356,36 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <p>hexdump [-bcdoxCv] [-e FMT] [-f FMT_FILE] [-n LEN] [-s OFS] [FILE]...</p>
 
 </dd>
+<dt id="hostname"><b>hostname</b></dt>
+<dd>
+
+<p>hostname [-sidf] [HOSTNAME | -F FILE]</p>
+
+</dd>
+<dt id="id"><b>id</b></dt>
+<dd>
+
+<p>id [-ugGnr] [USER]</p>
+
+</dd>
+<dt id="ifconfig"><b>ifconfig</b></dt>
+<dd>
+
+<p>ifconfig [-a] [IFACE] [ADDRESS]</p>
+
+</dd>
+<dt id="install"><b>install</b></dt>
+<dd>
+
+<p>install [-cdDsp] [-o USER] [-g GRP] [-m MODE] [-t DIR] [SOURCE]... DEST</p>
+
+</dd>
+<dt id="ipcalc"><b>ipcalc</b></dt>
+<dd>
+
+<p>ipcalc [-bnm] ADDRESS [NETMASK]</p>
+
+</dd>
 <dt id="kill"><b>kill</b></dt>
 <dd>
 
@@ -257,6 +396,18 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <dd>
 
 <p>killall [-lq] [-SIG] PROCESS_NAME...</p>
+
+</dd>
+<dt id="less"><b>less</b></dt>
+<dd>
+
+<p>less [-EFNh~] [FILE]...</p>
+
+</dd>
+<dt id="ln"><b>ln</b></dt>
+<dd>
+
+<p>ln [-sfnbtv] [-S SUF] TARGET... LINK|DIR</p>
 
 </dd>
 <dt id="ls"><b>ls</b></dt>
@@ -289,10 +440,22 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <p>lspci [-mk]</p>
 
 </dd>
+<dt id="lzma"><b>lzma</b></dt>
+<dd>
+
+<p>lzma -d [-cfk] [FILE]...</p>
+
+</dd>
 <dt id="md5sum"><b>md5sum</b></dt>
 <dd>
 
 <p>md5sum [FILE]...</p>
+
+</dd>
+<dt id="microcom"><b>microcom</b></dt>
+<dd>
+
+<p>microcom [-d DELAY_MS] [-t TIMEOUT_MS ] [-s SPEED] [-X] TTY</p>
 
 </dd>
 <dt id="mkdir"><b>mkdir</b></dt>
@@ -301,10 +464,34 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <p>mkdir [-m MODE] [-p] DIRECTORY...</p>
 
 </dd>
+<dt id="mkfifo"><b>mkfifo</b></dt>
+<dd>
+
+<p>mkfifo [-m MODE] NAME</p>
+
+</dd>
+<dt id="mknod"><b>mknod</b></dt>
+<dd>
+
+<p>mknod [-m MODE] NAME TYPE [MAJOR MINOR]</p>
+
+</dd>
+<dt id="mktemp"><b>mktemp</b></dt>
+<dd>
+
+<p>mktemp [-dt] [-p DIR] [TEMPLATE]</p>
+
+</dd>
 <dt id="more"><b>more</b></dt>
 <dd>
 
 <p>more [FILE]...</p>
+
+</dd>
+<dt id="mountpoint"><b>mountpoint</b></dt>
+<dd>
+
+<p>mountpoint [-q] { [-dn] DIR | -x DEVICE }</p>
 
 </dd>
 <dt id="mv"><b>mv</b></dt>
@@ -313,10 +500,88 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <p>mv [-finT] SOURCE DEST or: mv [-fin] SOURCE... { -t DIRECTORY | DIRECTORY }</p>
 
 </dd>
+<dt id="nc"><b>nc</b></dt>
+<dd>
+
+<p>nc [IPADDR PORT]</p>
+
+</dd>
+<dt id="netstat"><b>netstat</b></dt>
+<dd>
+
+<p>netstat [-ral] [-tuwx] [-enWp]</p>
+
+</dd>
+<dt id="nice"><b>nice</b></dt>
+<dd>
+
+<p>nice [-n ADJUST] [PROG ARGS]</p>
+
+</dd>
+<dt id="nl"><b>nl</b></dt>
+<dd>
+
+<p>nl [OPTIONS] [FILE]...</p>
+
+</dd>
+<dt id="nohup"><b>nohup</b></dt>
+<dd>
+
+<p>nohup PROG ARGS</p>
+
+</dd>
+<dt id="nproc"><b>nproc</b></dt>
+<dd>
+
+<p>nproc</p>
+
+</dd>
+<dt id="nslookup"><b>nslookup</b></dt>
+<dd>
+
+<p>nslookup HOST [DNS_SERVER]</p>
+
+</dd>
+<dt id="od"><b>od</b></dt>
+<dd>
+
+<p>od [-aBbcDdeFfHhIiLlOovXx] [FILE]</p>
+
+</dd>
+<dt id="paste"><b>paste</b></dt>
+<dd>
+
+<p>paste [-d LIST] [-s] [FILE]...</p>
+
+</dd>
 <dt id="patch"><b>patch</b></dt>
 <dd>
 
 <p>patch [-RNE] [-p N] [-i DIFF] [ORIGFILE [PATCHFILE]]</p>
+
+</dd>
+<dt id="pgrep"><b>pgrep</b></dt>
+<dd>
+
+<p>pgrep [-flanovx] [-s SID|-P PPID|PATTERN]</p>
+
+</dd>
+<dt id="pidof"><b>pidof</b></dt>
+<dd>
+
+<p>pidof [NAME]...</p>
+
+</dd>
+<dt id="ping"><b>ping</b></dt>
+<dd>
+
+<p>ping [OPTIONS] HOST</p>
+
+</dd>
+<dt id="pkill"><b>pkill</b></dt>
+<dd>
+
+<p>pkill [-l|-SIGNAL] [-xfvnoe] [-s SID|-P PPID|PATTERN]</p>
 
 </dd>
 <dt id="printf"><b>printf</b></dt>
@@ -379,10 +644,22 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <p>rmmod [-wfa] [MODULE]...</p>
 
 </dd>
+<dt id="route"><b>route</b></dt>
+<dd>
+
+<p>route [-ne] [{add|del} [-net|-host] TARGET [netmask MASK] [gw GATEWAY] [metric N] [mss BYTES] [window BYTES] [reject] [IFACE]]</p>
+
+</dd>
 <dt id="sed"><b>sed</b></dt>
 <dd>
 
 <p>sed [-i[SFX]] [-nrE] [-f FILE]... [-e CMD]... [FILE]... or: sed [-i[SFX]] [-nrE] CMD [FILE]...</p>
+
+</dd>
+<dt id="setsid"><b>setsid</b></dt>
+<dd>
+
+<p>setsid [-c] PROG ARGS</p>
 
 </dd>
 <dt id="sh"><b>sh</b></dt>
@@ -403,6 +680,12 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <p>sha256sum [FILE]...</p>
 
 </dd>
+<dt id="shuf"><b>shuf</b></dt>
+<dd>
+
+<p>shuf [-n NUM] [-o FILE] [-z] [FILE | -e [ARG...] | -i L-H]</p>
+
+</dd>
 <dt id="sleep"><b>sleep</b></dt>
 <dd>
 
@@ -413,6 +696,12 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <dd>
 
 <p>sort [-nru] [FILE]...</p>
+
+</dd>
+<dt id="split"><b>split</b></dt>
+<dd>
+
+<p>split [OPTIONS] [INPUT [PREFIX]]</p>
 
 </dd>
 <dt id="stat"><b>stat</b></dt>
@@ -427,6 +716,12 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <p>strings [-fo] [-t o|d|x] [-n LEN] [FILE]...</p>
 
 </dd>
+<dt id="sync"><b>sync</b></dt>
+<dd>
+
+<p>sync</p>
+
+</dd>
 <dt id="tac"><b>tac</b></dt>
 <dd>
 
@@ -437,6 +732,24 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <dd>
 
 <p>tail [OPTIONS] [FILE]...</p>
+
+</dd>
+<dt id="tar"><b>tar</b></dt>
+<dd>
+
+<p>tar x|t [-avokO] [-f TARFILE] [-C DIR] [FILE]...</p>
+
+</dd>
+<dt id="telnet"><b>telnet</b></dt>
+<dd>
+
+<p>telnet HOST [PORT]</p>
+
+</dd>
+<dt id="time"><b>time</b></dt>
+<dd>
+
+<p>time [-vpa] [-o FILE] PROG ARGS</p>
 
 </dd>
 <dt id="timeout"><b>timeout</b></dt>
@@ -475,10 +788,34 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <p>truncate [-c] -s SIZE FILE...</p>
 
 </dd>
+<dt id="tty"><b>tty</b></dt>
+<dd>
+
+<p>tty</p>
+
+</dd>
+<dt id="unexpand"><b>unexpand</b></dt>
+<dd>
+
+<p>unexpand [-fa][-t N] [FILE]...</p>
+
+</dd>
 <dt id="uniq"><b>uniq</b></dt>
 <dd>
 
 <p>uniq [-cduiz] [-f,s,w N] [FILE [OUTFILE]]</p>
+
+</dd>
+<dt id="unlzma"><b>unlzma</b></dt>
+<dd>
+
+<p>unlzma [-cfk] [FILE]...</p>
+
+</dd>
+<dt id="unxz"><b>unxz</b></dt>
+<dd>
+
+<p>unxz [-cfk] [FILE]...</p>
 
 </dd>
 <dt id="uptime"><b>uptime</b></dt>
@@ -487,10 +824,28 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <p>uptime</p>
 
 </dd>
+<dt id="uudecode"><b>uudecode</b></dt>
+<dd>
+
+<p>uudecode [-o OUTFILE] [INFILE]</p>
+
+</dd>
+<dt id="uuencode"><b>uuencode</b></dt>
+<dd>
+
+<p>uuencode [-m] [FILE] STORED_FILENAME</p>
+
+</dd>
 <dt id="vi"><b>vi</b></dt>
 <dd>
 
 <p>vi [-c CMD] [-R] [-H] [FILE]...</p>
+
+</dd>
+<dt id="watch"><b>watch</b></dt>
+<dd>
+
+<p>watch [-n SEC] [-t] PROG ARGS</p>
 
 </dd>
 <dt id="wc"><b>wc</b></dt>
@@ -499,10 +854,46 @@ tree, true, truncate, uniq, uptime, vi, wc, xargs</code></pre>
 <p>wc [-clwL] [FILE]...</p>
 
 </dd>
+<dt id="wget"><b>wget</b></dt>
+<dd>
+
+<p>wget [-cqS] [-O FILE] [-o LOGFILE] [-Y on/off] [-P DIR] [-U AGENT] URL...</p>
+
+</dd>
+<dt id="whoami"><b>whoami</b></dt>
+<dd>
+
+<p>whoami</p>
+
+</dd>
 <dt id="xargs"><b>xargs</b></dt>
 <dd>
 
 <p>xargs [OPTIONS] [PROG ARGS]</p>
+
+</dd>
+<dt id="xz"><b>xz</b></dt>
+<dd>
+
+<p>xz -d [-cfk] [FILE]...</p>
+
+</dd>
+<dt id="xzcat"><b>xzcat</b></dt>
+<dd>
+
+<p>xzcat [FILE]...</p>
+
+</dd>
+<dt id="yes"><b>yes</b></dt>
+<dd>
+
+<p>yes [STRING]</p>
+
+</dd>
+<dt id="zcat"><b>zcat</b></dt>
+<dd>
+
+<p>zcat [FILE]...</p>
 
 </dd>
 </dl>

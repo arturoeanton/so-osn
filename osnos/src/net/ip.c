@@ -3,6 +3,7 @@
 #include "arp.h"
 #include "eth.h"
 #include "icmp.h"
+#include "socket.h"
 #include "tcp.h"
 #include "udp.h"
 
@@ -125,6 +126,12 @@ void ip_handle(const uint8_t *data, size_t len) {
     default:
         break;
     }
+
+    /* Mirror el paquete IPv4 entero (header + payload) a cualquier raw
+     * socket cuyo protocol matchea. Linux entrega *con* IP header.
+     * Para ICMP, esto se hace además del icmp_handle estándar — ping
+     * sigue funcionando aunque haya otros listeners. */
+    sock_raw_deliver(protocol, data, (size_t)total_len, src_ip);
 }
 
 uint64_t ip_rx_packets(void) { return rx_packets; }

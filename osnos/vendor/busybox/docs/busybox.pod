@@ -81,18 +81,38 @@ been enabled, more detailed usage information will also be available.
 
 Currently available applets include:
 
-	[, [[, ash, awk, base64, basename, bc, cat, cksum, cp, cpio, cut,
-	date, dc, dd, df, diff, dirname, du, echo, env, envdir, envuidgid,
-	expand, factor, false, find, fold, free, grep, head, hexdump, kill,
-	killall, ls, lsattr, lsmod, lsof, lspci, lsscsi, lsusb, md5sum,
-	mkdir, more, mv, patch, printf, ps, pwd, pwdx, readlink, realpath,
-	rev, rm, rmdir, rmmod, sed, sh, sha1sum, sha256sum, sleep, sort,
-	stat, strings, tac, tail, test, timeout, top, touch, tr, traceroute,
-	tree, true, truncate, uniq, uptime, vi, wc, xargs
+	[, [[, ar, arp, ash, awk, base64, basename, bc, bunzip2, bzcat,
+	bzip2, cat, chgrp, chmod, chown, chroot, cksum, comm, cp, cpio, cut,
+	date, dc, dd, df, diff, dirname, du, echo, ed, env, envdir,
+	envuidgid, expand, factor, false, find, fold, free, fsync, ftpget,
+	ftpput, grep, groups, gunzip, gzip, head, hexdump, hostname, id,
+	ifconfig, install, ipcalc, kill, killall, less, ln, ls, lsattr,
+	lsmod, lsof, lspci, lsscsi, lsusb, lzma, md5sum, microcom, mkdir,
+	mkfifo, mknod, mktemp, more, mountpoint, mv, nc, netstat, nice, nl,
+	nohup, nproc, nslookup, od, paste, patch, pgrep, pidof, ping, pkill,
+	printf, ps, pwd, pwdx, readlink, realpath, rev, rm, rmdir, rmmod,
+	route, sed, setsid, sh, sha1sum, sha256sum, shuf, sleep, sort,
+	split, stat, strings, sync, tac, tail, tar, telnet, test, time,
+	timeout, top, touch, tr, traceroute, tree, true, truncate, tty,
+	unexpand, uniq, unlzma, unxz, uptime, uudecode, uuencode, vi, watch,
+	wc, wget, whoami, xargs, xz, xzcat, yes, zcat
 
 =head1 COMMAND DESCRIPTIONS
 
 =over 4
+
+=item B<ar>
+
+ar x|p|t [-ov] ARCHIVE [FILE]...
+
+=item B<arp>
+
+arp 
+[-vn]	[-H HWTYPE] [-i IF] -a [HOSTNAME]
+[-v]		    [-i IF] -d HOSTNAME [pub]
+[-v]	[-H HWTYPE] [-i IF] -s HOSTNAME HWADDR [temp]
+[-v]	[-H HWTYPE] [-i IF] -s HOSTNAME HWADDR [netmask MASK] pub
+[-v]	[-H HWTYPE] [-i IF] -Ds HOSTNAME IFACE [netmask MASK] pub
 
 =item B<ash>
 
@@ -114,13 +134,45 @@ basename FILE [SUFFIX] | -a FILE... | -s SUFFIX FILE...
 
 bc [-sqlw] [FILE]...
 
+=item B<bunzip2>
+
+bunzip2 [-cfk] [FILE]...
+
+=item B<bzcat>
+
+bzcat [FILE]...
+
+=item B<bzip2>
+
+bzip2 [-cfkdt123456789] [FILE]...
+
 =item B<cat>
 
 cat [FILE]...
 
+=item B<chgrp>
+
+chgrp [-Rh]... GROUP FILE...
+
+=item B<chmod>
+
+chmod [-R] MODE[,MODE]... FILE...
+
+=item B<chown>
+
+chown [-Rh]... USER[:[GRP]] FILE...
+
+=item B<chroot>
+
+chroot NEWROOT [PROG ARGS]
+
 =item B<cksum>
 
 cksum FILE...
+
+=item B<comm>
+
+comm [-123] FILE1 FILE2
 
 =item B<cp>
 
@@ -167,6 +219,10 @@ du [-aHLdclsxk] [FILE]...
 
 echo [ARG]...
 
+=item B<ed>
+
+ed [-p PROMPT] [-s] [FILE]
+
 =item B<env>
 
 env [-i0] [-u NAME]... [-] [NAME=VALUE]... [PROG ARGS]
@@ -199,9 +255,33 @@ fold [-bs] [-w WIDTH] [FILE]...
 
 free
 
+=item B<fsync>
+
+fsync [-d] FILE...
+
+=item B<ftpget>
+
+ftpget [OPTIONS] HOST [LOCAL_FILE] REMOTE_FILE
+
+=item B<ftpput>
+
+ftpput [OPTIONS] HOST [REMOTE_FILE] LOCAL_FILE
+
 =item B<grep>
 
 grep [-HhnlLoqvsrRiwFE] [-m N] { PATTERN | -e PATTERN... | -f FILE... } [FILE]...
+
+=item B<groups>
+
+groups [USER]
+
+=item B<gunzip>
+
+gunzip [-cfkt] [FILE]...
+
+=item B<gzip>
+
+gzip [-cfkdt] [FILE]...
 
 =item B<head>
 
@@ -211,6 +291,26 @@ head [OPTIONS] [FILE]...
 
 hexdump [-bcdoxCv] [-e FMT] [-f FMT_FILE] [-n LEN] [-s OFS] [FILE]...
 
+=item B<hostname>
+
+hostname [-sidf] [HOSTNAME | -F FILE]
+
+=item B<id>
+
+id [-ugGnr] [USER]
+
+=item B<ifconfig>
+
+ifconfig [-a] [IFACE] [ADDRESS]
+
+=item B<install>
+
+install [-cdDsp] [-o USER] [-g GRP] [-m MODE] [-t DIR] [SOURCE]... DEST
+
+=item B<ipcalc>
+
+ipcalc [-bnm] ADDRESS [NETMASK]
+
 =item B<kill>
 
 kill [-l] [-SIG] PID...
@@ -218,6 +318,14 @@ kill [-l] [-SIG] PID...
 =item B<killall>
 
 killall [-lq] [-SIG] PROCESS_NAME...
+
+=item B<less>
+
+less [-EFNh~] [FILE]...
+
+=item B<ln>
+
+ln [-sfnbtv] [-S SUF] TARGET... LINK|DIR
 
 =item B<ls>
 
@@ -239,26 +347,102 @@ lsof
 
 lspci [-mk]
 
+=item B<lzma>
+
+lzma -d [-cfk] [FILE]...
+
 =item B<md5sum>
 
 md5sum [FILE]...
+
+=item B<microcom>
+
+microcom [-d DELAY_MS] [-t TIMEOUT_MS ] [-s SPEED] [-X] TTY
 
 =item B<mkdir>
 
 mkdir [-m MODE] [-p] DIRECTORY...
 
+=item B<mkfifo>
+
+mkfifo [-m MODE] NAME
+
+=item B<mknod>
+
+mknod [-m MODE] NAME TYPE [MAJOR MINOR]
+
+=item B<mktemp>
+
+mktemp [-dt] [-p DIR] [TEMPLATE]
+
 =item B<more>
 
 more [FILE]...
+
+=item B<mountpoint>
+
+mountpoint [-q] { [-dn] DIR | -x DEVICE }
 
 =item B<mv>
 
 mv [-finT] SOURCE DEST
 or: mv [-fin] SOURCE... { -t DIRECTORY | DIRECTORY }
 
+=item B<nc>
+
+nc [IPADDR PORT]
+
+=item B<netstat>
+
+netstat [-ral] [-tuwx] [-enWp]
+
+=item B<nice>
+
+nice [-n ADJUST] [PROG ARGS]
+
+=item B<nl>
+
+nl [OPTIONS] [FILE]...
+
+=item B<nohup>
+
+nohup PROG ARGS
+
+=item B<nproc>
+
+nproc
+
+=item B<nslookup>
+
+nslookup HOST [DNS_SERVER]
+
+=item B<od>
+
+od [-aBbcDdeFfHhIiLlOovXx] [FILE]
+
+=item B<paste>
+
+paste [-d LIST] [-s] [FILE]...
+
 =item B<patch>
 
 patch [-RNE] [-p N] [-i DIFF] [ORIGFILE [PATCHFILE]]
+
+=item B<pgrep>
+
+pgrep [-flanovx] [-s SID|-P PPID|PATTERN]
+
+=item B<pidof>
+
+pidof [NAME]...
+
+=item B<ping>
+
+ping [OPTIONS] HOST
+
+=item B<pkill>
+
+pkill [-l|-SIGNAL] [-xfvnoe] [-s SID|-P PPID|PATTERN]
 
 =item B<printf>
 
@@ -300,10 +484,19 @@ rmdir [-p] DIRECTORY...
 
 rmmod [-wfa] [MODULE]...
 
+=item B<route>
+
+route [-ne] [{add|del} [-net|-host] TARGET [netmask MASK]
+	[gw GATEWAY] [metric N] [mss BYTES] [window BYTES] [reject] [IFACE]]
+
 =item B<sed>
 
 sed [-i[SFX]] [-nrE] [-f FILE]... [-e CMD]... [FILE]...
 or: sed [-i[SFX]] [-nrE] CMD [FILE]...
+
+=item B<setsid>
+
+setsid [-c] PROG ARGS
 
 =item B<sh>
 
@@ -317,6 +510,10 @@ sha1sum [FILE]...
 
 sha256sum [FILE]...
 
+=item B<shuf>
+
+shuf [-n NUM] [-o FILE] [-z] [FILE | -e [ARG...] | -i L-H]
+
 =item B<sleep>
 
 sleep N
@@ -324,6 +521,10 @@ sleep N
 =item B<sort>
 
 sort [-nru] [FILE]...
+
+=item B<split>
+
+split [OPTIONS] [INPUT [PREFIX]]
 
 =item B<stat>
 
@@ -333,6 +534,10 @@ stat [-lt] FILE...
 
 strings [-fo] [-t o|d|x] [-n LEN] [FILE]...
 
+=item B<sync>
+
+sync
+
 =item B<tac>
 
 tac [FILE]...
@@ -340,6 +545,18 @@ tac [FILE]...
 =item B<tail>
 
 tail [OPTIONS] [FILE]...
+
+=item B<tar>
+
+tar x|t [-avokO] [-f TARFILE] [-C DIR] [FILE]...
+
+=item B<telnet>
+
+telnet HOST [PORT]
+
+=item B<time>
+
+time [-vpa] [-o FILE] PROG ARGS
 
 =item B<timeout>
 
@@ -367,25 +584,77 @@ traceroute [-Flnrv] [-f 1ST_TTL] [-m MAXTTL] [-q PROBES] [-p PORT]
 
 truncate [-c] -s SIZE FILE...
 
+=item B<tty>
+
+tty
+
+=item B<unexpand>
+
+unexpand [-fa][-t N] [FILE]...
+
 =item B<uniq>
 
 uniq [-cduiz] [-f,s,w N] [FILE [OUTFILE]]
+
+=item B<unlzma>
+
+unlzma [-cfk] [FILE]...
+
+=item B<unxz>
+
+unxz [-cfk] [FILE]...
 
 =item B<uptime>
 
 uptime
 
+=item B<uudecode>
+
+uudecode [-o OUTFILE] [INFILE]
+
+=item B<uuencode>
+
+uuencode [-m] [FILE] STORED_FILENAME
+
 =item B<vi>
 
 vi [-c CMD] [-R] [-H] [FILE]...
+
+=item B<watch>
+
+watch [-n SEC] [-t] PROG ARGS
 
 =item B<wc>
 
 wc [-clwL] [FILE]...
 
+=item B<wget>
+
+wget [-cqS] [-O FILE] [-o LOGFILE] [-Y on/off] [-P DIR] [-U AGENT] URL...
+
+=item B<whoami>
+
+whoami
+
 =item B<xargs>
 
 xargs [OPTIONS] [PROG ARGS]
+
+=item B<xz>
+
+xz -d [-cfk] [FILE]...
+
+=item B<xzcat>
+
+xzcat [FILE]...
+
+=item B<yes>
+
+yes [STRING]
+
+=item B<zcat>
+
+zcat [FILE]...
 
 =back
 

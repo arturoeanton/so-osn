@@ -43,6 +43,11 @@ Limine, corre en QEMU, y trae:
 - **Ox mini-X window system** (FASE 12.0): server + 5 apps GUI.
 - **🎉 lighttpd 1.4.76** (FASE 14.5) — webserver real sirviendo
   HTTP/1.1 sobre `/home`; `curl http://localhost:8080/` → 200 OK.
+- **Networking real** (FASE 14-misc-3): `nslookup google.com → 142.251.x.x`
+  (DNS UDP resolver vía musl `getaddrinfo`) y `ping 8.8.8.8 → 64 bytes
+  ttl=255` (SOCK_RAW + ICMP echo). Nuevas syscalls: `recvmsg`/`sendmsg`,
+  `getsockname`/`getpeername`/`getsockopt` stubs. `SOCK_CLOEXEC` +
+  `SOCK_NONBLOCK` bundled flags ahora soportados.
 - **POSIX IPC moderno** (FASE 14.2-14.4): AF_UNIX SOCK_STREAM,
   `shm_open` + `mmap(MAP_SHARED, fd)` con shared memory cross-fork,
   dynamic linking via `ld-musl.so` (apps `.so`-linked corren).
@@ -125,10 +130,16 @@ microkernel escrito desde cero.
 |---|---|---|
 | RTL8139 driver + ARP + IPv4 + ICMP + UDP + TCP | ✅ | PCI bus scan |
 | Sockets POSIX (socket/bind/listen/accept/connect/send/recv/select) | ✅ | read/write directo soportado (FASE 14.5) |
-| DNS resolver + getaddrinfo (vía slirp 10.0.2.3) | ✅ | |
+| **`SOCK_CLOEXEC` + `SOCK_NONBLOCK` flag bundle en `socket(2)` type arg** | ✅ | musl `res_msend` pasa `SOCK_DGRAM\|SOCK_CLOEXEC\|SOCK_NONBLOCK` (=0x80802) — antes rejectaba con EAFNOSUPPORT y rompía `getaddrinfo` (FASE 14.6) |
+| **`recvmsg(2)` / `sendmsg(2)`** (Linux 46/47) — single-iovec | ✅ | musl resolver usa recvmsg; sin esto nslookup nunca matcheaba (FASE 14.6) |
+| **`getsockname` / `getpeername` / `getsockopt` stubs** | ✅ | Devuelven OK + zero — suficiente para musl post-connect (FASE 14.6) |
+| **`sys_recvfrom` UDP path preserva `src_ip/src_port`** | ✅ | Antes routeaba via `sock_recv` que descartaba el peer → musl resolver rechazaba el reply (FASE 14.6) |
+| **`SOCK_RAW` + ICMP echo (ping)** | ✅ | `socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)`; ip_handle mirror al raw socket pool; `ping 8.8.8.8 → "64 bytes from 8.8.8.8 ttl=255"` (FASE 14.6) |
+| DNS resolver + getaddrinfo (vía slirp 10.0.2.3) | ✅ | `nslookup google.com → 142.251.128.46` (FASE 14.6) |
 | `/bin/httpd` sirviendo FAT16 sobre HTTP | ✅ | hostfwd 8080 |
 | **`/bin/lighttpd` 1.4.76 webserver real** | ✅ | poll-based, 10 builtin mods, sirve `/home` (FASE 14.5) |
-| Demos (`/bin/tcpclient`, `udptest`, `echotcp`, `selectserver`) | ✅ | |
+| **`SIOCGIFCONF` + 7 ioctls SIOC*** | ✅ | `ifconfig` muestra eth0 (10.0.2.15 + MAC 52:54:00:12:34:56) + lo |
+| Demos (`/bin/tcpclient`, `udptest`, `echotcp`, `selectserver`, `udp_send`, `udp_connect`) | ✅ | |
 
 ### POSIX IPC + dynamic linking (FASE 14)
 | Subsistema | Estado | Notas |
@@ -387,8 +398,47 @@ Sesión "de un saque": 8 items resueltos sin regresiones. `alltest` sigue **21/2
 - ✅ **`/dev/stderr` + `/dev/stdin`/`/dev/stdout`/`/dev/console`**: 4 entradas más en `devfs`. Backend delega a `tty_dev_read/write` (mismo path que `/dev/tty`). Apps Linux que abren `/dev/stderr` para logs ahora funcionan.
 - ✅ **tmpfs en `/tmp`**: `vfs_mount("/tmp", &ramfs_vfs_ops, 0)` en bootstrap. Reusa el backend ramfs pero longest-prefix dispatch envía `/tmp/*` aquí. Verificado: `echo "test" > /tmp/test.txt && cat /tmp/test.txt` → "test".
 
+#### FASE 14-misc-3 — Networking real (DNS resuelve, ping responde) — ✅ **CERRADA**
+
+Punto de partida: `nslookup google.com 10.0.2.3` decía `can't resolve` y `ping <ip>` no existía como ELF runnable. Después de esta fase: `nslookup google.com → 142.251.x.x` y `ping 8.8.8.8 → 64 bytes from 8.8.8.8 ttl=255 time=30ms`. 21/21 alltest siguen PASS.
+
+Tres bugs encadenados rompían el resolver de musl, más SOCK_RAW que no existía:
+
+- ✅ **`sys_socket` acepta `SOCK_CLOEXEC` + `SOCK_NONBLOCK` bundled en `type`**: Linux x86_64 permite `socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)` empaquetando flags (0x80000 + 0x800) en el segundo arg. musl `res_msend.c:123` usa este patrón. Nuestro `sys_socket` rejectaba con `EAFNOSUPPORT` porque `type != SOCK_DGRAM`. Fix (`src/micro/syscall.c`): `type = type_raw & 0xff`; flags se aplican post-creación al fd (`OSNOS_FD_CLOEXEC`, `f->flags |= 0x800`). Sin este fix, `getaddrinfo` no podía abrir el socket UDP y todo el resolver moría con EAFNOSUPPORT.
+- ✅ **`sys_recvfrom` UDP path preserva `src_ip`/`src_port`**: la implementación viejo llamaba `sock_recv()` primero, que para UDP delega a `sock_recvfrom` pero **descarta** el peer en variables locales, y después seteaba `*alenp=0`. Resultado: musl recibía el datagram con `from = 0.0.0.0:0` y rechazaba el reply porque no matcheaba el nameserver configurado en `/etc/resolv.conf` (`res_msend.c:216-217`: `for (j=0; j<nns && memcmp(ns+j, &sa, sl); j++); if (j==nns) continue;`). Fix: añadir `sock_type(int sd)` accessor en `socket.{c,h}`, y en `sys_recvfrom` ramificar **antes** del path stream — para SOCK_DGRAM/SOCK_RAW ir directo a `sock_recvfrom` y populate la sockaddr_in.
+- ✅ **`recvmsg(2)` + `sendmsg(2)` implementados** (Linux syscalls 46/47): musl `res_msend` usa `recvmsg` (no `recvfrom`) para leer replies DNS. Sin la syscall, returnaba ENOSYS y el resolver hacía giveup silencioso. Implementación single-iovec (suficiente para resolver/wget): parse `struct msghdr` + `struct iovec[1]`, copy_from_user del payload, delegate a `sys_sendto`/`sock_recvfrom`, copy_to_user del `msg_name` + nuevo `msg_namelen`. Stubs adicionales: `getsockname`/`getpeername` (retornan addrlen=0), `getsockopt` (retorna 0 byte para SO_ERROR — el caso post-connect común). Defines nuevos: `SYS_SENDMSG=46 SYS_RECVMSG=47 SYS_GETSOCKNAME=51 SYS_GETPEERNAME=52 SYS_GETSOCKOPT=55` en `syscall.h`.
+- ✅ **`SOCK_RAW` + ICMP echo para `ping`**: nueva familia de socket. Cambios:
+  - `socket.h`: `OSNOS_SOCK_RAW=3` (Linux-compat); `sock_create_raw(int proto)`, `sock_raw_sendto`, `sock_raw_deliver`.
+  - `socket.c`: campo `int protocol` en `sock_t`. `sock_create_raw` similar a sock_create pero type=RAW + protocol stashed. `sock_raw_sendto` llama directo a `ip_send(dst_ip, s->protocol, payload, len)` — kernel arma IP header, user-mode arma ICMP. `sock_raw_deliver(proto, ip_packet, len, src_ip)` itera el pool buscando matches; entrega el **paquete IPv4 entero** (header + payload, Linux behavior). `sock_readable` ahora trata RAW como DGRAM (rx_count > 0). `sock_recvfrom` permite `local_port == 0` para RAW.
+  - `ip.c`: después del dispatch normal (icmp_handle / udp_handle / tcp_handle), llama a `sock_raw_deliver(protocol, data, total_len, src_ip)`. Esto da el mirror al raw socket pool sin romper el path ICMP echo-reply estándar que sigue contestando los pings entrantes.
+  - `syscall.c` `sys_socket`: acepta `OSNOS_SOCK_RAW` → `sock_create_raw(protocol)`. `sys_sendto` para RAW unpacka sockaddr_in y llama `sock_raw_sendto`. `sys_recvfrom`/`sys_recvmsg` ya routean RAW via `sock_type()`.
+- ✅ **BusyBox `FEATURE_FANCY_PING=y`** en `.config`: sin esto, ping solo soporta single-shot (sin `-c N`, sin RTT en ms, sin pretty-print). Rebuild.
+- ✅ **Test ELFs diagnósticos**: `elfs/tests/udp_send.c` (sendto/recvfrom DNS query directo) + `elfs/tests/udp_connect.c` (mimics nslookup: socket+bind+connect+fcntl O_NONBLOCK+write+read). Útiles para aislar bugs entre kernel UDP path y musl resolver.
+- ✅ **Verificado end-to-end**:
+  ```
+  osnos:/# nslookup google.com 10.0.2.3
+  Server:    10.0.2.3
+  Name:      google.com
+  Address 1: 142.251.129.174 gru14s32-in-f14.1e100.net
+  osnos:/# ping 8.8.8.8
+  PING 8.8.8.8 (8.8.8.8): 56 data bytes
+  64 bytes from 8.8.8.8: seq=0 ttl=255 time=20.000 ms
+  osnos:/# udp_send                 # diag: kernel UDP roundtrip
+  sent 28 bytes
+  got 44 bytes from 10.0.2.3:53
+  ```
+- ✅ alltest 21/21 PASS sin regresiones.
+
+**Limitaciones conocidas**:
+- `ping -c N` multi-packet a veces se queda en seq=0: la pacing entre pings (BusyBox usa `setitimer` + SIGALRM) probablemente no respeta nuestro intervalo. Single-shot funciona perfecto; multi-packet necesita revisar el path `setitimer`.
+- `wget http://example.com/` resuelve DNS pero falla en TCP connect con "Operation in progress" — non-blocking `connect()` returnando EINPROGRESS sin completar después. Out-of-scope para esta fase.
+- IPv6 sin soporte (musl pide AAAA, devuelve `Address 2: (null)` benigno).
+- `sendmsg`/`recvmsg` solo single-iovec; multi-iovec no implementado.
+
 ### FASE 14-pendings — Quality of life remaining
 - ❌ Chip-8 emulator (último item pendiente del roadmap original gráfico)
+- ❌ `setitimer` real (hoy es stub) — bloquea `ping -c N` y muchos timer-based loops.
+- ❌ Non-blocking `connect()` real con `EINPROGRESS` + completion via poll — bloquea wget/curl HTTP outbound.
 
 ### FASE 15 — Drivers a ring 3 (item pendiente del FASE 11 original)
 - ❌ IRQ delegation por IPC desde kernel-side handlers
