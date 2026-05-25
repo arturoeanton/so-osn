@@ -1,1 +1,1 @@
-cmd_networking/lib.a := rm -f networking/lib.a; ar  rcs networking/lib.a networking/traceroute.o
+cmd_networking/lib.a := rm -f networking/lib.a; ar  rcs networking/lib.a networking/arp.o networking/ftpgetput.o networking/hostname.o networking/ifconfig.o networking/interface.o networking/ipcalc.o networking/nc.o networking/netstat.o networking/nslookup.o networking/parse_pasv_epsv.o networking/ping.o networking/route.o networking/telnet.o networking/tftp.o networking/traceroute.o networking/wget.o

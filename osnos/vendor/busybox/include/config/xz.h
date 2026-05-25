@@ -1,1 +1,1 @@
-#undef CONFIG_XZ
+#define CONFIG_XZ 1

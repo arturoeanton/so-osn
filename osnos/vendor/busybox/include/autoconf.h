@@ -2,7 +2,7 @@
  * Automatically generated C config: don't edit
  * Busybox version: 1.36.1
  */
-#define AUTOCONF_TIMESTAMP "2026-05-24 21:49:19 -03"
+#define AUTOCONF_TIMESTAMP "2026-05-24 23:11:16 -03"
 
 #define CONFIG_HAVE_DOT_CONFIG 1
 #define ENABLE_HAVE_DOT_CONFIG 1
@@ -592,10 +592,14 @@
 #define ENABLE_FEATURE_SEAMLESS_Z 0
 #define IF_FEATURE_SEAMLESS_Z(...)
 #define IF_NOT_FEATURE_SEAMLESS_Z(...) __VA_ARGS__
-#undef CONFIG_AR
-#define ENABLE_AR 0
-#define IF_AR(...)
-#define IF_NOT_AR(...) __VA_ARGS__
+#define CONFIG_AR 1
+#define ENABLE_AR 1
+#ifdef MAKE_SUID
+# define IF_AR(...) __VA_ARGS__ "CONFIG_AR"
+#else
+# define IF_AR(...) __VA_ARGS__
+#endif
+#define IF_NOT_AR(...)
 #undef CONFIG_FEATURE_AR_LONG_FILENAMES
 #define ENABLE_FEATURE_AR_LONG_FILENAMES 0
 #define IF_FEATURE_AR_LONG_FILENAMES(...)
@@ -608,54 +612,94 @@
 #define ENABLE_UNCOMPRESS 0
 #define IF_UNCOMPRESS(...)
 #define IF_NOT_UNCOMPRESS(...) __VA_ARGS__
-#undef CONFIG_GUNZIP
-#define ENABLE_GUNZIP 0
-#define IF_GUNZIP(...)
-#define IF_NOT_GUNZIP(...) __VA_ARGS__
-#undef CONFIG_ZCAT
-#define ENABLE_ZCAT 0
-#define IF_ZCAT(...)
-#define IF_NOT_ZCAT(...) __VA_ARGS__
+#define CONFIG_GUNZIP 1
+#define ENABLE_GUNZIP 1
+#ifdef MAKE_SUID
+# define IF_GUNZIP(...) __VA_ARGS__ "CONFIG_GUNZIP"
+#else
+# define IF_GUNZIP(...) __VA_ARGS__
+#endif
+#define IF_NOT_GUNZIP(...)
+#define CONFIG_ZCAT 1
+#define ENABLE_ZCAT 1
+#ifdef MAKE_SUID
+# define IF_ZCAT(...) __VA_ARGS__ "CONFIG_ZCAT"
+#else
+# define IF_ZCAT(...) __VA_ARGS__
+#endif
+#define IF_NOT_ZCAT(...)
 #undef CONFIG_FEATURE_GUNZIP_LONG_OPTIONS
 #define ENABLE_FEATURE_GUNZIP_LONG_OPTIONS 0
 #define IF_FEATURE_GUNZIP_LONG_OPTIONS(...)
 #define IF_NOT_FEATURE_GUNZIP_LONG_OPTIONS(...) __VA_ARGS__
-#undef CONFIG_BUNZIP2
-#define ENABLE_BUNZIP2 0
-#define IF_BUNZIP2(...)
-#define IF_NOT_BUNZIP2(...) __VA_ARGS__
-#undef CONFIG_BZCAT
-#define ENABLE_BZCAT 0
-#define IF_BZCAT(...)
-#define IF_NOT_BZCAT(...) __VA_ARGS__
-#undef CONFIG_UNLZMA
-#define ENABLE_UNLZMA 0
-#define IF_UNLZMA(...)
-#define IF_NOT_UNLZMA(...) __VA_ARGS__
+#define CONFIG_BUNZIP2 1
+#define ENABLE_BUNZIP2 1
+#ifdef MAKE_SUID
+# define IF_BUNZIP2(...) __VA_ARGS__ "CONFIG_BUNZIP2"
+#else
+# define IF_BUNZIP2(...) __VA_ARGS__
+#endif
+#define IF_NOT_BUNZIP2(...)
+#define CONFIG_BZCAT 1
+#define ENABLE_BZCAT 1
+#ifdef MAKE_SUID
+# define IF_BZCAT(...) __VA_ARGS__ "CONFIG_BZCAT"
+#else
+# define IF_BZCAT(...) __VA_ARGS__
+#endif
+#define IF_NOT_BZCAT(...)
+#define CONFIG_UNLZMA 1
+#define ENABLE_UNLZMA 1
+#ifdef MAKE_SUID
+# define IF_UNLZMA(...) __VA_ARGS__ "CONFIG_UNLZMA"
+#else
+# define IF_UNLZMA(...) __VA_ARGS__
+#endif
+#define IF_NOT_UNLZMA(...)
 #undef CONFIG_LZCAT
 #define ENABLE_LZCAT 0
 #define IF_LZCAT(...)
 #define IF_NOT_LZCAT(...) __VA_ARGS__
-#undef CONFIG_LZMA
-#define ENABLE_LZMA 0
-#define IF_LZMA(...)
-#define IF_NOT_LZMA(...) __VA_ARGS__
-#undef CONFIG_UNXZ
-#define ENABLE_UNXZ 0
-#define IF_UNXZ(...)
-#define IF_NOT_UNXZ(...) __VA_ARGS__
-#undef CONFIG_XZCAT
-#define ENABLE_XZCAT 0
-#define IF_XZCAT(...)
-#define IF_NOT_XZCAT(...) __VA_ARGS__
-#undef CONFIG_XZ
-#define ENABLE_XZ 0
-#define IF_XZ(...)
-#define IF_NOT_XZ(...) __VA_ARGS__
-#undef CONFIG_BZIP2
-#define ENABLE_BZIP2 0
-#define IF_BZIP2(...)
-#define IF_NOT_BZIP2(...) __VA_ARGS__
+#define CONFIG_LZMA 1
+#define ENABLE_LZMA 1
+#ifdef MAKE_SUID
+# define IF_LZMA(...) __VA_ARGS__ "CONFIG_LZMA"
+#else
+# define IF_LZMA(...) __VA_ARGS__
+#endif
+#define IF_NOT_LZMA(...)
+#define CONFIG_UNXZ 1
+#define ENABLE_UNXZ 1
+#ifdef MAKE_SUID
+# define IF_UNXZ(...) __VA_ARGS__ "CONFIG_UNXZ"
+#else
+# define IF_UNXZ(...) __VA_ARGS__
+#endif
+#define IF_NOT_UNXZ(...)
+#define CONFIG_XZCAT 1
+#define ENABLE_XZCAT 1
+#ifdef MAKE_SUID
+# define IF_XZCAT(...) __VA_ARGS__ "CONFIG_XZCAT"
+#else
+# define IF_XZCAT(...) __VA_ARGS__
+#endif
+#define IF_NOT_XZCAT(...)
+#define CONFIG_XZ 1
+#define ENABLE_XZ 1
+#ifdef MAKE_SUID
+# define IF_XZ(...) __VA_ARGS__ "CONFIG_XZ"
+#else
+# define IF_XZ(...) __VA_ARGS__
+#endif
+#define IF_NOT_XZ(...)
+#define CONFIG_BZIP2 1
+#define ENABLE_BZIP2 1
+#ifdef MAKE_SUID
+# define IF_BZIP2(...) __VA_ARGS__ "CONFIG_BZIP2"
+#else
+# define IF_BZIP2(...) __VA_ARGS__
+#endif
+#define IF_NOT_BZIP2(...)
 #define CONFIG_BZIP2_SMALL 0
 #define ENABLE_BZIP2_SMALL 1
 #ifdef MAKE_SUID
@@ -664,10 +708,14 @@
 # define IF_BZIP2_SMALL(...) __VA_ARGS__
 #endif
 #define IF_NOT_BZIP2_SMALL(...)
-#undef CONFIG_FEATURE_BZIP2_DECOMPRESS
-#define ENABLE_FEATURE_BZIP2_DECOMPRESS 0
-#define IF_FEATURE_BZIP2_DECOMPRESS(...)
-#define IF_NOT_FEATURE_BZIP2_DECOMPRESS(...) __VA_ARGS__
+#define CONFIG_FEATURE_BZIP2_DECOMPRESS 1
+#define ENABLE_FEATURE_BZIP2_DECOMPRESS 1
+#ifdef MAKE_SUID
+# define IF_FEATURE_BZIP2_DECOMPRESS(...) __VA_ARGS__ "CONFIG_FEATURE_BZIP2_DECOMPRESS"
+#else
+# define IF_FEATURE_BZIP2_DECOMPRESS(...) __VA_ARGS__
+#endif
+#define IF_NOT_FEATURE_BZIP2_DECOMPRESS(...)
 #define CONFIG_CPIO 1
 #define ENABLE_CPIO 1
 #ifdef MAKE_SUID
@@ -700,10 +748,14 @@
 #define ENABLE_DPKG_DEB 0
 #define IF_DPKG_DEB(...)
 #define IF_NOT_DPKG_DEB(...) __VA_ARGS__
-#undef CONFIG_GZIP
-#define ENABLE_GZIP 0
-#define IF_GZIP(...)
-#define IF_NOT_GZIP(...) __VA_ARGS__
+#define CONFIG_GZIP 1
+#define ENABLE_GZIP 1
+#ifdef MAKE_SUID
+# define IF_GZIP(...) __VA_ARGS__ "CONFIG_GZIP"
+#else
+# define IF_GZIP(...) __VA_ARGS__
+#endif
+#define IF_NOT_GZIP(...)
 #undef CONFIG_FEATURE_GZIP_LONG_OPTIONS
 #define ENABLE_FEATURE_GZIP_LONG_OPTIONS 0
 #define IF_FEATURE_GZIP_LONG_OPTIONS(...)
@@ -720,10 +772,14 @@
 #define ENABLE_FEATURE_GZIP_LEVELS 0
 #define IF_FEATURE_GZIP_LEVELS(...)
 #define IF_NOT_FEATURE_GZIP_LEVELS(...) __VA_ARGS__
-#undef CONFIG_FEATURE_GZIP_DECOMPRESS
-#define ENABLE_FEATURE_GZIP_DECOMPRESS 0
-#define IF_FEATURE_GZIP_DECOMPRESS(...)
-#define IF_NOT_FEATURE_GZIP_DECOMPRESS(...) __VA_ARGS__
+#define CONFIG_FEATURE_GZIP_DECOMPRESS 1
+#define ENABLE_FEATURE_GZIP_DECOMPRESS 1
+#ifdef MAKE_SUID
+# define IF_FEATURE_GZIP_DECOMPRESS(...) __VA_ARGS__ "CONFIG_FEATURE_GZIP_DECOMPRESS"
+#else
+# define IF_FEATURE_GZIP_DECOMPRESS(...) __VA_ARGS__
+#endif
+#define IF_NOT_FEATURE_GZIP_DECOMPRESS(...)
 #undef CONFIG_LZOP
 #define ENABLE_LZOP 0
 #define IF_LZOP(...)
@@ -748,10 +804,14 @@
 #define ENABLE_RPM2CPIO 0
 #define IF_RPM2CPIO(...)
 #define IF_NOT_RPM2CPIO(...) __VA_ARGS__
-#undef CONFIG_TAR
-#define ENABLE_TAR 0
-#define IF_TAR(...)
-#define IF_NOT_TAR(...) __VA_ARGS__
+#define CONFIG_TAR 1
+#define ENABLE_TAR 1
+#ifdef MAKE_SUID
+# define IF_TAR(...) __VA_ARGS__ "CONFIG_TAR"
+#else
+# define IF_TAR(...) __VA_ARGS__
+#endif
+#define IF_NOT_TAR(...)
 #undef CONFIG_FEATURE_TAR_LONG_OPTIONS
 #define ENABLE_FEATURE_TAR_LONG_OPTIONS 0
 #define IF_FEATURE_TAR_LONG_OPTIONS(...)
@@ -876,26 +936,42 @@
 #define ENABLE_FEATURE_CATV 0
 #define IF_FEATURE_CATV(...)
 #define IF_NOT_FEATURE_CATV(...) __VA_ARGS__
-#undef CONFIG_CHGRP
-#define ENABLE_CHGRP 0
-#define IF_CHGRP(...)
-#define IF_NOT_CHGRP(...) __VA_ARGS__
-#undef CONFIG_CHMOD
-#define ENABLE_CHMOD 0
-#define IF_CHMOD(...)
-#define IF_NOT_CHMOD(...) __VA_ARGS__
-#undef CONFIG_CHOWN
-#define ENABLE_CHOWN 0
-#define IF_CHOWN(...)
-#define IF_NOT_CHOWN(...) __VA_ARGS__
+#define CONFIG_CHGRP 1
+#define ENABLE_CHGRP 1
+#ifdef MAKE_SUID
+# define IF_CHGRP(...) __VA_ARGS__ "CONFIG_CHGRP"
+#else
+# define IF_CHGRP(...) __VA_ARGS__
+#endif
+#define IF_NOT_CHGRP(...)
+#define CONFIG_CHMOD 1
+#define ENABLE_CHMOD 1
+#ifdef MAKE_SUID
+# define IF_CHMOD(...) __VA_ARGS__ "CONFIG_CHMOD"
+#else
+# define IF_CHMOD(...) __VA_ARGS__
+#endif
+#define IF_NOT_CHMOD(...)
+#define CONFIG_CHOWN 1
+#define ENABLE_CHOWN 1
+#ifdef MAKE_SUID
+# define IF_CHOWN(...) __VA_ARGS__ "CONFIG_CHOWN"
+#else
+# define IF_CHOWN(...) __VA_ARGS__
+#endif
+#define IF_NOT_CHOWN(...)
 #undef CONFIG_FEATURE_CHOWN_LONG_OPTIONS
 #define ENABLE_FEATURE_CHOWN_LONG_OPTIONS 0
 #define IF_FEATURE_CHOWN_LONG_OPTIONS(...)
 #define IF_NOT_FEATURE_CHOWN_LONG_OPTIONS(...) __VA_ARGS__
-#undef CONFIG_CHROOT
-#define ENABLE_CHROOT 0
-#define IF_CHROOT(...)
-#define IF_NOT_CHROOT(...) __VA_ARGS__
+#define CONFIG_CHROOT 1
+#define ENABLE_CHROOT 1
+#ifdef MAKE_SUID
+# define IF_CHROOT(...) __VA_ARGS__ "CONFIG_CHROOT"
+#else
+# define IF_CHROOT(...) __VA_ARGS__
+#endif
+#define IF_NOT_CHROOT(...)
 #define CONFIG_CKSUM 1
 #define ENABLE_CKSUM 1
 #ifdef MAKE_SUID
@@ -908,10 +984,14 @@
 #define ENABLE_CRC32 0
 #define IF_CRC32(...)
 #define IF_NOT_CRC32(...) __VA_ARGS__
-#undef CONFIG_COMM
-#define ENABLE_COMM 0
-#define IF_COMM(...)
-#define IF_NOT_COMM(...) __VA_ARGS__
+#define CONFIG_COMM 1
+#define ENABLE_COMM 1
+#ifdef MAKE_SUID
+# define IF_COMM(...) __VA_ARGS__ "CONFIG_COMM"
+#else
+# define IF_COMM(...) __VA_ARGS__
+#endif
+#define IF_NOT_COMM(...)
 #define CONFIG_CP 1
 #define ENABLE_CP 1
 #ifdef MAKE_SUID
@@ -1056,10 +1136,14 @@
 # define IF_EXPAND(...) __VA_ARGS__
 #endif
 #define IF_NOT_EXPAND(...)
-#undef CONFIG_UNEXPAND
-#define ENABLE_UNEXPAND 0
-#define IF_UNEXPAND(...)
-#define IF_NOT_UNEXPAND(...) __VA_ARGS__
+#define CONFIG_UNEXPAND 1
+#define ENABLE_UNEXPAND 1
+#ifdef MAKE_SUID
+# define IF_UNEXPAND(...) __VA_ARGS__ "CONFIG_UNEXPAND"
+#else
+# define IF_UNEXPAND(...) __VA_ARGS__
+#endif
+#define IF_NOT_UNEXPAND(...)
 #undef CONFIG_EXPR
 #define ENABLE_EXPR 0
 #define IF_EXPR(...)
@@ -1108,18 +1192,30 @@
 #define ENABLE_HOSTID 0
 #define IF_HOSTID(...)
 #define IF_NOT_HOSTID(...) __VA_ARGS__
-#undef CONFIG_ID
-#define ENABLE_ID 0
-#define IF_ID(...)
-#define IF_NOT_ID(...) __VA_ARGS__
-#undef CONFIG_GROUPS
-#define ENABLE_GROUPS 0
-#define IF_GROUPS(...)
-#define IF_NOT_GROUPS(...) __VA_ARGS__
-#undef CONFIG_INSTALL
-#define ENABLE_INSTALL 0
-#define IF_INSTALL(...)
-#define IF_NOT_INSTALL(...) __VA_ARGS__
+#define CONFIG_ID 1
+#define ENABLE_ID 1
+#ifdef MAKE_SUID
+# define IF_ID(...) __VA_ARGS__ "CONFIG_ID"
+#else
+# define IF_ID(...) __VA_ARGS__
+#endif
+#define IF_NOT_ID(...)
+#define CONFIG_GROUPS 1
+#define ENABLE_GROUPS 1
+#ifdef MAKE_SUID
+# define IF_GROUPS(...) __VA_ARGS__ "CONFIG_GROUPS"
+#else
+# define IF_GROUPS(...) __VA_ARGS__
+#endif
+#define IF_NOT_GROUPS(...)
+#define CONFIG_INSTALL 1
+#define ENABLE_INSTALL 1
+#ifdef MAKE_SUID
+# define IF_INSTALL(...) __VA_ARGS__ "CONFIG_INSTALL"
+#else
+# define IF_INSTALL(...) __VA_ARGS__
+#endif
+#define IF_NOT_INSTALL(...)
 #undef CONFIG_FEATURE_INSTALL_LONG_OPTIONS
 #define ENABLE_FEATURE_INSTALL_LONG_OPTIONS 0
 #define IF_FEATURE_INSTALL_LONG_OPTIONS(...)
@@ -1128,10 +1224,14 @@
 #define ENABLE_LINK 0
 #define IF_LINK(...)
 #define IF_NOT_LINK(...) __VA_ARGS__
-#undef CONFIG_LN
-#define ENABLE_LN 0
-#define IF_LN(...)
-#define IF_NOT_LN(...) __VA_ARGS__
+#define CONFIG_LN 1
+#define ENABLE_LN 1
+#ifdef MAKE_SUID
+# define IF_LN(...) __VA_ARGS__ "CONFIG_LN"
+#else
+# define IF_LN(...) __VA_ARGS__
+#endif
+#define IF_NOT_LN(...)
 #undef CONFIG_LOGNAME
 #define ENABLE_LOGNAME 0
 #define IF_LOGNAME(...)
@@ -1228,18 +1328,30 @@
 # define IF_MKDIR(...) __VA_ARGS__
 #endif
 #define IF_NOT_MKDIR(...)
-#undef CONFIG_MKFIFO
-#define ENABLE_MKFIFO 0
-#define IF_MKFIFO(...)
-#define IF_NOT_MKFIFO(...) __VA_ARGS__
-#undef CONFIG_MKNOD
-#define ENABLE_MKNOD 0
-#define IF_MKNOD(...)
-#define IF_NOT_MKNOD(...) __VA_ARGS__
-#undef CONFIG_MKTEMP
-#define ENABLE_MKTEMP 0
-#define IF_MKTEMP(...)
-#define IF_NOT_MKTEMP(...) __VA_ARGS__
+#define CONFIG_MKFIFO 1
+#define ENABLE_MKFIFO 1
+#ifdef MAKE_SUID
+# define IF_MKFIFO(...) __VA_ARGS__ "CONFIG_MKFIFO"
+#else
+# define IF_MKFIFO(...) __VA_ARGS__
+#endif
+#define IF_NOT_MKFIFO(...)
+#define CONFIG_MKNOD 1
+#define ENABLE_MKNOD 1
+#ifdef MAKE_SUID
+# define IF_MKNOD(...) __VA_ARGS__ "CONFIG_MKNOD"
+#else
+# define IF_MKNOD(...) __VA_ARGS__
+#endif
+#define IF_NOT_MKNOD(...)
+#define CONFIG_MKTEMP 1
+#define ENABLE_MKTEMP 1
+#ifdef MAKE_SUID
+# define IF_MKTEMP(...) __VA_ARGS__ "CONFIG_MKTEMP"
+#else
+# define IF_MKTEMP(...) __VA_ARGS__
+#endif
+#define IF_NOT_MKTEMP(...)
 #define CONFIG_MV 1
 #define ENABLE_MV 1
 #ifdef MAKE_SUID
@@ -1248,30 +1360,54 @@
 # define IF_MV(...) __VA_ARGS__
 #endif
 #define IF_NOT_MV(...)
-#undef CONFIG_NICE
-#define ENABLE_NICE 0
-#define IF_NICE(...)
-#define IF_NOT_NICE(...) __VA_ARGS__
-#undef CONFIG_NL
-#define ENABLE_NL 0
-#define IF_NL(...)
-#define IF_NOT_NL(...) __VA_ARGS__
-#undef CONFIG_NOHUP
-#define ENABLE_NOHUP 0
-#define IF_NOHUP(...)
-#define IF_NOT_NOHUP(...) __VA_ARGS__
-#undef CONFIG_NPROC
-#define ENABLE_NPROC 0
-#define IF_NPROC(...)
-#define IF_NOT_NPROC(...) __VA_ARGS__
-#undef CONFIG_OD
-#define ENABLE_OD 0
-#define IF_OD(...)
-#define IF_NOT_OD(...) __VA_ARGS__
-#undef CONFIG_PASTE
-#define ENABLE_PASTE 0
-#define IF_PASTE(...)
-#define IF_NOT_PASTE(...) __VA_ARGS__
+#define CONFIG_NICE 1
+#define ENABLE_NICE 1
+#ifdef MAKE_SUID
+# define IF_NICE(...) __VA_ARGS__ "CONFIG_NICE"
+#else
+# define IF_NICE(...) __VA_ARGS__
+#endif
+#define IF_NOT_NICE(...)
+#define CONFIG_NL 1
+#define ENABLE_NL 1
+#ifdef MAKE_SUID
+# define IF_NL(...) __VA_ARGS__ "CONFIG_NL"
+#else
+# define IF_NL(...) __VA_ARGS__
+#endif
+#define IF_NOT_NL(...)
+#define CONFIG_NOHUP 1
+#define ENABLE_NOHUP 1
+#ifdef MAKE_SUID
+# define IF_NOHUP(...) __VA_ARGS__ "CONFIG_NOHUP"
+#else
+# define IF_NOHUP(...) __VA_ARGS__
+#endif
+#define IF_NOT_NOHUP(...)
+#define CONFIG_NPROC 1
+#define ENABLE_NPROC 1
+#ifdef MAKE_SUID
+# define IF_NPROC(...) __VA_ARGS__ "CONFIG_NPROC"
+#else
+# define IF_NPROC(...) __VA_ARGS__
+#endif
+#define IF_NOT_NPROC(...)
+#define CONFIG_OD 1
+#define ENABLE_OD 1
+#ifdef MAKE_SUID
+# define IF_OD(...) __VA_ARGS__ "CONFIG_OD"
+#else
+# define IF_OD(...) __VA_ARGS__
+#endif
+#define IF_NOT_OD(...)
+#define CONFIG_PASTE 1
+#define ENABLE_PASTE 1
+#ifdef MAKE_SUID
+# define IF_PASTE(...) __VA_ARGS__ "CONFIG_PASTE"
+#else
+# define IF_PASTE(...) __VA_ARGS__
+#endif
+#define IF_NOT_PASTE(...)
 #undef CONFIG_PRINTENV
 #define ENABLE_PRINTENV 0
 #define IF_PRINTENV(...)
@@ -1336,10 +1472,14 @@
 #define ENABLE_SHRED 0
 #define IF_SHRED(...)
 #define IF_NOT_SHRED(...) __VA_ARGS__
-#undef CONFIG_SHUF
-#define ENABLE_SHUF 0
-#define IF_SHUF(...)
-#define IF_NOT_SHUF(...) __VA_ARGS__
+#define CONFIG_SHUF 1
+#define ENABLE_SHUF 1
+#ifdef MAKE_SUID
+# define IF_SHUF(...) __VA_ARGS__ "CONFIG_SHUF"
+#else
+# define IF_SHUF(...) __VA_ARGS__
+#endif
+#define IF_NOT_SHUF(...)
 #define CONFIG_SLEEP 1
 #define ENABLE_SLEEP 1
 #ifdef MAKE_SUID
@@ -1368,10 +1508,14 @@
 #define ENABLE_FEATURE_SORT_OPTIMIZE_MEMORY 0
 #define IF_FEATURE_SORT_OPTIMIZE_MEMORY(...)
 #define IF_NOT_FEATURE_SORT_OPTIMIZE_MEMORY(...) __VA_ARGS__
-#undef CONFIG_SPLIT
-#define ENABLE_SPLIT 0
-#define IF_SPLIT(...)
-#define IF_NOT_SPLIT(...) __VA_ARGS__
+#define CONFIG_SPLIT 1
+#define ENABLE_SPLIT 1
+#ifdef MAKE_SUID
+# define IF_SPLIT(...) __VA_ARGS__ "CONFIG_SPLIT"
+#else
+# define IF_SPLIT(...) __VA_ARGS__
+#endif
+#define IF_NOT_SPLIT(...)
 #undef CONFIG_FEATURE_SPLIT_FANCY
 #define ENABLE_FEATURE_SPLIT_FANCY 0
 #define IF_FEATURE_SPLIT_FANCY(...)
@@ -1400,18 +1544,26 @@
 #define ENABLE_SUM 0
 #define IF_SUM(...)
 #define IF_NOT_SUM(...) __VA_ARGS__
-#undef CONFIG_SYNC
-#define ENABLE_SYNC 0
-#define IF_SYNC(...)
-#define IF_NOT_SYNC(...) __VA_ARGS__
+#define CONFIG_SYNC 1
+#define ENABLE_SYNC 1
+#ifdef MAKE_SUID
+# define IF_SYNC(...) __VA_ARGS__ "CONFIG_SYNC"
+#else
+# define IF_SYNC(...) __VA_ARGS__
+#endif
+#define IF_NOT_SYNC(...)
 #undef CONFIG_FEATURE_SYNC_FANCY
 #define ENABLE_FEATURE_SYNC_FANCY 0
 #define IF_FEATURE_SYNC_FANCY(...)
 #define IF_NOT_FEATURE_SYNC_FANCY(...) __VA_ARGS__
-#undef CONFIG_FSYNC
-#define ENABLE_FSYNC 0
-#define IF_FSYNC(...)
-#define IF_NOT_FSYNC(...) __VA_ARGS__
+#define CONFIG_FSYNC 1
+#define ENABLE_FSYNC 1
+#ifdef MAKE_SUID
+# define IF_FSYNC(...) __VA_ARGS__ "CONFIG_FSYNC"
+#else
+# define IF_FSYNC(...) __VA_ARGS__
+#endif
+#define IF_NOT_FSYNC(...)
 #define CONFIG_TAC 1
 #define ENABLE_TAC 1
 #ifdef MAKE_SUID
@@ -1524,10 +1676,14 @@
 #define ENABLE_TSORT 0
 #define IF_TSORT(...)
 #define IF_NOT_TSORT(...) __VA_ARGS__
-#undef CONFIG_TTY
-#define ENABLE_TTY 0
-#define IF_TTY(...)
-#define IF_NOT_TTY(...) __VA_ARGS__
+#define CONFIG_TTY 1
+#define ENABLE_TTY 1
+#ifdef MAKE_SUID
+# define IF_TTY(...) __VA_ARGS__ "CONFIG_TTY"
+#else
+# define IF_TTY(...) __VA_ARGS__
+#endif
+#define IF_NOT_TTY(...)
 #undef CONFIG_UNAME
 #define ENABLE_UNAME 0
 #define IF_UNAME(...)
@@ -1560,10 +1716,14 @@
 #define ENABLE_USLEEP 0
 #define IF_USLEEP(...)
 #define IF_NOT_USLEEP(...) __VA_ARGS__
-#undef CONFIG_UUDECODE
-#define ENABLE_UUDECODE 0
-#define IF_UUDECODE(...)
-#define IF_NOT_UUDECODE(...) __VA_ARGS__
+#define CONFIG_UUDECODE 1
+#define ENABLE_UUDECODE 1
+#ifdef MAKE_SUID
+# define IF_UUDECODE(...) __VA_ARGS__ "CONFIG_UUDECODE"
+#else
+# define IF_UUDECODE(...) __VA_ARGS__
+#endif
+#define IF_NOT_UUDECODE(...)
 #undef CONFIG_BASE32
 #define ENABLE_BASE32 0
 #define IF_BASE32(...)
@@ -1576,10 +1736,14 @@
 # define IF_BASE64(...) __VA_ARGS__
 #endif
 #define IF_NOT_BASE64(...)
-#undef CONFIG_UUENCODE
-#define ENABLE_UUENCODE 0
-#define IF_UUENCODE(...)
-#define IF_NOT_UUENCODE(...) __VA_ARGS__
+#define CONFIG_UUENCODE 1
+#define ENABLE_UUENCODE 1
+#ifdef MAKE_SUID
+# define IF_UUENCODE(...) __VA_ARGS__ "CONFIG_UUENCODE"
+#else
+# define IF_UUENCODE(...) __VA_ARGS__
+#endif
+#define IF_NOT_UUENCODE(...)
 #define CONFIG_WC 1
 #define ENABLE_WC 1
 #ifdef MAKE_SUID
@@ -1604,14 +1768,22 @@
 #define ENABLE_USERS 0
 #define IF_USERS(...)
 #define IF_NOT_USERS(...) __VA_ARGS__
-#undef CONFIG_WHOAMI
-#define ENABLE_WHOAMI 0
-#define IF_WHOAMI(...)
-#define IF_NOT_WHOAMI(...) __VA_ARGS__
-#undef CONFIG_YES
-#define ENABLE_YES 0
-#define IF_YES(...)
-#define IF_NOT_YES(...) __VA_ARGS__
+#define CONFIG_WHOAMI 1
+#define ENABLE_WHOAMI 1
+#ifdef MAKE_SUID
+# define IF_WHOAMI(...) __VA_ARGS__ "CONFIG_WHOAMI"
+#else
+# define IF_WHOAMI(...) __VA_ARGS__
+#endif
+#define IF_NOT_WHOAMI(...)
+#define CONFIG_YES 1
+#define ENABLE_YES 1
+#ifdef MAKE_SUID
+# define IF_YES(...) __VA_ARGS__ "CONFIG_YES"
+#else
+# define IF_YES(...) __VA_ARGS__
+#endif
+#define IF_NOT_YES(...)
 
 /*
  * Console Utilities
@@ -1816,10 +1988,14 @@
 # define IF_FEATURE_DIFF_DIR(...) __VA_ARGS__
 #endif
 #define IF_NOT_FEATURE_DIFF_DIR(...)
-#undef CONFIG_ED
-#define ENABLE_ED 0
-#define IF_ED(...)
-#define IF_NOT_ED(...) __VA_ARGS__
+#define CONFIG_ED 1
+#define ENABLE_ED 1
+#ifdef MAKE_SUID
+# define IF_ED(...) __VA_ARGS__ "CONFIG_ED"
+#else
+# define IF_ED(...) __VA_ARGS__
+#endif
+#define IF_NOT_ED(...)
 #define CONFIG_PATCH 1
 #define ENABLE_PATCH 1
 #ifdef MAKE_SUID
@@ -2964,10 +3140,14 @@
 #define ENABLE_FEATURE_MOUNT_OTHERTAB 0
 #define IF_FEATURE_MOUNT_OTHERTAB(...)
 #define IF_NOT_FEATURE_MOUNT_OTHERTAB(...) __VA_ARGS__
-#undef CONFIG_MOUNTPOINT
-#define ENABLE_MOUNTPOINT 0
-#define IF_MOUNTPOINT(...)
-#define IF_NOT_MOUNTPOINT(...) __VA_ARGS__
+#define CONFIG_MOUNTPOINT 1
+#define ENABLE_MOUNTPOINT 1
+#ifdef MAKE_SUID
+# define IF_MOUNTPOINT(...) __VA_ARGS__ "CONFIG_MOUNTPOINT"
+#else
+# define IF_MOUNTPOINT(...) __VA_ARGS__
+#endif
+#define IF_NOT_MOUNTPOINT(...)
 #undef CONFIG_NOLOGIN
 #define ENABLE_NOLOGIN 0
 #define IF_NOLOGIN(...)
@@ -3048,10 +3228,14 @@
 #define ENABLE_FEATURE_SETPRIV_CAPABILITY_NAMES 0
 #define IF_FEATURE_SETPRIV_CAPABILITY_NAMES(...)
 #define IF_NOT_FEATURE_SETPRIV_CAPABILITY_NAMES(...) __VA_ARGS__
-#undef CONFIG_SETSID
-#define ENABLE_SETSID 0
-#define IF_SETSID(...)
-#define IF_NOT_SETSID(...) __VA_ARGS__
+#define CONFIG_SETSID 1
+#define ENABLE_SETSID 1
+#ifdef MAKE_SUID
+# define IF_SETSID(...) __VA_ARGS__ "CONFIG_SETSID"
+#else
+# define IF_SETSID(...) __VA_ARGS__
+#endif
+#define IF_NOT_SETSID(...)
 #undef CONFIG_SWAPON
 #define ENABLE_SWAPON 0
 #define IF_SWAPON(...)
@@ -3468,10 +3652,14 @@
 #define ENABLE_INOTIFYD 0
 #define IF_INOTIFYD(...)
 #define IF_NOT_INOTIFYD(...) __VA_ARGS__
-#undef CONFIG_LESS
-#define ENABLE_LESS 0
-#define IF_LESS(...)
-#define IF_NOT_LESS(...) __VA_ARGS__
+#define CONFIG_LESS 1
+#define ENABLE_LESS 1
+#ifdef MAKE_SUID
+# define IF_LESS(...) __VA_ARGS__ "CONFIG_LESS"
+#else
+# define IF_LESS(...) __VA_ARGS__
+#endif
+#define IF_NOT_LESS(...)
 #define CONFIG_FEATURE_LESS_MAXLINES 0
 #define ENABLE_FEATURE_LESS_MAXLINES 1
 #ifdef MAKE_SUID
@@ -3548,10 +3736,14 @@
 #define ENABLE_MAN 0
 #define IF_MAN(...)
 #define IF_NOT_MAN(...) __VA_ARGS__
-#undef CONFIG_MICROCOM
-#define ENABLE_MICROCOM 0
-#define IF_MICROCOM(...)
-#define IF_NOT_MICROCOM(...) __VA_ARGS__
+#define CONFIG_MICROCOM 1
+#define ENABLE_MICROCOM 1
+#ifdef MAKE_SUID
+# define IF_MICROCOM(...) __VA_ARGS__ "CONFIG_MICROCOM"
+#else
+# define IF_MICROCOM(...) __VA_ARGS__
+#endif
+#define IF_NOT_MICROCOM(...)
 #undef CONFIG_MIM
 #define ENABLE_MIM 0
 #define IF_MIM(...)
@@ -3612,10 +3804,14 @@
 # define IF_STRINGS(...) __VA_ARGS__
 #endif
 #define IF_NOT_STRINGS(...)
-#undef CONFIG_TIME
-#define ENABLE_TIME 0
-#define IF_TIME(...)
-#define IF_NOT_TIME(...) __VA_ARGS__
+#define CONFIG_TIME 1
+#define ENABLE_TIME 1
+#ifdef MAKE_SUID
+# define IF_TIME(...) __VA_ARGS__ "CONFIG_TIME"
+#else
+# define IF_TIME(...) __VA_ARGS__
+#endif
+#define IF_NOT_TIME(...)
 #define CONFIG_TREE 1
 #define ENABLE_TREE 1
 #ifdef MAKE_SUID
@@ -3708,10 +3904,14 @@
 #define ENABLE_FEATURE_TLS_SHA1 0
 #define IF_FEATURE_TLS_SHA1(...)
 #define IF_NOT_FEATURE_TLS_SHA1(...) __VA_ARGS__
-#undef CONFIG_ARP
-#define ENABLE_ARP 0
-#define IF_ARP(...)
-#define IF_NOT_ARP(...) __VA_ARGS__
+#define CONFIG_ARP 1
+#define ENABLE_ARP 1
+#ifdef MAKE_SUID
+# define IF_ARP(...) __VA_ARGS__ "CONFIG_ARP"
+#else
+# define IF_ARP(...) __VA_ARGS__
+#endif
+#define IF_NOT_ARP(...)
 #undef CONFIG_ARPING
 #define ENABLE_ARPING 0
 #define IF_ARPING(...)
@@ -3752,22 +3952,34 @@
 #define ENABLE_FEATURE_FTPD_AUTHENTICATION 0
 #define IF_FEATURE_FTPD_AUTHENTICATION(...)
 #define IF_NOT_FEATURE_FTPD_AUTHENTICATION(...) __VA_ARGS__
-#undef CONFIG_FTPGET
-#define ENABLE_FTPGET 0
-#define IF_FTPGET(...)
-#define IF_NOT_FTPGET(...) __VA_ARGS__
-#undef CONFIG_FTPPUT
-#define ENABLE_FTPPUT 0
-#define IF_FTPPUT(...)
-#define IF_NOT_FTPPUT(...) __VA_ARGS__
+#define CONFIG_FTPGET 1
+#define ENABLE_FTPGET 1
+#ifdef MAKE_SUID
+# define IF_FTPGET(...) __VA_ARGS__ "CONFIG_FTPGET"
+#else
+# define IF_FTPGET(...) __VA_ARGS__
+#endif
+#define IF_NOT_FTPGET(...)
+#define CONFIG_FTPPUT 1
+#define ENABLE_FTPPUT 1
+#ifdef MAKE_SUID
+# define IF_FTPPUT(...) __VA_ARGS__ "CONFIG_FTPPUT"
+#else
+# define IF_FTPPUT(...) __VA_ARGS__
+#endif
+#define IF_NOT_FTPPUT(...)
 #undef CONFIG_FEATURE_FTPGETPUT_LONG_OPTIONS
 #define ENABLE_FEATURE_FTPGETPUT_LONG_OPTIONS 0
 #define IF_FEATURE_FTPGETPUT_LONG_OPTIONS(...)
 #define IF_NOT_FEATURE_FTPGETPUT_LONG_OPTIONS(...) __VA_ARGS__
-#undef CONFIG_HOSTNAME
-#define ENABLE_HOSTNAME 0
-#define IF_HOSTNAME(...)
-#define IF_NOT_HOSTNAME(...) __VA_ARGS__
+#define CONFIG_HOSTNAME 1
+#define ENABLE_HOSTNAME 1
+#ifdef MAKE_SUID
+# define IF_HOSTNAME(...) __VA_ARGS__ "CONFIG_HOSTNAME"
+#else
+# define IF_HOSTNAME(...) __VA_ARGS__
+#endif
+#define IF_NOT_HOSTNAME(...)
 #undef CONFIG_DNSDOMAINNAME
 #define ENABLE_DNSDOMAINNAME 0
 #define IF_DNSDOMAINNAME(...)
@@ -3844,10 +4056,14 @@
 #define ENABLE_FEATURE_HTTPD_ACL_IP 0
 #define IF_FEATURE_HTTPD_ACL_IP(...)
 #define IF_NOT_FEATURE_HTTPD_ACL_IP(...) __VA_ARGS__
-#undef CONFIG_IFCONFIG
-#define ENABLE_IFCONFIG 0
-#define IF_IFCONFIG(...)
-#define IF_NOT_IFCONFIG(...) __VA_ARGS__
+#define CONFIG_IFCONFIG 1
+#define ENABLE_IFCONFIG 1
+#ifdef MAKE_SUID
+# define IF_IFCONFIG(...) __VA_ARGS__ "CONFIG_IFCONFIG"
+#else
+# define IF_IFCONFIG(...) __VA_ARGS__
+#endif
+#define IF_NOT_IFCONFIG(...)
 #undef CONFIG_FEATURE_IFCONFIG_STATUS
 #define ENABLE_FEATURE_IFCONFIG_STATUS 0
 #define IF_FEATURE_IFCONFIG_STATUS(...)
@@ -4004,10 +4220,14 @@
 #define ENABLE_FEATURE_IP_RARE_PROTOCOLS 0
 #define IF_FEATURE_IP_RARE_PROTOCOLS(...)
 #define IF_NOT_FEATURE_IP_RARE_PROTOCOLS(...) __VA_ARGS__
-#undef CONFIG_IPCALC
-#define ENABLE_IPCALC 0
-#define IF_IPCALC(...)
-#define IF_NOT_IPCALC(...) __VA_ARGS__
+#define CONFIG_IPCALC 1
+#define ENABLE_IPCALC 1
+#ifdef MAKE_SUID
+# define IF_IPCALC(...) __VA_ARGS__ "CONFIG_IPCALC"
+#else
+# define IF_IPCALC(...) __VA_ARGS__
+#endif
+#define IF_NOT_IPCALC(...)
 #undef CONFIG_FEATURE_IPCALC_LONG_OPTIONS
 #define ENABLE_FEATURE_IPCALC_LONG_OPTIONS 0
 #define IF_FEATURE_IPCALC_LONG_OPTIONS(...)
@@ -4032,10 +4252,14 @@
 #define ENABLE_NBDCLIENT 0
 #define IF_NBDCLIENT(...)
 #define IF_NOT_NBDCLIENT(...) __VA_ARGS__
-#undef CONFIG_NC
-#define ENABLE_NC 0
-#define IF_NC(...)
-#define IF_NOT_NC(...) __VA_ARGS__
+#define CONFIG_NC 1
+#define ENABLE_NC 1
+#ifdef MAKE_SUID
+# define IF_NC(...) __VA_ARGS__ "CONFIG_NC"
+#else
+# define IF_NC(...) __VA_ARGS__
+#endif
+#define IF_NOT_NC(...)
 #undef CONFIG_NETCAT
 #define ENABLE_NETCAT 0
 #define IF_NETCAT(...)
@@ -4052,10 +4276,14 @@
 #define ENABLE_NC_110_COMPAT 0
 #define IF_NC_110_COMPAT(...)
 #define IF_NOT_NC_110_COMPAT(...) __VA_ARGS__
-#undef CONFIG_NETSTAT
-#define ENABLE_NETSTAT 0
-#define IF_NETSTAT(...)
-#define IF_NOT_NETSTAT(...) __VA_ARGS__
+#define CONFIG_NETSTAT 1
+#define ENABLE_NETSTAT 1
+#ifdef MAKE_SUID
+# define IF_NETSTAT(...) __VA_ARGS__ "CONFIG_NETSTAT"
+#else
+# define IF_NETSTAT(...) __VA_ARGS__
+#endif
+#define IF_NOT_NETSTAT(...)
 #undef CONFIG_FEATURE_NETSTAT_WIDE
 #define ENABLE_FEATURE_NETSTAT_WIDE 0
 #define IF_FEATURE_NETSTAT_WIDE(...)
@@ -4064,10 +4292,14 @@
 #define ENABLE_FEATURE_NETSTAT_PRG 0
 #define IF_FEATURE_NETSTAT_PRG(...)
 #define IF_NOT_FEATURE_NETSTAT_PRG(...) __VA_ARGS__
-#undef CONFIG_NSLOOKUP
-#define ENABLE_NSLOOKUP 0
-#define IF_NSLOOKUP(...)
-#define IF_NOT_NSLOOKUP(...) __VA_ARGS__
+#define CONFIG_NSLOOKUP 1
+#define ENABLE_NSLOOKUP 1
+#ifdef MAKE_SUID
+# define IF_NSLOOKUP(...) __VA_ARGS__ "CONFIG_NSLOOKUP"
+#else
+# define IF_NSLOOKUP(...) __VA_ARGS__
+#endif
+#define IF_NOT_NSLOOKUP(...)
 #undef CONFIG_FEATURE_NSLOOKUP_BIG
 #define ENABLE_FEATURE_NSLOOKUP_BIG 0
 #define IF_FEATURE_NSLOOKUP_BIG(...)
@@ -4092,10 +4324,14 @@
 #define ENABLE_FEATURE_NTP_AUTH 0
 #define IF_FEATURE_NTP_AUTH(...)
 #define IF_NOT_FEATURE_NTP_AUTH(...) __VA_ARGS__
-#undef CONFIG_PING
-#define ENABLE_PING 0
-#define IF_PING(...)
-#define IF_NOT_PING(...) __VA_ARGS__
+#define CONFIG_PING 1
+#define ENABLE_PING 1
+#ifdef MAKE_SUID
+# define IF_PING(...) __VA_ARGS__ "CONFIG_PING"
+#else
+# define IF_PING(...) __VA_ARGS__
+#endif
+#define IF_NOT_PING(...)
 #undef CONFIG_PING6
 #define ENABLE_PING6 0
 #define IF_PING6(...)
@@ -4108,10 +4344,14 @@
 #define ENABLE_PSCAN 0
 #define IF_PSCAN(...)
 #define IF_NOT_PSCAN(...) __VA_ARGS__
-#undef CONFIG_ROUTE
-#define ENABLE_ROUTE 0
-#define IF_ROUTE(...)
-#define IF_NOT_ROUTE(...) __VA_ARGS__
+#define CONFIG_ROUTE 1
+#define ENABLE_ROUTE 1
+#ifdef MAKE_SUID
+# define IF_ROUTE(...) __VA_ARGS__ "CONFIG_ROUTE"
+#else
+# define IF_ROUTE(...) __VA_ARGS__
+#endif
+#define IF_NOT_ROUTE(...)
 #undef CONFIG_SLATTACH
 #define ENABLE_SLATTACH 0
 #define IF_SLATTACH(...)
@@ -4136,10 +4376,14 @@
 #define ENABLE_UDPSVD 0
 #define IF_UDPSVD(...)
 #define IF_NOT_UDPSVD(...) __VA_ARGS__
-#undef CONFIG_TELNET
-#define ENABLE_TELNET 0
-#define IF_TELNET(...)
-#define IF_NOT_TELNET(...) __VA_ARGS__
+#define CONFIG_TELNET 1
+#define ENABLE_TELNET 1
+#ifdef MAKE_SUID
+# define IF_TELNET(...) __VA_ARGS__ "CONFIG_TELNET"
+#else
+# define IF_TELNET(...) __VA_ARGS__
+#endif
+#define IF_NOT_TELNET(...)
 #undef CONFIG_FEATURE_TELNET_TTYPE
 #define ENABLE_FEATURE_TELNET_TTYPE 0
 #define IF_FEATURE_TELNET_TTYPE(...)
@@ -4172,10 +4416,14 @@
 #define ENABLE_FEATURE_TELNETD_INETD_WAIT 0
 #define IF_FEATURE_TELNETD_INETD_WAIT(...)
 #define IF_NOT_FEATURE_TELNETD_INETD_WAIT(...) __VA_ARGS__
-#undef CONFIG_TFTP
-#define ENABLE_TFTP 0
-#define IF_TFTP(...)
-#define IF_NOT_TFTP(...) __VA_ARGS__
+#define CONFIG_TFTP 1
+#define ENABLE_TFTP 1
+#ifdef MAKE_SUID
+# define IF_TFTP(...) __VA_ARGS__ "CONFIG_TFTP"
+#else
+# define IF_TFTP(...) __VA_ARGS__
+#endif
+#define IF_NOT_TFTP(...)
 #undef CONFIG_FEATURE_TFTP_PROGRESS_BAR
 #define ENABLE_FEATURE_TFTP_PROGRESS_BAR 0
 #define IF_FEATURE_TFTP_PROGRESS_BAR(...)
@@ -4240,10 +4488,14 @@
 #define ENABLE_VCONFIG 0
 #define IF_VCONFIG(...)
 #define IF_NOT_VCONFIG(...) __VA_ARGS__
-#undef CONFIG_WGET
-#define ENABLE_WGET 0
-#define IF_WGET(...)
-#define IF_NOT_WGET(...) __VA_ARGS__
+#define CONFIG_WGET 1
+#define ENABLE_WGET 1
+#ifdef MAKE_SUID
+# define IF_WGET(...) __VA_ARGS__ "CONFIG_WGET"
+#else
+# define IF_WGET(...) __VA_ARGS__
+#endif
+#define IF_NOT_WGET(...)
 #undef CONFIG_FEATURE_WGET_LONG_OPTIONS
 #define ENABLE_FEATURE_WGET_LONG_OPTIONS 0
 #define IF_FEATURE_WGET_LONG_OPTIONS(...)
@@ -4516,18 +4768,30 @@
 #define ENABLE_NMETER 0
 #define IF_NMETER(...)
 #define IF_NOT_NMETER(...) __VA_ARGS__
-#undef CONFIG_PGREP
-#define ENABLE_PGREP 0
-#define IF_PGREP(...)
-#define IF_NOT_PGREP(...) __VA_ARGS__
-#undef CONFIG_PKILL
-#define ENABLE_PKILL 0
-#define IF_PKILL(...)
-#define IF_NOT_PKILL(...) __VA_ARGS__
-#undef CONFIG_PIDOF
-#define ENABLE_PIDOF 0
-#define IF_PIDOF(...)
-#define IF_NOT_PIDOF(...) __VA_ARGS__
+#define CONFIG_PGREP 1
+#define ENABLE_PGREP 1
+#ifdef MAKE_SUID
+# define IF_PGREP(...) __VA_ARGS__ "CONFIG_PGREP"
+#else
+# define IF_PGREP(...) __VA_ARGS__
+#endif
+#define IF_NOT_PGREP(...)
+#define CONFIG_PKILL 1
+#define ENABLE_PKILL 1
+#ifdef MAKE_SUID
+# define IF_PKILL(...) __VA_ARGS__ "CONFIG_PKILL"
+#else
+# define IF_PKILL(...) __VA_ARGS__
+#endif
+#define IF_NOT_PKILL(...)
+#define CONFIG_PIDOF 1
+#define ENABLE_PIDOF 1
+#ifdef MAKE_SUID
+# define IF_PIDOF(...) __VA_ARGS__ "CONFIG_PIDOF"
+#else
+# define IF_PIDOF(...) __VA_ARGS__
+#endif
+#define IF_NOT_PIDOF(...)
 #undef CONFIG_FEATURE_PIDOF_SINGLE
 #define ENABLE_FEATURE_PIDOF_SINGLE 0
 #define IF_FEATURE_PIDOF_SINGLE(...)
@@ -4644,10 +4908,14 @@
 #define ENABLE_FEATURE_UPTIME_UTMP_SUPPORT 0
 #define IF_FEATURE_UPTIME_UTMP_SUPPORT(...)
 #define IF_NOT_FEATURE_UPTIME_UTMP_SUPPORT(...) __VA_ARGS__
-#undef CONFIG_WATCH
-#define ENABLE_WATCH 0
-#define IF_WATCH(...)
-#define IF_NOT_WATCH(...) __VA_ARGS__
+#define CONFIG_WATCH 1
+#define ENABLE_WATCH 1
+#ifdef MAKE_SUID
+# define IF_WATCH(...) __VA_ARGS__ "CONFIG_WATCH"
+#else
+# define IF_WATCH(...) __VA_ARGS__
+#endif
+#define IF_NOT_WATCH(...)
 
 /*
  * Runit Utilities

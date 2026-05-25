@@ -4144,6 +4144,27 @@ uint64_t syscall_dispatch(syscall_frame_t *frame) {
         }
         case 231: /* SYS_EXIT_GROUP */
             return pack(sys_exit((int)frame->rdi));
+        /* Stubs no-op para apps que asumen estos existen. Aceptamos
+         * y devolvemos 0 sin hacer nada — single-task no priority. */
+        case 140: /* SYS_GETPRIORITY */ return 0;
+        case 141: /* SYS_SETPRIORITY */ return 0;
+        case 142: /* SYS_SCHED_SETPARAM */ return 0;
+        case 143: /* SYS_SCHED_GETPARAM */ return 0;
+        case 144: /* SYS_SCHED_SETSCHEDULER */ return 0;
+        case 145: /* SYS_SCHED_GETSCHEDULER */ return 0;
+        case 146: /* SYS_SCHED_GET_PRIORITY_MAX */ return 99;
+        case 147: /* SYS_SCHED_GET_PRIORITY_MIN */ return 0;
+        case 148: /* SYS_SCHED_RR_GET_INTERVAL */ return 0;
+        case 24:  /* SYS_SCHED_YIELD */ return 0;
+        case 302: /* SYS_PRLIMIT64 */ return 0;
+        case 117: /* SYS_SETRESUID */
+        case 119: /* SYS_SETRESGID */ return 0;   /* always root */
+        case 162: /* SYS_SYNC */ return 0;
+        case 305: /* SYS_INOTIFY_INIT1 */
+        case 254: /* SYS_INOTIFY_INIT */
+        case 255: /* SYS_INOTIFY_ADD_WATCH */
+        case 256: /* SYS_INOTIFY_RM_WATCH */
+            return pack(-(int64_t)OSNOS_ENOSYS);
         default:
             return pack(-(int64_t)OSNOS_ENOSYS);
     }

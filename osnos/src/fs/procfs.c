@@ -135,6 +135,40 @@ static void gen_version(char *out, size_t cap) {
     os_strlcpy(out, "osnos 0.0.1 (microkernel x86_64) #1 SMP\n", cap);
 }
 
+/* /proc/net/dev — formato Linux para ifconfig/netstat. Listamos
+ * lo (loopback fake) + eth0 (RTL8139). Stats todos 0 — no tenemos
+ * counters de packets/bytes en el driver. */
+static void gen_net_dev(char *out, size_t cap) {
+    os_strlcpy(out,
+        "Inter-|   Receive                                                |  Transmit\n"
+        " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n"
+        "    lo:       0       0    0    0    0     0          0         0       0       0    0    0    0     0       0          0\n"
+        "  eth0:       0       0    0    0    0     0          0         0       0       0    0    0    0     0       0          0\n",
+        cap);
+}
+
+/* /proc/net/route — placeholder con default via 10.0.2.2 (slirp). */
+static void gen_net_route(char *out, size_t cap) {
+    os_strlcpy(out,
+        "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+        "eth0\t00000000\t0202000A\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+        "eth0\t0002000A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n",
+        cap);
+}
+
+/* /proc/net/tcp + /proc/net/udp — empty body con header (netstat sin
+ * sockets activos). */
+static void gen_net_tcp(char *out, size_t cap) {
+    os_strlcpy(out,
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n",
+        cap);
+}
+static void gen_net_udp(char *out, size_t cap) {
+    os_strlcpy(out,
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n",
+        cap);
+}
+
 /* ------------------------------------------------------------------ */
 /* Per-pid generators                                                  */
 /* ------------------------------------------------------------------ */
@@ -228,17 +262,47 @@ static const proc_pid_entry_t pid_entries[] = {
 };
 #define PID_COUNT (sizeof(pid_entries) / sizeof(pid_entries[0]))
 
-typedef enum { PROC_NONE, PROC_ROOT, PROC_TOP, PROC_PID_DIR, PROC_PID_FILE } proc_kind_t;
+/* /proc/net subdirectory entries. */
+typedef struct {
+    const char *name;
+    void (*gen)(char *out, size_t cap);
+} proc_net_entry_t;
+
+static const proc_net_entry_t net_entries[] = {
+    { "dev",   gen_net_dev   },
+    { "route", gen_net_route },
+    { "tcp",   gen_net_tcp   },
+    { "udp",   gen_net_udp   },
+};
+#define NET_COUNT (sizeof(net_entries) / sizeof(net_entries[0]))
+
+typedef enum { PROC_NONE, PROC_ROOT, PROC_TOP, PROC_PID_DIR, PROC_PID_FILE,
+                PROC_NET_DIR, PROC_NET_FILE } proc_kind_t;
 
 static proc_kind_t classify(const char *sub, int *out_pid,
                              const proc_top_entry_t **out_top,
-                             const proc_pid_entry_t **out_pidf) {
+                             const proc_pid_entry_t **out_pidf,
+                             const proc_net_entry_t **out_netf) {
     if (out_pid)  *out_pid  = -1;
     if (out_top)  *out_top  = 0;
     if (out_pidf) *out_pidf = 0;
+    if (out_netf) *out_netf = 0;
 
     if (!sub) return PROC_NONE;
     if (sub[0] == 0) return PROC_ROOT;
+
+    /* /proc/net dispatch. */
+    if (os_strstarts(sub, "net") && (sub[3] == 0 || sub[3] == '/')) {
+        if (sub[3] == 0) return PROC_NET_DIR;
+        if (sub[4] == 0) return PROC_NET_DIR;   /* "net/" trailing slash */
+        for (size_t i = 0; i < NET_COUNT; i++) {
+            if (os_streq(sub + 4, net_entries[i].name)) {
+                if (out_netf) *out_netf = &net_entries[i];
+                return PROC_NET_FILE;
+            }
+        }
+        return PROC_NONE;
+    }
 
     for (size_t i = 0; i < TOP_COUNT; i++) {
         if (os_streq(sub, top_entries[i].name)) {
@@ -293,9 +357,10 @@ static osnos_status_t procfs_stat(void *priv, const char *path, vfs_stat_t *out)
     (void)priv;
     const char *sub = strip_proc(path);
     int pid;
-    const proc_top_entry_t *top = 0;
+    const proc_top_entry_t *top  = 0;
     const proc_pid_entry_t *pidf = 0;
-    proc_kind_t k = classify(sub, &pid, &top, &pidf);
+    const proc_net_entry_t *netf = 0;
+    proc_kind_t k = classify(sub, &pid, &top, &pidf, &netf);
 
     out->inode = 0;
     out->size  = 0;
@@ -308,6 +373,18 @@ static osnos_status_t procfs_stat(void *priv, const char *path, vfs_stat_t *out)
     case PROC_TOP: {
         char tmp[PROCFS_BUF];
         top->gen(tmp, sizeof(tmp));
+        out->type = VFS_NODE_REG;
+        out->mode = 0444;
+        out->size = os_strlen(tmp);
+        return OSNOS_OK;
+    }
+    case PROC_NET_DIR:
+        out->type = VFS_NODE_DIR;
+        out->mode = 0555;
+        return OSNOS_OK;
+    case PROC_NET_FILE: {
+        char tmp[PROCFS_BUF];
+        netf->gen(tmp, sizeof(tmp));
         out->type = VFS_NODE_REG;
         out->mode = 0444;
         out->size = os_strlen(tmp);
@@ -346,9 +423,10 @@ static osnos_status_t procfs_read(void *priv, const char *path, size_t off,
     (void)priv;
     const char *sub = strip_proc(path);
     int pid;
-    const proc_top_entry_t *top = 0;
+    const proc_top_entry_t *top  = 0;
     const proc_pid_entry_t *pidf = 0;
-    proc_kind_t k = classify(sub, &pid, &top, &pidf);
+    const proc_net_entry_t *netf = 0;
+    proc_kind_t k = classify(sub, &pid, &top, &pidf, &netf);
 
     char tmp[PROCFS_BUF];
     size_t len = 0;
@@ -358,6 +436,12 @@ static osnos_status_t procfs_read(void *priv, const char *path, size_t off,
         top->gen(tmp, sizeof(tmp));
         len = os_strlen(tmp);
         break;
+    case PROC_NET_FILE:
+        netf->gen(tmp, sizeof(tmp));
+        len = os_strlen(tmp);
+        break;
+    case PROC_NET_DIR:
+        return OSNOS_EISDIR;
     case PROC_PID_FILE: {
         task_t *t = resolve_pid(pid);
         if (!t || t->state == TASK_UNUSED) return OSNOS_ENOENT;
@@ -391,9 +475,10 @@ static osnos_status_t procfs_readdir(void *priv, const char *path, size_t cursor
     (void)priv;
     const char *sub = strip_proc(path);
     int pid;
-    const proc_top_entry_t *top = 0;
+    const proc_top_entry_t *top  = 0;
     const proc_pid_entry_t *pidf = 0;
-    proc_kind_t k = classify(sub, &pid, &top, &pidf);
+    const proc_net_entry_t *netf = 0;
+    proc_kind_t k = classify(sub, &pid, &top, &pidf, &netf);
 
     if (k == PROC_ROOT) {
         if (cursor < TOP_COUNT) {
@@ -402,17 +487,32 @@ static osnos_status_t procfs_readdir(void *priv, const char *path, size_t cursor
             *next_cursor = cursor + 1;
             return OSNOS_OK;
         }
-        /* Después de los top files, una entry por task vivo. */
-        size_t start_idx = cursor - TOP_COUNT;
+        /* Después de top files, una entry "net" (dir). */
+        if (cursor == TOP_COUNT) {
+            os_strlcpy(out->name, "net", OSNOS_NAME_MAX);
+            out->type = VFS_NODE_DIR;
+            *next_cursor = cursor + 1;
+            return OSNOS_OK;
+        }
+        /* Después: una entry por task vivo. */
+        size_t start_idx = cursor - TOP_COUNT - 1;
         for (size_t i = start_idx; i < 16; i++) {
             const task_t *t = task_slot(i);
             if (!t || t->state == TASK_UNUSED) continue;
             os_format_u64(t->pid, out->name, OSNOS_NAME_MAX);
             out->type = VFS_NODE_DIR;
-            *next_cursor = TOP_COUNT + i + 1;
+            *next_cursor = TOP_COUNT + 1 + i + 1;
             return OSNOS_OK;
         }
         return OSNOS_ENOENT;
+    }
+
+    if (k == PROC_NET_DIR) {
+        if (cursor >= NET_COUNT) return OSNOS_ENOENT;
+        os_strlcpy(out->name, net_entries[cursor].name, OSNOS_NAME_MAX);
+        out->type = VFS_NODE_REG;
+        *next_cursor = cursor + 1;
+        return OSNOS_OK;
     }
 
     if (k == PROC_PID_DIR) {

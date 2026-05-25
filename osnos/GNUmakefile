@@ -395,10 +395,15 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBTCC1_A) $(CRTI_O) $(CRTN
 	mmd -i $@ ::/etc 2>/dev/null || true
 	printf 'root:x:0:0:root:/home:/bin/ash\n' > $(SD_TMP)/passwd
 	printf 'root:x:0:\n' > $(SD_TMP)/group
-	printf '127.0.0.1 localhost\n' > $(SD_TMP)/hosts
-	mcopy -i $@ -o $(SD_TMP)/passwd ::/etc/passwd
-	mcopy -i $@ -o $(SD_TMP)/group  ::/etc/group
-	mcopy -i $@ -o $(SD_TMP)/hosts  ::/etc/hosts
+	printf '127.0.0.1 localhost\n10.0.2.2 host\n' > $(SD_TMP)/hosts
+	@# resolv.conf con el DNS de QEMU slirp NAT (10.0.2.3 default).
+	@# Sin esto, gethostbyname/getaddrinfo fallan → ping/wget/nc
+	@# dicen "bad address" para hostnames externos.
+	printf 'nameserver 10.0.2.3\nnameserver 8.8.8.8\n' > $(SD_TMP)/resolv.conf
+	mcopy -i $@ -o $(SD_TMP)/passwd      ::/etc/passwd
+	mcopy -i $@ -o $(SD_TMP)/group       ::/etc/group
+	mcopy -i $@ -o $(SD_TMP)/hosts       ::/etc/hosts
+	mcopy -i $@ -o $(SD_TMP)/resolv.conf ::/etc/resolv.conf
 	@# lighttpd config (FASE 14.5). /etc/lighttpd/ creada acá tras /etc.
 	mmd -i $@ ::/etc/lighttpd 2>/dev/null || true
 	mcopy -i $@ -o res/lighttpd/lighttpd.conf ::/etc/lighttpd/lighttpd.conf
