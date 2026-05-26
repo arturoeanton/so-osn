@@ -204,8 +204,12 @@ USER_ELF_LIST := $(patsubst %.c,$(BUILD)/%.elf,$(USER_ELF_SRCS)) \
                  $(BUILD)/elfs/tools/lua.elf \
                  $(BUILD)/elfs/tools/jq.elf \
                  $(BUILD)/elfs/tools/sqlite3.elf \
-                 $(BUILD)/elfs/tools/make.elf \
-                 $(BUILD)/elfs/tools/lighttpd.elf
+                 $(BUILD)/elfs/tools/make.elf
+# lighttpd opt-in: needs hand-crafted vendor/lighttpd/build-osnos/config.h
+# which lives outside this repo. Set BUILD_LIGHTTPD=1 to include it.
+ifeq ($(BUILD_LIGHTTPD),1)
+USER_ELF_LIST += $(BUILD)/elfs/tools/lighttpd.elf
+endif
 
 # ---------------------------------------------------------------------------
 # Fase 2 disk-resident: split the embedded set into ROM (small, kept inside
@@ -289,7 +293,11 @@ $(WALLPAPERS): tools/gen_wallpapers.sh tools/gen_placeholder.c
 # changes (so the disk always reflects the freshly compiled binaries).
 # Filenames inside ::/bin drop the .elf extension so they match the
 # exec lookup path (proc_execve("/bin/cat") → /sd/bin/cat via aliasfs).
-$(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $(LIBTCC1_A) $(CRTI_O) $(CRTN_O) $(WALLPAPERS) GNUmakefile
+# $$()-quoted prereqs use secondary expansion so LIBTCC1_A / CRTI_O /
+# CRTN_O — which are declared further down in this file — resolve at
+# build time instead of at rule-parse time (when they'd still be empty).
+.SECONDEXPANSION:
+$(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $$(LIBTCC1_A) $$(CRTI_O) $$(CRTN_O) $(WALLPAPERS) GNUmakefile
 	@command -v mformat >/dev/null 2>&1 || { echo "error: mtools (mformat/mcopy) not found. Install: brew install mtools / sudo apt install mtools" >&2; exit 1; }
 	@command -v mcopy   >/dev/null 2>&1 || { echo "error: mtools (mformat/mcopy) not found. Install: brew install mtools / sudo apt install mtools" >&2; exit 1; }
 	@command -v mmd     >/dev/null 2>&1 || { echo "error: mtools mmd not found." >&2; exit 1; }
