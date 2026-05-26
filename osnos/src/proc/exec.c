@@ -9,6 +9,7 @@
 #include "../micro/gdt.h"
 #include "../micro/syscall.h"
 #include "../micro/ipc.h"
+#include "../micro/service.h"
 #include "elf.h"
 #include "../micro/kmalloc.h"
 #include "../micro/pipe.h"
@@ -1092,14 +1093,25 @@ void proc_exit_current_user(int exit_code) {
      */
     reaper_add_kstack(kstack_base);
 
-    ipc_msg_t msg;
-    msg.from    = t->pid;
-    msg.to      = SERVER_SHELL;
-    msg.type    = IPC_PROC_EXITED;
-    msg.arg0    = (uint64_t)exit_code;
-    msg.arg1    = t->pid;
-    msg.data[0] = 0;
-    ipc_send(&msg);
+    /* Notify shellsrv solo si shellsrv es el parent — apps Ox y otros
+     * children de oxsrv/init no son de su interés. Sin este check, cada
+     * close de una app Ox queda stuck en la cola IPC de shellsrv (que
+     * está blocked en read(stdin) y nunca drena). Después de N closes,
+     * la cola tiene N mensajes huérfanos + cada uno disparó un
+     * task_unblock(shellsrv) que la despertó y la volvió a dormir.
+     * Síntoma reportado: mouse events caen de ~30/seg a ~4/seg
+     * después de abrir/cerrar 3 apps Ox. */
+    uint64_t shell_pid = service_get_pid(SERVER_SHELL);
+    if (shell_pid != 0 && t->parent_pid == shell_pid) {
+        ipc_msg_t msg;
+        msg.from    = t->pid;
+        msg.to      = SERVER_SHELL;
+        msg.type    = IPC_PROC_EXITED;
+        msg.arg0    = (uint64_t)exit_code;
+        msg.arg1    = t->pid;
+        msg.data[0] = 0;
+        ipc_send(&msg);
+    }
 
     sched_resume_jump();
 }
