@@ -192,6 +192,8 @@ USER_ELF_LIBC_SRCS := \
     elfs/gui/oxsettings.c \
     elfs/gui/oxfiles.c \
     elfs/gui/oxtop.c \
+    elfs/gui/oxbrowser.c \
+    elfs/gui/oxsqliteview.c \
     elfs/tools/uxsh.c
 
 # musl-linked ELFs (vendor/musl). Declared early so USER_ELF_LIST sees it.
@@ -524,6 +526,47 @@ $(BUILD)/elfs/%.elf: elfs/%.c elfs/libc.lds $(LIBC_A) $(LIBC_CRT0)
 	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include -c $< -o $@.tmp.o
 	$(LD) $(USER_LDFLAGS) -T elfs/libc.lds \
 	    $(LIBC_CRT0) $@.tmp.o $(LIBC_A) -o $@
+	rm $@.tmp.o
+
+# --------------------------------------------------------------------------
+# tlse port — FASE 12.4. Single-file TLS 1.2/1.3 library by Eduard Suica
+# (eduardsui/tlse), MIT/BSD. Vendor at vendor/tlse/{tlse.c, libtomcrypt.c,
+# tlse.h}. We use `-DTLS_AMALGAMATION` so tlse.c includes libtomcrypt.c
+# inline — one compilation unit, ~48K LOC. Output is libtlse.a linked
+# into oxbrowser for HTTPS support.
+#
+# NOTA orden: estas variables se definen ACÁ (antes del override de
+# oxbrowser que las referencia en su prerequisite line) porque gmake
+# expande prerequisites en parse time. Si TLSE_A vive más abajo en
+# el archivo, $(TLSE_A) en el rule expande a empty y el link falla
+# con "cannot open build/vendor/tlse/libtlse.a".
+# --------------------------------------------------------------------------
+TLSE_DIR     := vendor/tlse
+# MP_32BIT → libtomcrypt usa mp_word=uint64_t (no __int128). Sin esto,
+# el linker pide __udivti3 que no tenemos en mini-libc.
+#   NO_TLS_LEGACY_SUPPORT → no listar TLS 1.0/1.1 en supported_versions.
+#   Cloudflare/AWS-ELB rechazan ClientHellos que ofrezcan versiones
+#   pre-1.2 (servidor cierra TCP sin responder). Habilitar SOLO 1.2/1.3.
+TLSE_CPPFLAGS := -DTLS_AMALGAMATION -DNO_SSL_COMPATIBLE_INTERFACE \
+                 -DMP_32BIT -DNO_TLS_LEGACY_SUPPORT
+TLSE_OBJ     := $(BUILD)/$(TLSE_DIR)/tlse.c.o
+TLSE_A       := $(BUILD)/$(TLSE_DIR)/libtlse.a
+
+$(TLSE_OBJ): $(TLSE_DIR)/tlse.c $(TLSE_DIR)/libtomcrypt.c $(TLSE_DIR)/tlse.h
+	mkdir -p "$(dir $@)"
+	$(CC) $(USER_CFLAGS) -w -isystem $(FREESTD_INC) -I $(LIBC_INC) \
+	    -I src/include -I $(TLSE_DIR) $(TLSE_CPPFLAGS) -c $< -o $@
+
+$(TLSE_A): $(TLSE_OBJ)
+	ar rcs $@ $^
+
+# Override for oxbrowser: link in libtlse.a (TLS 1.2 client for the
+# https:// scheme). Otherwise identical to the generic pattern above.
+$(BUILD)/elfs/gui/oxbrowser.elf: elfs/gui/oxbrowser.c elfs/libc.lds $(LIBC_A) $(LIBC_CRT0) $(TLSE_A)
+	mkdir -p "$(dir $@)"
+	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include -c $< -o $@.tmp.o
+	$(LD) $(USER_LDFLAGS) -T elfs/libc.lds \
+	    $(LIBC_CRT0) $@.tmp.o $(TLSE_A) $(LIBC_A) -o $@
 	rm $@.tmp.o
 
 # --------------------------------------------------------------------------

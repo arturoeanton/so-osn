@@ -203,6 +203,8 @@ typedef struct {
 static const menu_item_t g_menu[] = {
     { "Files",       "/bin/oxfiles",     0 },
     { "Notepad",     "/bin/oxnotepad",   0 },
+    { "Browser",     "/bin/oxbrowser",   0 },
+    { "SQLite",      "/bin/oxsqliteview", 0 },
     { "Calculator",  "/bin/oxcalc",      0 },
     { "Terminal",    "/bin/oxterm",      0 },
     { "Processes",   "/bin/oxtop",       0 },
@@ -213,6 +215,12 @@ static const menu_item_t g_menu[] = {
 
 /* Set when "Exit Ox" is chosen — main loop breaks on next iteration. */
 static int g_quit = 0;
+
+/* System clipboard — single buffer shared across all Ox apps. Cap is
+ * 1023 bytes so a single IPC roundtrip covers a SET/GET. Apps that
+ * need larger clips will eventually move to an SHM-backed channel. */
+static char g_clipboard[1024];
+static int  g_clip_len = 0;
 #define MENU_N (sizeof(g_menu)/sizeof(g_menu[0]))
 
 /* Mark only the menu's bounding box as dirty. Every menu interaction
@@ -1168,7 +1176,8 @@ static void send_event_key(int slot, int ascii, int keycode, int mods) {
     try_send(&m);
 }
 
-static void send_event_mouse(int slot, int x, int y, int buttons, int kind) {
+static void send_event_mouse(int slot, int x, int y, int buttons,
+                              int kind, int wheel) {
     ox_window_t *w = &g_wins[slot];
     if (!w->used) return;
     ipc_msg_t m;
@@ -1179,6 +1188,7 @@ static void send_event_mouse(int slot, int x, int y, int buttons, int kind) {
     m.arg1 = ((uint64_t)(uint32_t)x << 32) | (uint64_t)(uint32_t)y;
     m.data[0] = (char)buttons;
     m.data[1] = (char)kind;
+    m.data[2] = (char)(int8_t)wheel;   /* OX_MOUSE_WHEEL delta */
     try_send(&m);
 }
 
@@ -1347,6 +1357,38 @@ static void handle_ipc(const ipc_msg_t *m) {
         }
         g_dirty = 1;
         (void)from;   /* unused — reload is global */
+        return;
+    }
+    case IPC_OX_CLIPBOARD_SET: {
+        /* arg1 = byte count; data = payload. Trunca al máximo del
+         * buffer global (1023 bytes — fits en un IPC). Reemplaza el
+         * clipboard global; no concat. */
+        size_t n = (size_t)m->arg1;
+        if (n > sizeof(g_clipboard) - 1) n = sizeof(g_clipboard) - 1;
+        if (n > sizeof(m->data))         n = sizeof(m->data);
+        memcpy(g_clipboard, m->data, n);
+        g_clipboard[n] = 0;
+        g_clip_len = (int)n;
+        return;
+    }
+    case IPC_OX_CLIPBOARD_GET: {
+        /* Reply con RESPONSE: arg1 = size, data = bytes. */
+        ipc_msg_t r;
+        memset(&r, 0, sizeof(r));
+        r.to   = from;
+        r.type = IPC_OX_RESPONSE;
+        r.arg0 = 0;  /* OK */
+        r.arg1 = (uint64_t)g_clip_len;
+        size_t n = (size_t)g_clip_len;
+        if (n > sizeof(r.data)) n = sizeof(r.data);
+        memcpy(r.data, g_clipboard, n);
+        /* Retry on EAGAIN — client está bloqueado esperando. */
+        for (int attempt = 0; attempt < 100; attempt++) {
+            if (ipc_send(&r) == 0) return;
+            if (errno != EAGAIN) return;
+            struct timespec ts = { 0, 2 * 1000000 };
+            nanosleep(&ts, 0);
+        }
         return;
     }
     default:
@@ -1537,7 +1579,7 @@ static void process_mouse_event(mouse_event_t ev) {
                 send_event_mouse(slot,
                                   g_cx - g_wins[slot].x,
                                   g_cy - g_wins[slot].y,
-                                  new_b, OX_MOUSE_DOWN);
+                                  new_b, OX_MOUSE_DOWN, 0);
             }
         }
     }
@@ -1547,8 +1589,16 @@ static void process_mouse_event(mouse_event_t ev) {
             send_event_mouse(slot,
                               g_cx - g_wins[slot].x,
                               g_cy - g_wins[slot].y,
-                              new_b, OX_MOUSE_UP);
+                              new_b, OX_MOUSE_UP, 0);
         }
+    }
+    /* Wheel: forward to whichever window the cursor is over (focused
+     * or not). Wheel events make sense for hover-targeted scroll. */
+    if (ev.wheel != 0 && slot >= 0) {
+        send_event_mouse(slot,
+                          g_cx - g_wins[slot].x,
+                          g_cy - g_wins[slot].y,
+                          new_b, OX_MOUSE_WHEEL, ev.wheel);
     }
 
     /* Hover move: stash it; the main loop emits one MOVE per frame
@@ -1841,7 +1891,7 @@ int main(int argc, char **argv) {
             send_event_mouse(slot,
                               g_cx - g_wins[slot].x,
                               g_cy - g_wins[slot].y,
-                              g_prev_buttons, OX_MOUSE_MOVE);
+                              g_prev_buttons, OX_MOUSE_MOVE, 0);
             g_pending_move = 0;
             g_pending_move_slot = -1;
         }

@@ -30,7 +30,7 @@ typedef struct {
     int16_t dx;
     int16_t dy;
     uint8_t buttons;
-    uint8_t _pad;          /* even alignment for sizeof multiple */
+    int8_t  wheel;         /* +1 = wheel up (away), -1 = down. 0 if no wheel device. */
 } mouse_event_t;
 
 /* Initialize the 8042 auxiliary port: enable AUX, set defaults

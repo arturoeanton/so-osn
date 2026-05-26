@@ -276,6 +276,34 @@ void ox_window_destroy(ox_win_t win) {
     send_one(&m);
 }
 
+int ox_clipboard_set(const char *bytes, int len) {
+    if (g_server_pid == 0 && ox_init() < 0) return -1;
+    if (!bytes || len <= 0) return 0;
+    ipc_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = IPC_OX_CLIPBOARD_SET;
+    size_t n = (size_t)len;
+    if (n > sizeof(m.data)) n = sizeof(m.data);
+    memcpy(m.data, bytes, n);
+    m.arg1 = (uint64_t)n;
+    return send_one(&m);
+}
+
+int ox_clipboard_get(char *buf, int cap) {
+    if (g_server_pid == 0 && ox_init() < 0) return 0;
+    if (!buf || cap <= 0) return 0;
+    ipc_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = IPC_OX_CLIPBOARD_GET;
+    long n = send_and_wait_resp(&m, buf, (size_t)cap);
+    if (n < 0) { buf[0] = 0; return 0; }
+    /* server returned arg1 = total size; send_and_wait_resp truncated
+     * to cap-1 already and NUL-terminated. Report the byte count the
+     * caller actually has access to. */
+    if (n > cap - 1) n = cap - 1;
+    return (int)n;
+}
+
 void ox_window_set_title(ox_win_t win, const char *title) {
     if (g_server_pid == 0) return;
     ipc_msg_t m;
@@ -355,7 +383,8 @@ static int decode_event(const ipc_msg_t *m, ox_event_t *out) {
         out->x       = (int)((m->arg1 >> 32) & 0xffffffffu);
         out->y       = (int)( m->arg1        & 0xffffffffu);
         out->buttons = (unsigned char)m->data[0];
-        out->mouse_kind = (unsigned char)m->data[1];
+        out->mouse_kind  = (unsigned char)m->data[1];
+        out->wheel_delta = (int)(signed char)m->data[2];
         return 1;
     case IPC_OX_EVENT_EXPOSE:
         out->type = OX_EV_EXPOSE;

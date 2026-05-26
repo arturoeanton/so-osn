@@ -20,6 +20,8 @@
 /* Mouse device commands (written to 0x60 AFTER CMD_WRITE_AUX). */
 #define MOUSE_SET_DEFAULTS 0xF6
 #define MOUSE_ENABLE_STREAM 0xF4
+#define MOUSE_GET_ID       0xF2
+#define MOUSE_SET_SAMPLE   0xF3
 
 /* Expected ACK byte from the mouse on any command. */
 #define MOUSE_ACK 0xFA
@@ -65,6 +67,39 @@ static bool mouse_command(uint8_t byte) {
 }
 
 static bool mouse_present = false;
+/* 0 = stock PS/2 (3-byte packets, no wheel). 3 = IntelliMouse (4-byte
+ * packets with z axis = wheel). Tracked from the GET_ID response after
+ * the magic knock sequence below. */
+static uint8_t mouse_dev_id = 0;
+
+/* Read one byte from AUX with timeout. Used by GET_ID. */
+static bool mouse_read_byte(uint8_t *out) {
+    for (int i = 0; i < 100000; i++) {
+        uint8_t st = inb(PS2_STATUS);
+        if (!(st & STAT_OUTBUF)) continue;
+        uint8_t b = inb(PS2_DATA);
+        if (!(st & STAT_AUX_DATA)) continue;
+        *out = b;
+        return true;
+    }
+    return false;
+}
+
+/* IntelliMouse magic knock: SET_SAMPLE 200, 100, 80 then GET_ID. If
+ * the controller is IntelliMouse-aware (QEMU's is), GET_ID returns 3
+ * and packets switch to 4 bytes (the 4th byte = signed wheel delta). */
+static void mouse_try_enable_wheel(void) {
+    if (!mouse_command(MOUSE_SET_SAMPLE)) return;
+    if (!mouse_command(200))               return;
+    if (!mouse_command(MOUSE_SET_SAMPLE)) return;
+    if (!mouse_command(100))               return;
+    if (!mouse_command(MOUSE_SET_SAMPLE)) return;
+    if (!mouse_command(80))                return;
+    if (!mouse_command(MOUSE_GET_ID))      return;
+    uint8_t id;
+    if (!mouse_read_byte(&id))             return;
+    if (id == 3) mouse_dev_id = 3;
+}
 
 void mouse_init(void) {
     /* Enable the AUX device on the controller. No ACK expected from
@@ -75,6 +110,10 @@ void mouse_init(void) {
     /* Tell the mouse to load defaults (200 Hz, 1:1, streaming off). */
     if (!mouse_command(MOUSE_SET_DEFAULTS)) return;
 
+    /* Try to enter IntelliMouse mode (wheel support). Falls back to
+     * plain 3-byte packets if the controller doesn't acknowledge. */
+    mouse_try_enable_wheel();
+
     /* Enable streaming so movements/clicks generate packets. */
     if (!mouse_command(MOUSE_ENABLE_STREAM)) return;
 
@@ -83,7 +122,7 @@ void mouse_init(void) {
 
 /* ---- packet assembly ---- */
 
-static uint8_t packet[3];
+static uint8_t packet[4];
 static int     packet_idx = 0;
 
 static int16_t decode_axis(uint8_t byte, bool sign) {
@@ -114,7 +153,8 @@ bool mouse_poll(mouse_event_t *out) {
         return false;
     }
     packet[packet_idx++] = b;
-    if (packet_idx < 3) return false;
+    int expected = (mouse_dev_id == 3) ? 4 : 3;
+    if (packet_idx < expected) return false;
 
     /* Full packet assembled — decode + emit. */
     uint8_t flags = packet[0];
@@ -127,10 +167,22 @@ bool mouse_poll(mouse_event_t *out) {
     if (flags & 0x40) dx = (dx < 0) ? -255 : 255;
     if (flags & 0x80) dy = (dy < 0) ? -255 : 255;
 
+    int8_t wheel = 0;
+    if (mouse_dev_id == 3) {
+        /* IntelliMouse 4th byte: signed 8-bit wheel delta. Spec uses
+         * only the low 4 bits (range -8..+7) sign-extended from bit 3
+         * — but treating the whole byte as int8 works for the typical
+         * ±1 ticks QEMU emits. */
+        int8_t z = (int8_t)packet[3];
+        if (z & 0x08) z |= 0xF0;  /* sign-extend from bit 3 */
+        else          z &= 0x0F;
+        wheel = z;
+    }
+
     out->dx      = dx;
     out->dy      = dy;
     out->buttons = flags & 0x07;
-    out->_pad    = 0;
+    out->wheel   = wheel;
 
     packet_idx = 0;
     return true;

@@ -36,9 +36,10 @@ typedef int ox_win_t;
 #define OX_EV_CLOSE  4
 
 /* Mouse event sub-type. */
-#define OX_MOUSE_MOVE 0
-#define OX_MOUSE_DOWN 1
-#define OX_MOUSE_UP   2
+#define OX_MOUSE_MOVE  0
+#define OX_MOUSE_DOWN  1
+#define OX_MOUSE_UP    2
+#define OX_MOUSE_WHEEL 3   /* ev.wheel_delta: +1 up, -1 down */
 
 /* Modifier bits. */
 #define OX_MOD_SHIFT 0x01
@@ -51,6 +52,11 @@ typedef int ox_win_t;
 #define OX_KEY_DOWN  108
 #define OX_KEY_LEFT  105
 #define OX_KEY_RIGHT 106
+#define OX_KEY_HOME  102
+#define OX_KEY_END   107
+#define OX_KEY_PGUP  104
+#define OX_KEY_PGDN  109
+#define OX_KEY_DELETE 111
 #define OX_KEY_F1    59
 #define OX_KEY_F4    62
 #define OX_KEY_F12   88
@@ -69,7 +75,8 @@ typedef struct {
     /* MOUSE:                                                         */
     int      x, y;        /* window-local                             */
     int      buttons;     /* bit0 left, bit1 right, bit2 middle       */
-    int      mouse_kind;  /* OX_MOUSE_MOVE / DOWN / UP                */
+    int      mouse_kind;  /* OX_MOUSE_MOVE / DOWN / UP / WHEEL        */
+    int      wheel_delta; /* +1 up, -1 down (only OX_MOUSE_WHEEL)     */
     /* EXPOSE:                                                        */
     int      ex, ey, ew, eh;
 } ox_event_t;
@@ -105,6 +112,13 @@ int  ox_poll_event(ox_event_t *out);
 
 /* Blocking event pop. Sleeps via nanosleep until something arrives. */
 int  ox_wait_event(ox_event_t *out);
+
+/* System clipboard — shared across all Ox apps via oxsrv. Cap is
+ * ~1000 bytes; SET truncates silently if longer. GET fills `buf` with
+ * up to `cap` bytes (NUL-terminated) and returns the byte count
+ * written (excluding NUL), or 0 on empty/error. */
+int  ox_clipboard_set(const char *bytes, int len);
+int  ox_clipboard_get(char *buf, int cap);
 
 /* Internal — exported so oxsrv can render text using the same font
  * the client compiled against (so glyph metrics line up). */

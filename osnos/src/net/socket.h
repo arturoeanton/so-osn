@@ -17,7 +17,13 @@
 #define SOCK_MAX                8
 #define SOCK_RX_QUEUE_DEPTH     8
 #define SOCK_RX_MAX_DGRAM       1024
-#define SOCK_TCP_RX_BUF         4096   /* byte ring per TCP socket */
+#define SOCK_TCP_RX_BUF         32768  /* byte ring per TCP socket.
+                                          Bumped from 4 KB so the
+                                          ServerHello+Certificate of
+                                          TLS handshakes (4-8 KB, up
+                                          to 16 KB on cert chains)
+                                          fits in our advertised
+                                          window without truncation. */
 #define SOCK_ACCEPT_QUEUE_DEPTH 4      /* pending ESTABLISHED children per LISTEN */
 #define TCP_MSS                 1400   /* IP+TCP+ETH safe payload */
 #define TCP_RTO_MS              500    /* retransmission timeout */

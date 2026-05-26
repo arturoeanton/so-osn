@@ -382,11 +382,46 @@ int main(int argc, char **argv) {
     read_current();
     /* Re-render with the loaded thumbnails. */
     render();
+    /* Scroll bookkeeping: grid is GRID_COLS wide. Total rows = ceil(N/cols).
+     * Visible rows fit within (body_h) / (tile + label + pad). */
+    int total_rows  = (g_n_walls + GRID_COLS - 1) / GRID_COLS;
+    int row_height  = TILE_H + LABEL_H + TILE_PAD;
+    int body_h      = WIN_H - HEADER_H - FOOTER_H - 16;
+    int visible_rows = body_h / row_height;
+    if (visible_rows < 1) visible_rows = 1;
+    int max_scroll  = total_rows - visible_rows;
+    if (max_scroll < 0) max_scroll = 0;
+
     for (;;) {
         ox_event_t ev;
         if (!ox_wait_event(&ev)) continue;
         if (ev.type == OX_EV_CLOSE) break;
+        if (ev.type == OX_EV_KEY) {
+            int kc = ev.keycode;
+            int new_scroll = g_scroll;
+            if      (kc == OX_KEY_UP   || kc == OX_KEY_PGUP) new_scroll--;
+            else if (kc == OX_KEY_DOWN || kc == OX_KEY_PGDN) new_scroll++;
+            else if (kc == OX_KEY_HOME)                       new_scroll = 0;
+            else if (kc == OX_KEY_END)                        new_scroll = max_scroll;
+            if (new_scroll < 0)           new_scroll = 0;
+            if (new_scroll > max_scroll)  new_scroll = max_scroll;
+            if (new_scroll != g_scroll) {
+                g_scroll = new_scroll;
+                render();
+            }
+            continue;
+        }
         if (ev.type == OX_EV_MOUSE) {
+            if (ev.mouse_kind == OX_MOUSE_WHEEL) {
+                int new_scroll = g_scroll - ev.wheel_delta;
+                if (new_scroll < 0)           new_scroll = 0;
+                if (new_scroll > max_scroll)  new_scroll = max_scroll;
+                if (new_scroll != g_scroll) {
+                    g_scroll = new_scroll;
+                    render();
+                }
+                continue;
+            }
             int tile = hit_tile(ev.x, ev.y);
             int over_apply = hit_apply(ev.x, ev.y);
             if (ev.mouse_kind == OX_MOUSE_MOVE) {

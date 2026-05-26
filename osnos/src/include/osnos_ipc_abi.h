@@ -122,6 +122,9 @@ typedef enum {
                                    /*      data=packed{w,h}                */
     IPC_OX_EVENT_CLOSE    = 0x6b,  /* S→C: arg0=win_id                     */
     IPC_OX_RELOAD_SETTINGS= 0x6c,  /* C→S: re-read /home/.oxrc             */
+    IPC_OX_CLIPBOARD_SET  = 0x6d,  /* C→S: arg1=size, data=bytes (<= 1023) */
+                                   /*      Replaces global clipboard.      */
+    IPC_OX_CLIPBOARD_GET  = 0x6e,  /* C→S: → RESPONSE arg1=size, data=bytes*/
     IPC_OX_RESPONSE       = 0x6f   /* S→C: arg0=status arg1=value          */
 } ipc_type_t;
 
