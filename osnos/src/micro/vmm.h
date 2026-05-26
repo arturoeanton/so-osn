@@ -28,6 +28,13 @@
 #define PTE_D   (1ULL << 6)   /* Dirty   (set by HW) */
 #define PTE_NX  (1ULL << 63)  /* No-execute (requires EFER.NXE) */
 
+/* Software bit (AVL 9) — marca un mapping cuyo frame físico es
+ * "prestado" (no posee al task). Hoy lo usa MAP_SHARED+shm: las
+ * páginas las posee el shm_obj y se liberan via shm_unref, no via
+ * address_space_destroy. Sin este bit, exit() del cliente devuelve
+ * al PMM páginas que oxsrv todavía tiene mapeadas → corrupción. */
+#define PTE_SHM (1ULL << 9)
+
 #define PTE_ADDR_MASK 0x000ffffffffff000ULL
 
 /*

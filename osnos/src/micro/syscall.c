@@ -1734,7 +1734,10 @@ int64_t sys_mmap(void *addr, size_t length, int prot, int flags,
         }
         if (slot < 0) return -(int64_t)OSNOS_ENOMEM;
 
-        uint64_t pte_flags = PTE_U;
+        /* PTE_SHM: marca el mapping como "borrowed" para que
+         * address_space_destroy NO devuelva estas páginas al PMM
+         * cuando el task muere (las posee el shm_obj). */
+        uint64_t pte_flags = PTE_U | PTE_SHM;
         if (prot & OSNOS_PROT_WRITE) pte_flags |= PTE_W;
 
         uint64_t base_va = t->mmap_next;
@@ -2165,10 +2168,12 @@ int64_t sys_fork(void) {
             uint64_t cloned_phys = vmm_lookup(child_pml4, va) & PTE_ADDR_MASK;
             vmm_unmap(child_pml4, va);
             if (cloned_phys) pmm_free_page(cloned_phys);
-            /* Re-mappear al physical original del parent (= shm). */
+            /* Re-mappear al physical original del parent (= shm).
+             * PTE_SHM para que address_space_destroy del child no
+             * libere estas páginas (las posee el shm_obj). */
             uint64_t orig_phys = vmm_lookup(parent->pml4, va) & PTE_ADDR_MASK;
             if (orig_phys) {
-                vmm_map(child_pml4, va, orig_phys, PTE_U | PTE_W);
+                vmm_map(child_pml4, va, orig_phys, PTE_U | PTE_W | PTE_SHM);
             }
         }
     }

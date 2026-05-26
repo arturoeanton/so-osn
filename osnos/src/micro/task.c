@@ -215,6 +215,13 @@ int task_pml4_other_users(uint64_t *pml4, uint64_t self_pid) {
 #define REAP_GRACE_PASSES 4
 static int reap_age[MAX_TASKS];
 
+/* Defensive IPC cleanup for the pid about to be recycled. proc_exit
+ * already calls ipc_drop_for_pid, but a few cases can leave a msg
+ * behind (e.g., another task sent to this pid just before exit, and
+ * its msg landed in the queue *after* drop ran but before state
+ * flipped to ZOMBIE — narrow race in cooperative kernel paths). */
+extern void ipc_drop_for_pid(uint64_t pid);
+
 void task_reap_dead(void) {
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].state != TASK_DEAD) {
@@ -225,6 +232,9 @@ void task_reap_dead(void) {
             reap_age[i]++;
             continue;
         }
+        /* Final pass: drop any orphan IPCs to this pid before the
+         * slot becomes UNUSED and the pid potentially gets reused. */
+        ipc_drop_for_pid(tasks[i].pid);
         task_clear(&tasks[i]);
         reap_age[i] = 0;
     }

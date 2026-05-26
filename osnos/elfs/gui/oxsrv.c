@@ -140,7 +140,30 @@ static int         g_dirty = 1;
 static int g_dirty_full = 1;
 static int g_dirty_x0 = 0, g_dirty_y0 = 0, g_dirty_x1 = 0, g_dirty_y1 = 0;
 
-static void mark_dirty_full(void) { g_dirty_full = 1; }
+/* Forward refs — counters defined later in the diagnostics block. */
+static const char *g_last_full_reason = "init";
+static uint64_t g_full_alloc, g_full_destroy, g_full_raise,
+                g_full_reload, g_full_other;
+static uint64_t g_destroy_us_total, g_destroy_us_max, g_destroy_count;
+static uint64_t g_loop_iters;     /* main-loop iterations since boot */
+/* Event counts — tell us how many mouse/kbd/ipc events actually
+ * arrived. If iters is low and events are also low, the user just
+ * isn't generating input. If iters is low but events are high, our
+ * wake/drain isn't keeping up. */
+static uint64_t g_mouse_events;
+static uint64_t g_kbd_events;
+static uint64_t g_ipc_events;
+static uint64_t now_us(void);
+
+static void mark_dirty_full_reason(const char *r) {
+    g_dirty_full = 1;
+    g_last_full_reason = r;
+    if      (r[0]=='a') g_full_alloc++;
+    else if (r[0]=='d') g_full_destroy++;
+    else if (r[0]=='r' && r[1]=='a') g_full_raise++;
+    else if (r[0]=='r' && r[1]=='e') g_full_reload++;
+    else                g_full_other++;
+}
 
 static void mark_dirty(int x, int y, int w, int h) {
     if (g_dirty_full) return;
@@ -191,6 +214,15 @@ static const menu_item_t g_menu[] = {
 /* Set when "Exit Ox" is chosen — main loop breaks on next iteration. */
 static int g_quit = 0;
 #define MENU_N (sizeof(g_menu)/sizeof(g_menu[0]))
+
+/* Mark only the menu's bounding box as dirty. Every menu interaction
+ * (open / close / hover / item-pick) touches at most this rect, so a
+ * dirty-rect composite suffices — no full-screen repaint needed.
+ * Sin esto, cada hover sobre un item del menu = 4 MB memcpy + 4 MB blit. */
+static void mark_menu_dirty(void) {
+    int mh = (int)MENU_N * MENU_ITEM_H + 8;
+    mark_dirty(g_menu_x, g_menu_y, MENU_W, mh);
+}
 
 /* Adwaita dark palette (GNOME 40+). */
 #define COL_HDR_BG      OX_RGB( 30, 30, 30)   /* #1e1e1e headerbar */
@@ -650,7 +682,7 @@ static int alloc_window(uint64_t owner_pid, int w, int h, const char *title) {
                 g_focus_slot = i;
             }
             g_dirty = 1;
-            mark_dirty_full();
+            mark_dirty_full_reason("alloc");
             return i;
         }
     }
@@ -672,6 +704,7 @@ static int find_owner_slot(uint64_t pid, int id) {
 
 static void destroy_slot(int slot) {
     if (slot < 0 || slot >= MAX_WINS || !g_wins[slot].used) return;
+    uint64_t t_destroy0 = now_us();
     if (g_wins[slot].back && g_wins[slot].back_bytes) {
         munmap(g_wins[slot].back, g_wins[slot].back_bytes);
     }
@@ -683,6 +716,10 @@ static void destroy_slot(int slot) {
         shm_unlink(g_wins[slot].shm_name);
         g_wins[slot].shm_name[0] = 0;
     }
+    uint64_t dt = now_us() - t_destroy0;
+    g_destroy_us_total += dt;
+    if (dt > g_destroy_us_max) g_destroy_us_max = dt;
+    g_destroy_count++;
     g_wins[slot].back = 0;
     g_wins[slot].back_bytes = 0;
     g_wins[slot].used = 0;
@@ -696,11 +733,18 @@ static void destroy_slot(int slot) {
         g_focus_slot = (g_stack_n > 0) ? g_stack[g_stack_n - 1] : -1;
     }
     g_dirty = 1;
-    mark_dirty_full();
+    mark_dirty_full_reason("destroy");
 }
 
 static void raise_slot(int slot) {
     if (slot < 0 || slot >= MAX_WINS || !g_wins[slot].used) return;
+    /* No-op if already on top — saves a full repaint on every click
+     * within the same focused window. Big win for oxsettings/oxfiles
+     * where each tile click hits raise_slot. */
+    if (g_stack_n > 0 && g_stack[g_stack_n - 1] == slot &&
+        g_focus_slot == slot) {
+        return;
+    }
     int j = 0;
     for (int i = 0; i < g_stack_n; i++) {
         if (g_stack[i] != slot) g_stack[j++] = g_stack[i];
@@ -709,7 +753,7 @@ static void raise_slot(int slot) {
     g_stack_n = j;
     g_focus_slot = slot;
     g_dirty = 1;
-    mark_dirty_full();
+    mark_dirty_full_reason("raise");
 }
 
 /* ---------------- Compositor ------------------------------------ */
@@ -920,15 +964,31 @@ static int g_last_cursor_x = -1, g_last_cursor_y = -1;
 static uint64_t g_composite_full_count = 0;
 static uint64_t g_composite_dirty_count = 0;
 static uint64_t g_ipc_drained_count = 0;
+static uint64_t g_full_us_total = 0;     /* sum of microsec spent in full */
+static uint64_t g_dirty_us_total = 0;    /* sum of microsec spent in dirty */
+static uint64_t g_full_us_max = 0;       /* worst single full repaint */
+static uint64_t g_dirty_us_max = 0;      /* worst single dirty repaint */
+static uint64_t g_dirty_area_total = 0;  /* sum of dirty rect pixels */
+
+static uint64_t now_us(void) {
+    struct timespec ts;
+    clock_gettime(0, &ts);
+    return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
 
 static void composite_and_flush(void) {
     if (!g_back || !g_back_clean || !g_wp_scaled) return;
 
     int full = g_dirty_full || g_dirty_x0 >= g_dirty_x1;
+    uint64_t t0 = now_us();
+    uint64_t dirty_area = 0;
     if (full) {
         g_composite_full_count++;
     } else {
         g_composite_dirty_count++;
+        dirty_area = (uint64_t)(g_dirty_x1 - g_dirty_x0) *
+                     (uint64_t)(g_dirty_y1 - g_dirty_y0);
+        g_dirty_area_total += dirty_area;
     }
     if (full) {
         /* Full: rebuild no-cursor + cache, then draw cursor on top. */
@@ -997,6 +1057,16 @@ static void composite_and_flush(void) {
     g_dirty_full = 0;
     g_dirty_x0 = g_dirty_x1 = 0;
     g_dirty_y0 = g_dirty_y1 = 0;
+    uint64_t dt = now_us() - t0;
+    if (full) {
+        g_full_us_total += dt;
+        if (dt > g_full_us_max) g_full_us_max = dt;
+    } else {
+        g_dirty_us_total += dt;
+        if (dt > g_dirty_us_max) g_dirty_us_max = dt;
+        /* Track dirty rect area to see if Settings is dirtying huge
+         * rects. dx0/x1 were already cleared above; use saved values. */
+    }
 }
 
 /* ---------------- Spawn helper ---------------------------------- */
@@ -1236,18 +1306,25 @@ static void handle_ipc(const ipc_msg_t *m) {
     case IPC_OX_PRESENT: {
         int slot = find_owner_slot(from, (int)m->arg0);
         if (slot < 0) return;
-        if (g_wins[slot].dirty) {
-            g_wins[slot].dirty = 0;
-            g_dirty = 1;
-            /* Only this window changed; mark its frame bbox dirty
-             * (including shadow margin) so other windows don't get
-             * needlessly re-painted. */
-            ox_window_t *w = &g_wins[slot];
-            mark_dirty(w->x - SHADOW_DEPTH,
-                       w->y - TITLEBAR_H - SHADOW_DEPTH,
-                       w->w + 2 * SHADOW_DEPTH,
-                       TITLEBAR_H + w->h + 2 * SHADOW_DEPTH + SHADOW_OFFSET);
-        }
+        /* CRITICAL: with SHM-backed windows, draws are LOCAL writes
+         * (no DRAW_RECT/TEXT/IMAGE IPCs), so g_wins[slot].dirty is
+         * never set. PRESENT is the ONLY signal that "client finished
+         * a frame" — must always trigger a composite, no flag check.
+         *
+         * The legacy `if (g_wins[slot].dirty)` gate is what made
+         * oxsettings appear empty until a second app opened (the
+         * second app's alloc_window triggered a full repaint that
+         * incidentally repainted settings with its loaded thumbs).
+         * Same root cause for "mouse lag after close": the close
+         * triggered a full repaint but subsequent client redraws
+         * never composited until next focus change. */
+        g_wins[slot].dirty = 0;
+        g_dirty = 1;
+        ox_window_t *w = &g_wins[slot];
+        mark_dirty(w->x - SHADOW_DEPTH,
+                   w->y - TITLEBAR_H - SHADOW_DEPTH,
+                   w->w + 2 * SHADOW_DEPTH,
+                   TITLEBAR_H + w->h + 2 * SHADOW_DEPTH + SHADOW_OFFSET);
         return;
     }
     case IPC_OX_SET_TITLE: {
@@ -1369,13 +1446,24 @@ static void process_mouse_event(mouse_event_t ev) {
     /* If a window is being dragged, follow the cursor. */
     if (g_focus_slot >= 0 && g_wins[g_focus_slot].dragging) {
         if (new_b & MOUSE_BTN_LEFT) {
-            g_wins[g_focus_slot].x = g_cx - g_wins[g_focus_slot].drag_off_x;
-            g_wins[g_focus_slot].y = g_cy - g_wins[g_focus_slot].drag_off_y;
+            ox_window_t *dw = &g_wins[g_focus_slot];
+            int old_x = dw->x, old_y = dw->y;
+            int new_x = g_cx - dw->drag_off_x;
+            int new_y = g_cy - dw->drag_off_y;
+            dw->x = new_x;
+            dw->y = new_y;
             g_dirty = 1;
-            /* Dragging changes lots of pixels — fall back to full repaint
-             * since the window's old position needs wallpaper restored
-             * and new position needs the window drawn. */
-            mark_dirty_full();
+            /* Mark dirty UNION of old + new window bbox (with shadow
+             * margin). Old position needs wallpaper restored; new
+             * position needs the window drawn. This keeps a smooth
+             * drag fast — instead of 12 MB memcpy per pixel of drag,
+             * we touch only the affected window region. */
+            int fw = dw->w + 2 * SHADOW_DEPTH;
+            int fh = TITLEBAR_H + dw->h + 2 * SHADOW_DEPTH + SHADOW_OFFSET;
+            mark_dirty(old_x - SHADOW_DEPTH,
+                       old_y - TITLEBAR_H - SHADOW_DEPTH, fw, fh);
+            mark_dirty(new_x - SHADOW_DEPTH,
+                       new_y - TITLEBAR_H - SHADOW_DEPTH, fw, fh);
         } else {
             g_wins[g_focus_slot].dragging = 0;
         }
@@ -1398,16 +1486,19 @@ static void process_mouse_event(mouse_event_t ev) {
                     else if (g_menu[idx].action == 2) g_quit = 1;
                     else if (g_menu[idx].path) spawn_app(g_menu[idx].path);
                     g_dirty = 1;
+                    mark_menu_dirty();
                     return;
                 }
             }
             g_dirty = 1;   /* hover hilight */
+            mark_menu_dirty();
             return;
         } else {
             /* Click outside menu closes it. */
             if ((new_b & MOUSE_BTN_LEFT) && !(old_b & MOUSE_BTN_LEFT)) {
                 g_menu_visible = 0;
                 g_dirty = 1;
+                mark_menu_dirty();
             }
         }
     }
@@ -1423,6 +1514,7 @@ static void process_mouse_event(mouse_event_t ev) {
                 g_menu_y = (int)g_scr_h - (int)MENU_N * MENU_ITEM_H - 6;
             g_menu_visible = 1;
             g_dirty = 1;
+            mark_menu_dirty();
             return;
         }
     }
@@ -1495,14 +1587,17 @@ static void process_kbd_event(int ascii, int keycode) {
     }
     /* F1 toggles menu at cursor. */
     if (ascii == 0 && keycode == 59) {
-        if (g_menu_visible) g_menu_visible = 0;
-        else {
+        if (g_menu_visible) {
+            mark_menu_dirty();   /* mark BEFORE clearing visibility */
+            g_menu_visible = 0;
+        } else {
             g_menu_x = g_cx;
             g_menu_y = g_cy;
             if (g_menu_x + MENU_W > (int)g_scr_w) g_menu_x = (int)g_scr_w - MENU_W;
             if (g_menu_y + (int)MENU_N * MENU_ITEM_H + 6 > (int)g_scr_h)
                 g_menu_y = (int)g_scr_h - (int)MENU_N * MENU_ITEM_H - 6;
             g_menu_visible = 1;
+            mark_menu_dirty();
         }
         g_dirty = 1;
         return;
@@ -1702,6 +1797,7 @@ int main(int argc, char **argv) {
             process_mouse_event(ev);
             drained++;
         }
+        g_mouse_events += drained;
         struct { char ascii; uint16_t keycode; } kev;
         int kdrained = 0;
         while (kdrained < 32 &&
@@ -1709,6 +1805,7 @@ int main(int argc, char **argv) {
             process_kbd_event((int)(unsigned char)kev.ascii, (int)kev.keycode);
             kdrained++;
         }
+        g_kbd_events += kdrained;
         /* Drain the ENTIRE queue per iteration. */
         ipc_msg_t m;
         int idrained = 0;
@@ -1717,6 +1814,7 @@ int main(int argc, char **argv) {
             idrained++;
         }
         g_ipc_drained_count += idrained;
+        g_ipc_events += idrained;
         /* Get the current time ONCE per iteration — multiple
          * throttles (reap, move, heartbeat) share this. Avoids 3×
          * clock_gettime syscalls at every event-driven wake. */
@@ -1754,10 +1852,12 @@ int main(int argc, char **argv) {
         /* Heartbeat every ~2 SECONDS (time-based, not frame-based —
          * event-driven loop fires hundreds of times per second). */
         static uint64_t last_hb_ms = 0;
-        if (ttyfd >= 0 && now_ms - last_hb_ms >= 2000) {
+        /* Heartbeat to /dev/ttyS0 — blocks ~22ms writing 250 bytes at
+         * 115200 baud (UART busy-loops byte-by-byte). Spacing it to
+         * 5 sec keeps the freeze visible <0.5% of the time. */
+        if (ttyfd >= 0 && now_ms - last_hb_ms >= 5000) {
             last_hb_ms = now_ms;
-            char hb[256];
-            void *brk = sbrk(0);
+            char hb[320];
             unsigned long mem_free_kb = 0, ipc_used = 0;
             int sfd = open("/sys/meminfo", O_RDONLY);
             if (sfd >= 0) {
@@ -1773,16 +1873,55 @@ int main(int argc, char **argv) {
                         ipc_used = strtoul(p + 8, 0, 10);
                 }
             }
+            unsigned long avg_dirty_px = g_composite_dirty_count
+                ? (unsigned long)(g_dirty_area_total /
+                                  g_composite_dirty_count) : 0;
+            /* Iteration rate since previous heartbeat — tells us if
+             * the main loop is actually spinning fast. <60 Hz means
+             * we're missing mouse events. */
+            static uint64_t last_hb_iters = 0;
+            uint64_t iters_delta = g_loop_iters - last_hb_iters;
+            last_hb_iters = g_loop_iters;
+            unsigned long iter_hz = (unsigned long)(iters_delta / 5);
+            /* Per-period event rates so we can see if events are
+             * stuck at the kernel/driver layer or actually arriving. */
+            static uint64_t last_hb_mouse = 0, last_hb_kbd = 0,
+                            last_hb_ipc = 0;
+            unsigned long mhz = (unsigned long)((g_mouse_events - last_hb_mouse) / 5);
+            unsigned long khz = (unsigned long)((g_kbd_events   - last_hb_kbd) / 5);
+            unsigned long ihz = (unsigned long)((g_ipc_events   - last_hb_ipc) / 5);
+            last_hb_mouse = g_mouse_events;
+            last_hb_kbd   = g_kbd_events;
+            last_hb_ipc   = g_ipc_events;
             int n = snprintf(hb, sizeof(hb),
-                "oxsrv: wins=%d memfree=%lukB ipc=%lu | full=%lu dirty=%lu drains=%lu brk=0x%lx\n",
-                g_stack_n, mem_free_kb, ipc_used,
+                "oxsrv: wins=%d memfree=%lukB ipc=%lu iters=%luHz "
+                "ev/s(m=%lu k=%lu i=%lu) | "
+                "full=%lu(a=%lu d=%lu r=%lu rs=%lu o=%lu) "
+                "dirty=%lu | t_full_ms=%lu(max=%lu) t_dirty_ms=%lu(max=%lu avg_px=%lu) "
+                "t_destroy_ms=%lu(max=%lu n=%lu) drains=%lu last=%s\n",
+                g_stack_n, mem_free_kb, ipc_used, iter_hz,
+                mhz, khz, ihz,
                 (unsigned long)g_composite_full_count,
+                (unsigned long)g_full_alloc,
+                (unsigned long)g_full_destroy,
+                (unsigned long)g_full_raise,
+                (unsigned long)g_full_reload,
+                (unsigned long)g_full_other,
                 (unsigned long)g_composite_dirty_count,
+                (unsigned long)(g_full_us_total / 1000),
+                (unsigned long)(g_full_us_max / 1000),
+                (unsigned long)(g_dirty_us_total / 1000),
+                (unsigned long)(g_dirty_us_max / 1000),
+                avg_dirty_px,
+                (unsigned long)(g_destroy_us_total / 1000),
+                (unsigned long)(g_destroy_us_max / 1000),
+                (unsigned long)g_destroy_count,
                 (unsigned long)g_ipc_drained_count,
-                (unsigned long)brk);
+                g_last_full_reason ? g_last_full_reason : "-");
             if (n > 0) write(ttyfd, hb, n);
         }
         frame++;
+        g_loop_iters++;
         /* Event-driven wait: block in the kernel until ANY of mouse,
          * keyboard, or IPC has data ready — no userland busy-spin.
          * Wake hooks (devfs_mouse_push, devfs_input_push,

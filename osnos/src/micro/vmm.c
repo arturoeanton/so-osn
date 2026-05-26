@@ -272,9 +272,15 @@ void address_space_destroy(uint64_t *pml4) {
                 uint64_t *pt = table_of(pd[k]);
 
                 for (int l = 0; l < 512; l++) {
-                    if (pt[l] & PTE_P) {
-                        pmm_free_page(pt[l] & PTE_ADDR_MASK);
-                    }
+                    if (!(pt[l] & PTE_P)) continue;
+                    /* PTE_SHM: la página la posee un shm_obj — el último
+                     * shm_unref hará pmm_free_page. Liberarla acá sería
+                     * double-free: oxsrv aún la tiene mapeada, y al
+                     * recycle el PMM se la entregaría a otro alloc.
+                     * Eso es la causa raíz del "lag/glitch tras cerrar
+                     * una app gráfica". */
+                    if (pt[l] & PTE_SHM) continue;
+                    pmm_free_page(pt[l] & PTE_ADDR_MASK);
                 }
                 pmm_free_page(pd[k] & PTE_ADDR_MASK);
             }
