@@ -363,7 +363,7 @@ void bootstrap_fs(void) {
         /* Ox window-system settings (FASE 12). oxsrv reads this at
          * boot; /bin/oxsettings rewrites it. */
         seed_if_absent("/home/.oxrc",
-            "current_wallpaper=samurai\n");
+            "current_wallpaper=wallpaper1\n");
         /* Ensure /home/wallpapers/ exists even when no PPMs were
          * shipped on the disk image (rare — sd.img seeds them, but
          * a hand-edited disk might lack the dir). vfs_mkdir is

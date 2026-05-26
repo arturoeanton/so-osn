@@ -32,6 +32,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mouse.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -42,10 +43,15 @@ extern char **environ;
 #define MAX_WINS        16
 #define MAX_WIN_W       1024
 #define MAX_WIN_H       768
-#define TITLEBAR_H      18
-#define BORDER_W        2
-#define MENU_ITEM_H     22
-#define MENU_W          180
+#define TITLEBAR_H      22         /* Adwaita-style headerbar */
+#define BORDER_W        0          /* no visible border; shadow does the work */
+#define CORNER_RADIUS   8
+#define SHADOW_DEPTH    5
+#define SHADOW_OFFSET   3          /* downward bias (light source from top) */
+#define CLOSE_BTN_SIZE  14
+#define CLOSE_BTN_PAD   ((TITLEBAR_H - CLOSE_BTN_SIZE) / 2)
+#define MENU_ITEM_H     26
+#define MENU_W          200
 #define CURSOR_W        12
 #define CURSOR_H        17
 #define WALLPAPER_PATH_LEN 96
@@ -80,7 +86,7 @@ static int      g_input_fd  = -1;
 static uint32_t g_scr_w = 0, g_scr_h = 0;
 static uint32_t *g_back = 0;          /* w*h BGRA backbuffer */
 
-static char     g_wp_name[64] = "samurai";
+static char     g_wp_name[64] = "wallpaper1";
 static uint32_t *g_wp_scaled  = 0;    /* w*h scaled BGRA      */
 
 static int      g_cx = 0, g_cy = 0;
@@ -115,6 +121,42 @@ static int         g_next_id    = 1;
 
 static int         g_dirty = 1;
 
+/* Dirty-rect tracking — when only the cursor moved (most common case),
+ * we know exactly what changed visually: old cursor area + new cursor
+ * area. Re-composite only that region and blit only that region to FB.
+ * Drops per-frame work from 1280×800 (1M pixels memcpy + blit) to
+ * ~30×30 (~900 pixels) when cursor moves over wallpaper.
+ * g_dirty_full=1 forces the legacy full-screen path. */
+static int g_dirty_full = 1;
+static int g_dirty_x0 = 0, g_dirty_y0 = 0, g_dirty_x1 = 0, g_dirty_y1 = 0;
+
+static void mark_dirty_full(void) { g_dirty_full = 1; }
+
+static void mark_dirty(int x, int y, int w, int h) {
+    if (g_dirty_full) return;
+    int x1 = x + w, y1 = y + h;
+    if (x  < 0)               x  = 0;
+    if (y  < 0)               y  = 0;
+    if (x1 > (int)g_scr_w)    x1 = (int)g_scr_w;
+    if (y1 > (int)g_scr_h)    y1 = (int)g_scr_h;
+    if (x >= x1 || y >= y1)   return;
+    if (g_dirty_x0 >= g_dirty_x1) {            /* first dirty mark this frame */
+        g_dirty_x0 = x;  g_dirty_y0 = y;
+        g_dirty_x1 = x1; g_dirty_y1 = y1;
+    } else {
+        if (x  < g_dirty_x0) g_dirty_x0 = x;
+        if (y  < g_dirty_y0) g_dirty_y0 = y;
+        if (x1 > g_dirty_x1) g_dirty_x1 = x1;
+        if (y1 > g_dirty_y1) g_dirty_y1 = y1;
+    }
+}
+
+static int rect_intersects(int ax, int ay, int aw, int ah,
+                            int bx0, int by0, int bx1, int by1) {
+    int ax1 = ax + aw, ay1 = ay + ah;
+    return ax < bx1 && ax1 > bx0 && ay < by1 && ay1 > by0;
+}
+
 /* Menu state. */
 static int  g_menu_visible = 0;
 static int  g_menu_x = 0, g_menu_y = 0;
@@ -130,21 +172,32 @@ static const menu_item_t g_menu[] = {
     { "Notepad",     "/bin/oxnotepad",   0 },
     { "Calculator",  "/bin/oxcalc",      0 },
     { "Terminal",    "/bin/oxterm",      0 },
+    { "Processes",   "/bin/oxtop",       0 },
     { "Settings",    "/bin/oxsettings",  0 },
+    { "Exit Ox",     0,                  2 },
     { "Reboot",      0,                  1 },
 };
+
+/* Set when "Exit Ox" is chosen — main loop breaks on next iteration. */
+static int g_quit = 0;
 #define MENU_N (sizeof(g_menu)/sizeof(g_menu[0]))
 
-/* Colours (BGRA — alpha ignored). */
+/* Adwaita dark palette (GNOME 40+). */
+#define COL_HDR_BG      OX_RGB( 30, 30, 30)   /* #1e1e1e headerbar */
+#define COL_HDR_INA     OX_RGB( 23, 23, 23)   /* darker when unfocused */
+#define COL_BODY_BG     OX_RGB( 36, 36, 36)   /* #242424 window body */
+#define COL_DIVIDER     OX_RGB( 18, 18, 18)   /* below headerbar */
 #define COL_TITLE_FG    OX_RGB(255,255,255)
-#define COL_TITLE_BG    OX_RGB( 60, 90,170)
-#define COL_TITLE_INACT OX_RGB( 90, 90, 90)
-#define COL_BORDER      OX_RGB( 30, 30, 30)
-#define COL_BG          OX_RGB(220,220,220)
-#define COL_MENU_BG     OX_RGB( 40, 40, 40)
-#define COL_MENU_FG     OX_RGB(230,230,230)
-#define COL_MENU_HI     OX_RGB( 80,120,200)
-#define COL_CLOSE_FG    OX_RGB(255,180,180)
+#define COL_TITLE_DIM   OX_RGB(154,153,150)   /* #9a9996 unfocused */
+#define COL_BG          OX_RGB(220,220,220)   /* legacy */
+#define COL_MENU_BG     OX_RGB( 36, 36, 36)   /* same as body */
+#define COL_MENU_FG     OX_RGB(238,238,236)
+#define COL_MENU_FG_HI  OX_RGB(255,255,255)
+#define COL_MENU_HI     OX_RGB( 53,132,228)   /* #3584e4 Adwaita blue */
+#define COL_MENU_SEP    OX_RGB( 56, 56, 56)
+#define COL_CLOSE_BG    OX_RGB( 60, 60, 60)   /* subtle gray pill */
+#define COL_CLOSE_BG_F  OX_RGB(192, 28, 40)   /* #c01c28 red on hover */
+#define COL_CLOSE_FG    OX_RGB(255,255,255)
 
 /* ---------------- Utility drawing into BGRA buffer --------------- */
 
@@ -205,6 +258,168 @@ static void buf_blit(uint32_t *dst, int dst_w, int dst_h,
         const uint32_t *sp = src + (size_t)(sy0 + (row - y0)) * sw + sx0;
         uint32_t *dp = dst + (size_t)row * dst_w + x0;
         memcpy(dp, sp, (size_t)(x1 - x0) * sizeof(uint32_t));
+    }
+}
+
+/* ---------------- Modern drawing primitives (Adwaita dark) ------- */
+
+/* Fast alpha-blend using >>8 instead of /255. Slightly biased
+ * (alpha=255 produces 254 instead of 255) but visually identical
+ * and ~3x faster than the exact integer path. */
+static inline uint32_t blend_fast(uint32_t dst, uint32_t color, uint32_t alpha) {
+    uint32_t inv = 256u - alpha;
+    uint32_t sr = (color >> 16) & 0xFF, sg = (color >> 8) & 0xFF, sb = color & 0xFF;
+    uint32_t dr = (dst   >> 16) & 0xFF, dg = (dst   >> 8) & 0xFF, db = dst   & 0xFF;
+    uint32_t r = (sr * alpha + dr * inv) >> 8;
+    uint32_t g = (sg * alpha + dg * inv) >> 8;
+    uint32_t b = (sb * alpha + db * inv) >> 8;
+    return (r << 16) | (g << 8) | b;
+}
+
+/* Bulk-blend a solid color over a rectangular region. Inner loop is
+ * inlined (no per-pixel function call), bounds are clipped once. */
+static void buf_blend_rect(uint32_t *buf, int bw, int bh,
+                            int x, int y, int w, int h,
+                            uint32_t color, uint8_t alpha) {
+    if (alpha == 0 || !buf) return;
+    if (alpha >= 255) { buf_fill_rect(buf, bw, bh, x, y, w, h, color); return; }
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > bw) w = bw - x;
+    if (y + h > bh) h = bh - y;
+    if (w <= 0 || h <= 0) return;
+    uint32_t a = (uint32_t)alpha;
+    for (int row = 0; row < h; row++) {
+        uint32_t *p = buf + (size_t)(y + row) * bw + x;
+        for (int col = 0; col < w; col++) {
+            p[col] = blend_fast(p[col], color, a);
+        }
+    }
+}
+
+/* Filled rounded rectangle — corner pixels outside the inscribed
+ * circles are skipped (left as wallpaper). r=0 falls through to a
+ * plain rect. */
+static void buf_fill_rounded(uint32_t *buf, int bw, int bh,
+                              int x, int y, int w, int h, int r,
+                              uint32_t color) {
+    if (r <= 0) { buf_fill_rect(buf, bw, bh, x, y, w, h, color); return; }
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
+    buf_fill_rect(buf, bw, bh, x, y + r, w, h - 2 * r, color);
+    int r2 = r * r;
+    for (int dy = 0; dy < r; dy++) {
+        int span = 0;
+        for (int dx = 0; dx < r; dx++) {
+            int ex = r - 1 - dx, ey = r - 1 - dy;
+            if (ex * ex + ey * ey <= r2) { span = r - dx; break; }
+        }
+        int row_w = w - 2 * (r - span);
+        int row_x = x + (r - span);
+        buf_fill_rect(buf, bw, bh, row_x, y + dy,         row_w, 1, color);
+        buf_fill_rect(buf, bw, bh, row_x, y + h - 1 - dy, row_w, 1, color);
+    }
+}
+
+/* buf_blit variant that masks the bottom-N rows by an inscribed circle
+ * radius r — so the bottom corners stay un-touched (preserving the
+ * rounded background they're sitting on). Used for the body blit so
+ * client rectangular content doesn't square off the rounded window. */
+static void buf_blit_rounded_bot(uint32_t *dst, int dw, int dh,
+                                  int dx, int dy,
+                                  const uint32_t *src, int sw, int sh,
+                                  int r) {
+    if (r <= 0) {
+        buf_blit(dst, dw, dh, dx, dy, src, sw, sh);
+        return;
+    }
+    if (r > sw / 2) r = sw / 2;
+    if (r > sh / 2) r = sh / 2;
+    int r2 = r * r;
+    int x0 = dx, y0 = dy;
+    int x1 = dx + sw, y1 = dy + sh;
+    int sx0 = 0, sy0 = 0;
+    if (x0 < 0) { sx0 = -x0; x0 = 0; }
+    if (y0 < 0) { sy0 = -y0; y0 = 0; }
+    if (x1 > dw) x1 = dw;
+    if (y1 > dh) y1 = dh;
+    if (x0 >= x1 || y0 >= y1) return;
+    int sh_top = sh - r;            /* rows above the rounded region */
+    for (int row = y0; row < y1; row++) {
+        int s_row = sy0 + (row - y0);
+        const uint32_t *sp = src + (size_t)s_row * sw + sx0;
+        uint32_t *dp = dst + (size_t)row * dw + x0;
+        if (s_row < sh_top) {
+            /* Above corner region — full-width copy. */
+            memcpy(dp, sp, (size_t)(x1 - x0) * sizeof(uint32_t));
+        } else {
+            /* In the bottom corner region. Compute the inscribed span
+             * for this row and skip pixels outside it. */
+            int dy_corner = s_row - sh_top;            /* 0..r-1 */
+            int span = 0;
+            for (int dx2 = 0; dx2 < r; dx2++) {
+                int ex = r - 1 - dx2, ey = dy_corner;
+                if (ex * ex + ey * ey <= r2) { span = r - dx2; break; }
+            }
+            int row_inset = r - span;                  /* px skipped each side */
+            int row_w = sw - 2 * row_inset;
+            int copy_x0 = x0 + row_inset, copy_x1 = x1 - row_inset;
+            if (copy_x0 < copy_x1) {
+                memcpy(dst + (size_t)row * dw + copy_x0,
+                       src + (size_t)s_row * sw + sx0 + row_inset,
+                       (size_t)(copy_x1 - copy_x0) * sizeof(uint32_t));
+            }
+            (void)row_w;
+        }
+    }
+}
+
+/* Soft drop shadow — paints each layer's EXPOSED WINGS only (the
+ * layer's rect minus the frame area). Adjacent layers' wings overlap
+ * for pixels closer to the frame; each overlap stacks alpha-over,
+ * giving correct gradient falloff identical to the old solid-nested-
+ * rect approach but at ~25x less work (skips the interior that the
+ * frame would overwrite anyway). */
+static void buf_draw_shadow(uint32_t *buf, int bw, int bh,
+                             int x, int y, int w, int h) {
+    /* Raw per-layer alphas (outer → inner). Painted outer-first so
+     * the inner-frame area accumulates darker on top. */
+    static const uint8_t raw_alpha[SHADOW_DEPTH] = { 15, 25, 40, 60, 90 };
+    uint32_t color = OX_RGB(0, 0, 0);
+    int oy = SHADOW_OFFSET;
+    for (int i = 0; i < SHADOW_DEPTH; i++) {
+        int m = SHADOW_DEPTH - i;                /* margin: 5 → 1 (outer → inner) */
+        uint8_t a = raw_alpha[i];
+        int sx = x - m;
+        int sy = y - m + oy;
+        int sw = w + 2 * m;
+        int sh = h + 2 * m;
+        int sx2 = sx + sw;     /* exclusive */
+        int sy2 = sy + sh;
+        int fx2 = x + w;
+        int fy2 = y + h;
+        /* Top wing — above frame top, full strip width. */
+        if (sy < y) {
+            buf_blend_rect(buf, bw, bh,
+                           sx, sy, sw, y - sy, color, a);
+        }
+        /* Bottom wing — below frame bottom. */
+        if (sy2 > fy2) {
+            buf_blend_rect(buf, bw, bh,
+                           sx, fy2, sw, sy2 - fy2, color, a);
+        }
+        /* Left wing — left of frame, restricted to frame's Y range. */
+        int wy0 = sy > y      ? sy  : y;
+        int wy1 = sy2 < fy2   ? sy2 : fy2;
+        if (sx < x && wy0 < wy1) {
+            buf_blend_rect(buf, bw, bh,
+                           sx, wy0, x - sx, wy1 - wy0, color, a);
+        }
+        /* Right wing. */
+        if (sx2 > fx2 && wy0 < wy1) {
+            buf_blend_rect(buf, bw, bh,
+                           fx2, wy0, sx2 - fx2, wy1 - wy0, color, a);
+        }
     }
 }
 
@@ -404,6 +619,7 @@ static int alloc_window(uint64_t owner_pid, int w, int h, const char *title) {
                 g_focus_slot = i;
             }
             g_dirty = 1;
+            mark_dirty_full();
             return i;
         }
     }
@@ -438,6 +654,7 @@ static void destroy_slot(int slot) {
         g_focus_slot = (g_stack_n > 0) ? g_stack[g_stack_n - 1] : -1;
     }
     g_dirty = 1;
+    mark_dirty_full();
 }
 
 static void raise_slot(int slot) {
@@ -450,6 +667,7 @@ static void raise_slot(int slot) {
     g_stack_n = j;
     g_focus_slot = slot;
     g_dirty = 1;
+    mark_dirty_full();
 }
 
 /* ---------------- Compositor ------------------------------------ */
@@ -458,53 +676,99 @@ static void draw_window_frame(int slot) {
     ox_window_t *w = &g_wins[slot];
     int wx = w->x, wy = w->y, ww = w->w, wh = w->h;
     int focused = (slot == g_focus_slot);
-    /* Border. */
+
+    /* Frame bounds = headerbar + body (no extra border — shadow alone
+     * separates the window from the wallpaper). */
+    int fx = wx;
+    int fy = wy - TITLEBAR_H;
+    int fw = ww;
+    int fh = TITLEBAR_H + wh;
+
+    /* 1. Soft drop shadow. */
+    buf_draw_shadow(g_back, g_scr_w, g_scr_h, fx, fy, fw, fh);
+
+    /* 2. Rounded outer shape — unified body color first. The headerbar
+     * overpaints the top region; bottom corners stay body-colored. */
+    buf_fill_rounded(g_back, g_scr_w, g_scr_h,
+                     fx, fy, fw, fh, CORNER_RADIUS, COL_BODY_BG);
+
+    /* 3. Headerbar — flat color, only top corners rounded. We paint the
+     * full-width rect over the rounded body's top region. To preserve
+     * the top rounded corners we use buf_fill_rounded with the same
+     * radius and full headerbar height (the corner clipping clips the
+     * top corners; the bottom row is just one flat line — accepted
+     * since the divider below covers any seam). */
+    uint32_t hdr = focused ? COL_HDR_BG : COL_HDR_INA;
+    buf_fill_rounded(g_back, g_scr_w, g_scr_h,
+                     fx, fy, fw, TITLEBAR_H, CORNER_RADIUS, hdr);
+
+    /* 4. 1-px subtle divider between headerbar and body. */
     buf_fill_rect(g_back, g_scr_w, g_scr_h,
-                  wx - BORDER_W, wy - TITLEBAR_H - BORDER_W,
-                  ww + 2 * BORDER_W, TITLEBAR_H + wh + 2 * BORDER_W,
-                  COL_BORDER);
-    /* Title bar. */
-    uint32_t tb = focused ? COL_TITLE_BG : COL_TITLE_INACT;
-    buf_fill_rect(g_back, g_scr_w, g_scr_h,
-                  wx, wy - TITLEBAR_H, ww, TITLEBAR_H, tb);
-    /* Title text. */
+                  fx + CORNER_RADIUS, fy + TITLEBAR_H - 1,
+                  fw - 2 * CORNER_RADIUS, 1, COL_DIVIDER);
+
+    /* 5. Title text — centered horizontally in the headerbar. */
+    int title_w = 0;
+    for (const char *p = w->title; *p; p++) title_w += 8;
+    int text_x = fx + (fw - title_w) / 2;
+    int text_y = fy + (TITLEBAR_H - 8) / 2;
     buf_draw_text(g_back, g_scr_w, g_scr_h,
-                   wx + 6, wy - TITLEBAR_H + 5,
-                   w->title, COL_TITLE_FG);
-    /* Close button [X] on the right. */
-    int cb_x = wx + ww - TITLEBAR_H + 2;
-    buf_fill_rect(g_back, g_scr_w, g_scr_h,
-                  cb_x, wy - TITLEBAR_H + 2,
-                  TITLEBAR_H - 4, TITLEBAR_H - 4,
-                  OX_RGB(180, 50, 50));
+                  text_x, text_y, w->title,
+                  focused ? COL_TITLE_FG : COL_TITLE_DIM);
+
+    /* 6. Close button — circular pill on the right. Subtle gray by
+     * default, red on hover (Adwaita pattern). */
+    int cb_x = fx + fw - CLOSE_BTN_SIZE - CLOSE_BTN_PAD - 2;
+    int cb_y = fy + CLOSE_BTN_PAD;
+    int cb_hover = (g_cx >= cb_x && g_cx < cb_x + CLOSE_BTN_SIZE &&
+                    g_cy >= cb_y && g_cy < cb_y + CLOSE_BTN_SIZE);
+    buf_fill_rounded(g_back, g_scr_w, g_scr_h,
+                     cb_x, cb_y, CLOSE_BTN_SIZE, CLOSE_BTN_SIZE,
+                     CLOSE_BTN_SIZE / 2,
+                     cb_hover ? COL_CLOSE_BG_F : COL_CLOSE_BG);
     buf_draw_glyph(g_back, g_scr_w, g_scr_h,
-                    cb_x + 3, wy - TITLEBAR_H + 5, 'x', COL_CLOSE_FG);
-    /* Body — blit window backing. */
-    buf_blit(g_back, g_scr_w, g_scr_h, wx, wy, w->back, ww, wh);
+                   cb_x + (CLOSE_BTN_SIZE - 8) / 2,
+                   cb_y + (CLOSE_BTN_SIZE - 8) / 2,
+                   'x', COL_CLOSE_FG);
+
+    /* 7. Body — blit client content with rounded-bottom mask so the
+     * window's bottom corners stay rounded (Adwaita style). */
+    buf_blit_rounded_bot(g_back, g_scr_w, g_scr_h, wx, wy,
+                         w->back, ww, wh, CORNER_RADIUS);
 }
 
 static void draw_menu(void) {
     if (!g_menu_visible) return;
-    int mh = (int)MENU_N * MENU_ITEM_H + 6;
-    /* Frame. */
-    buf_fill_rect(g_back, g_scr_w, g_scr_h,
-                  g_menu_x - 1, g_menu_y - 1,
-                  MENU_W + 2, mh + 2, COL_BORDER);
-    buf_fill_rect(g_back, g_scr_w, g_scr_h,
-                  g_menu_x, g_menu_y, MENU_W, mh, COL_MENU_BG);
+    int mh = (int)MENU_N * MENU_ITEM_H + 8;
+    int mx = g_menu_x, my = g_menu_y;
+
+    /* Shadow under the menu (same primitive as windows). */
+    buf_draw_shadow(g_back, g_scr_w, g_scr_h, mx, my, MENU_W, mh);
+
+    /* Rounded dark background. */
+    buf_fill_rounded(g_back, g_scr_w, g_scr_h,
+                     mx, my, MENU_W, mh, CORNER_RADIUS, COL_MENU_BG);
+
     /* Items. */
     for (size_t i = 0; i < MENU_N; i++) {
-        int iy = g_menu_y + 3 + (int)i * MENU_ITEM_H;
-        /* Highlight if mouse is over. */
-        if (g_cx >= g_menu_x && g_cx < g_menu_x + MENU_W &&
-            g_cy >= iy && g_cy < iy + MENU_ITEM_H) {
-            buf_fill_rect(g_back, g_scr_w, g_scr_h,
-                          g_menu_x + 1, iy,
-                          MENU_W - 2, MENU_ITEM_H, COL_MENU_HI);
+        int iy = my + 4 + (int)i * MENU_ITEM_H;
+        int hovered = (g_cx >= mx && g_cx < mx + MENU_W &&
+                       g_cy >= iy && g_cy < iy + MENU_ITEM_H);
+        if (hovered) {
+            /* Adwaita accent blue, rounded pill inside the menu. */
+            buf_fill_rounded(g_back, g_scr_w, g_scr_h,
+                             mx + 6, iy, MENU_W - 12, MENU_ITEM_H,
+                             4, COL_MENU_HI);
+        } else if (i > 0) {
+            /* Subtle separator between non-hovered items. */
+            buf_blend_rect(g_back, g_scr_w, g_scr_h,
+                           mx + 14, iy, MENU_W - 28, 1,
+                           COL_MENU_SEP, 180);
         }
         buf_draw_text(g_back, g_scr_w, g_scr_h,
-                       g_menu_x + 10, iy + 7,
-                       g_menu[i].label, COL_MENU_FG);
+                      mx + 16, iy + (MENU_ITEM_H - 8) / 2,
+                      g_menu[i].label,
+                      hovered ? COL_MENU_FG_HI : COL_MENU_FG);
     }
 }
 
@@ -523,8 +787,7 @@ static void draw_cursor(void) {
     }
 }
 
-static void composite_and_flush(void) {
-    if (!g_back || !g_wp_scaled) return;
+static void composite_full(void) {
     /* Wallpaper. */
     memcpy(g_back, g_wp_scaled,
            (size_t)g_scr_w * g_scr_h * sizeof(uint32_t));
@@ -539,7 +802,7 @@ static void composite_and_flush(void) {
     draw_menu();
     /* Cursor (always on top). */
     draw_cursor();
-    /* Push to FB. */
+    /* Push entire framebuffer to VRAM. */
     struct fb_blit_req req = {
         .x = 0, .y = 0,
         .w = g_scr_w, .h = g_scr_h,
@@ -547,6 +810,68 @@ static void composite_and_flush(void) {
         .src_pitch = g_scr_w * 4
     };
     ioctl(g_fb_fd, FBIO_BLIT, &req);
+}
+
+/* Re-composite + blit only the dirty rect. Wins big for cursor-only
+ * frames (the 90% case): ~900 px touched vs 1M for a 1280×800 screen. */
+static void composite_dirty(int dx0, int dy0, int dx1, int dy1) {
+    int dw = dx1 - dx0, dh = dy1 - dy0;
+    if (dw <= 0 || dh <= 0) return;
+    /* 1. Restore wallpaper into the dirty rect. */
+    for (int row = dy0; row < dy1; row++) {
+        memcpy(g_back     + (size_t)row * g_scr_w + dx0,
+               g_wp_scaled + (size_t)row * g_scr_w + dx0,
+               (size_t)dw * sizeof(uint32_t));
+    }
+    /* 2. Re-draw windows whose frame bbox intersects the dirty rect.
+     * The window frame includes shadow margin around it. We redraw
+     * the full window — primitives clip themselves to g_back bounds. */
+    for (int i = 0; i < g_stack_n; i++) {
+        int slot = g_stack[i];
+        if (slot < 0 || slot >= MAX_WINS || !g_wins[slot].used) continue;
+        ox_window_t *w = &g_wins[slot];
+        int fx = w->x - SHADOW_DEPTH;
+        int fy = w->y - TITLEBAR_H - SHADOW_DEPTH;
+        int fw = w->w + 2 * SHADOW_DEPTH;
+        int fh = TITLEBAR_H + w->h + 2 * SHADOW_DEPTH + SHADOW_OFFSET;
+        if (rect_intersects(fx, fy, fw, fh, dx0, dy0, dx1, dy1)) {
+            draw_window_frame(slot);
+        }
+    }
+    /* 3. Menu. */
+    if (g_menu_visible) {
+        int mh = (int)MENU_N * MENU_ITEM_H + 8;
+        if (rect_intersects(g_menu_x, g_menu_y, MENU_W, mh,
+                            dx0, dy0, dx1, dy1)) {
+            draw_menu();
+        }
+    }
+    /* 4. Cursor (always — it likely IS what made this dirty). */
+    if (rect_intersects(g_cx, g_cy, CURSOR_W, CURSOR_H,
+                        dx0, dy0, dx1, dy1)) {
+        draw_cursor();
+    }
+    /* 5. Blit only the dirty subregion. */
+    struct fb_blit_req req = {
+        .x = (uint32_t)dx0, .y = (uint32_t)dy0,
+        .w = (uint32_t)dw,  .h = (uint32_t)dh,
+        .src = g_back + (size_t)dy0 * g_scr_w + dx0,
+        .src_pitch = g_scr_w * 4
+    };
+    ioctl(g_fb_fd, FBIO_BLIT, &req);
+}
+
+static void composite_and_flush(void) {
+    if (!g_back || !g_wp_scaled) return;
+    if (g_dirty_full || g_dirty_x0 >= g_dirty_x1) {
+        composite_full();
+    } else {
+        composite_dirty(g_dirty_x0, g_dirty_y0, g_dirty_x1, g_dirty_y1);
+    }
+    /* Reset dirty state for next frame. */
+    g_dirty_full = 0;
+    g_dirty_x0 = g_dirty_x1 = 0;
+    g_dirty_y0 = g_dirty_y1 = 0;
 }
 
 /* ---------------- Spawn helper ---------------------------------- */
@@ -570,13 +895,34 @@ static void do_reboot(void) {
     osnos_syscall1(169 /* SYS_REBOOT */, 0x01234567);
 }
 
-/* Resume consrv + kbdsrv so the shell + TTY come back when oxsrv exits. */
+/* Resume consrv + kbdsrv so the shell + TTY come back when oxsrv exits.
+ * After consrv's RESUME (which clears the FB), we queue a follow-up
+ * IPC_CONSOLE_WRITE with a faux shell prompt so the user sees something
+ * useful immediately instead of a black screen until they press Enter.
+ * Same IPC queue is FIFO so the WRITE is guaranteed to land AFTER the
+ * RESUME's clear. */
 static void resume_underlings(void) {
     ipc_msg_t sm;
     memset(&sm, 0, sizeof(sm));
     sm.to   = SERVER_CONSOLE;
     sm.type = IPC_CONSOLE_RESUME;
     ipc_send(&sm);
+    /* Follow-up: faux prompt so the cursor position is at a useful
+     * spot when the user starts typing. The shell is still running;
+     * any keystrokes go to its real stdin and the line discipline
+     * echoes at this cursor position. */
+    memset(&sm, 0, sizeof(sm));
+    sm.to   = SERVER_CONSOLE;
+    sm.type = IPC_CONSOLE_WRITE;
+    static const char banner[] =
+        "Ox exited — back to shell.\nosnos:/# ";
+    size_t bn = sizeof(banner) - 1;
+    if (bn > IPC_DATA_SIZE) bn = IPC_DATA_SIZE;
+    memcpy(sm.data, banner, bn);
+    sm.arg1 = bn;
+    sm.arg0 = 0xFFFFFF;       /* white */
+    ipc_send(&sm);
+
     memset(&sm, 0, sizeof(sm));
     sm.to   = SERVER_KEYBOARD;
     sm.type = IPC_KEYBOARD_RESUME;
@@ -747,6 +1093,14 @@ static void handle_ipc(const ipc_msg_t *m) {
         if (g_wins[slot].dirty) {
             g_wins[slot].dirty = 0;
             g_dirty = 1;
+            /* Only this window changed; mark its frame bbox dirty
+             * (including shadow margin) so other windows don't get
+             * needlessly re-painted. */
+            ox_window_t *w = &g_wins[slot];
+            mark_dirty(w->x - SHADOW_DEPTH,
+                       w->y - TITLEBAR_H - SHADOW_DEPTH,
+                       w->w + 2 * SHADOW_DEPTH,
+                       TITLEBAR_H + w->h + 2 * SHADOW_DEPTH + SHADOW_OFFSET);
         }
         return;
     }
@@ -757,6 +1111,8 @@ static void handle_ipc(const ipc_msg_t *m) {
         memcpy(g_wins[slot].title, m->data, tl);
         g_wins[slot].title[tl] = 0;
         g_dirty = 1;
+        ox_window_t *w = &g_wins[slot];
+        mark_dirty(w->x, w->y - TITLEBAR_H, w->w, TITLEBAR_H);
         return;
     }
     case IPC_OX_RELOAD_SETTINGS: {
@@ -784,10 +1140,10 @@ static int hit_title(int slot, int mx, int my, int *out_close) {
         mx >= w->x + w->w + BORDER_W ||
         my < w->y - TITLEBAR_H - BORDER_W ||
         my >= w->y) return 0;
-    int cb_x = w->x + w->w - TITLEBAR_H + 2;
-    if (mx >= cb_x && mx < cb_x + TITLEBAR_H - 4 &&
-        my >= w->y - TITLEBAR_H + 2 &&
-        my <  w->y - 2) {
+    int cb_x = w->x + w->w - CLOSE_BTN_SIZE - CLOSE_BTN_PAD - 2;
+    int cb_y = w->y - TITLEBAR_H + CLOSE_BTN_PAD;
+    if (mx >= cb_x && mx < cb_x + CLOSE_BTN_SIZE &&
+        my >= cb_y && my < cb_y + CLOSE_BTN_SIZE) {
         *out_close = 1;
     } else {
         *out_close = 0;
@@ -818,6 +1174,7 @@ static int pick_top_slot(int mx, int my, int *is_title, int *is_close) {
 }
 
 static void process_mouse_event(mouse_event_t ev) {
+    int old_cx = g_cx, old_cy = g_cy;
     int new_cx = g_cx + ev.dx;
     int new_cy = g_cy + ev.dy;
     if (new_cx < 0) new_cx = 0;
@@ -827,7 +1184,37 @@ static void process_mouse_event(mouse_event_t ev) {
     int moved = (new_cx != g_cx || new_cy != g_cy);
     g_cx = new_cx;
     g_cy = new_cy;
-    if (moved) g_dirty = 1;   /* cursor moved → recompose */
+    if (moved) {
+        g_dirty = 1;   /* cursor moved → recompose */
+        /* Dirty-rect: union of old + new cursor bbox. Cheap to repaint.
+         * If the menu is visible OR the cursor is over a window titlebar
+         * (where hover state matters for the close button color), we
+         * fall back to full because partial rect would leave stale
+         * hover artifacts on regions outside the cursor's bbox. */
+        mark_dirty(old_cx, old_cy, CURSOR_W, CURSOR_H);
+        mark_dirty(new_cx, new_cy, CURSOR_W, CURSOR_H);
+        if (g_menu_visible) {
+            mark_dirty_full();
+        } else {
+            /* Cheap check: if cursor (old or new) is over any window
+             * titlebar zone, also force full so close-button hover
+             * transitions are reflected. */
+            for (int i = 0; i < g_stack_n; i++) {
+                int s = g_stack[i];
+                if (!g_wins[s].used) continue;
+                ox_window_t *w = &g_wins[s];
+                int tb_y0 = w->y - TITLEBAR_H;
+                int tb_y1 = w->y;
+                int tb_x0 = w->x;
+                int tb_x1 = w->x + w->w;
+                int hit_old = (old_cx >= tb_x0 && old_cx < tb_x1 &&
+                               old_cy >= tb_y0 && old_cy < tb_y1);
+                int hit_new = (g_cx  >= tb_x0 && g_cx  < tb_x1 &&
+                               g_cy  >= tb_y0 && g_cy  < tb_y1);
+                if (hit_old || hit_new) { mark_dirty_full(); break; }
+            }
+        }
+    }
 
     uint8_t old_b = g_prev_buttons;
     uint8_t new_b = ev.buttons;
@@ -839,6 +1226,10 @@ static void process_mouse_event(mouse_event_t ev) {
             g_wins[g_focus_slot].x = g_cx - g_wins[g_focus_slot].drag_off_x;
             g_wins[g_focus_slot].y = g_cy - g_wins[g_focus_slot].drag_off_y;
             g_dirty = 1;
+            /* Dragging changes lots of pixels — fall back to full repaint
+             * since the window's old position needs wallpaper restored
+             * and new position needs the window drawn. */
+            mark_dirty_full();
         } else {
             g_wins[g_focus_slot].dragging = 0;
         }
@@ -858,6 +1249,7 @@ static void process_mouse_event(mouse_event_t ev) {
                 if (idx >= 0 && idx < (int)MENU_N) {
                     g_menu_visible = 0;
                     if (g_menu[idx].action == 1) do_reboot();
+                    else if (g_menu[idx].action == 2) g_quit = 1;
                     else if (g_menu[idx].path) spawn_app(g_menu[idx].path);
                     g_dirty = 1;
                     return;
@@ -977,14 +1369,50 @@ static void process_kbd_event(int ascii, int keycode) {
 
 /* ---------------- Main loop ------------------------------------ */
 
+#include "../../src/include/osnos_taskinfo.h"
+extern long osnos_syscall2(long n, long a1, long a2);
+#define SYS_TASKINFO_NUM 515
+
+/* Return 1 if there's a LIVE task with the given pid. Zombie/Dead/
+ * Unused all count as "not alive" — a zombie's window backing can be
+ * reclaimed even though the slot will linger until the parent waits. */
+static int pid_is_alive(uint64_t pid) {
+    if (pid == 0) return 0;
+    for (int i = 0; i < 16; i++) {
+        osnos_taskinfo_t info;
+        if (osnos_syscall2(SYS_TASKINFO_NUM, i, (long)&info) < 0) continue;
+        if (info.state == OSNOS_TASK_UNUSED ||
+            info.state == OSNOS_TASK_DEAD   ||
+            info.state == OSNOS_TASK_ZOMBIE) continue;
+        if (info.pid == pid) return 1;
+    }
+    return 0;
+}
+
 static void reap_dead_windows(void) {
-    /* Reclaim windows whose owner went away. We can't (yet) tell
-     * the kernel "ping me when pid X dies", so we use a periodic
-     * sweep: try sending a 0-byte ipc to each owner; if -ESRCH,
-     * the owner is gone — kill the window. */
+    /* (1) Reap any exited child processes (apps oxsrv spawned via
+     * osn_spawn). Without this, MAX_TASKS=16 slots fill up with
+     * ZOMBIE entries that the kernel keeps around waiting for the
+     * parent to acknowledge — after ~10 app open/close cycles the
+     * task table is full and new spawns fail. waitpid(-1, ..., WNOHANG)
+     * is non-blocking, so this is safe to run every frame. */
+    int loop_guard = 32;
+    while (loop_guard-- > 0) {
+        int status = 0;
+        pid_t rp = waitpid(-1, &status, WNOHANG);
+        if (rp <= 0) break;
+    }
+
+    /* (2) Destroy windows whose owner died (graceful close, crash,
+     * killed via oxtop, or any other reason). Without this the
+     * window backing leaks ~180KB per orphan and oxsrv heap fragments. */
     for (int i = 0; i < MAX_WINS; i++) {
         if (!g_wins[i].used) continue;
         if (g_wins[i].should_close) {
+            destroy_slot(i);
+            continue;
+        }
+        if (!pid_is_alive(g_wins[i].owner_pid)) {
             destroy_slot(i);
             continue;
         }
@@ -1117,6 +1545,12 @@ int main(int argc, char **argv) {
      */
     long frame = 0;
     for (;;) {
+        if (g_quit) {
+            /* "Exit Ox" was selected from the menu. Wake consrv +
+             * kbdsrv so the shell takes the framebuffer back. */
+            resume_underlings();
+            break;
+        }
         mouse_event_t ev;
         int drained = 0;
         /* Coalesce all pending mouse motion into the cursor's final
@@ -1171,7 +1605,9 @@ int main(int argc, char **argv) {
             if (n > 0) write(ttyfd, hb, n);
         }
         frame++;
-        struct timespec ts = { 0, 33 * 1000000 };
+        /* 16ms ≈ 60 FPS. With the cheap-shadow refactor the typical
+         * composite is well under 16ms, so this sleeps the leftover. */
+        struct timespec ts = { 0, 16 * 1000000 };
         nanosleep(&ts, 0);
     }
     return 0;

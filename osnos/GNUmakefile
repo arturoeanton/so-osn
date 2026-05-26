@@ -191,6 +191,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/gui/oxterm.c \
     elfs/gui/oxsettings.c \
     elfs/gui/oxfiles.c \
+    elfs/gui/oxtop.c \
     elfs/tools/uxsh.c
 
 # musl-linked ELFs (vendor/musl). Declared early so USER_ELF_LIST sees it.
@@ -284,9 +285,17 @@ SD_LONG_TXT   = hola con nombre largo
 # anime-style PPMs. Either way the build runs unattended.
 # --------------------------------------------------------------------------
 WALLPAPER_TMP := $(BUILD)/wallpapers
-WALLPAPERS    := $(WALLPAPER_TMP)/samurai.ppm $(WALLPAPER_TMP)/girl.ppm
+# Wallpaper names derived from res/wallpapers/source/*.{png,jpg,jpeg}.
+# `samurai` is always added so the legacy default never disappears even
+# if the source dir is empty.
+WALLPAPER_NAMES := $(sort samurai \
+    $(patsubst res/wallpapers/source/%.png,%,$(wildcard res/wallpapers/source/*.png)) \
+    $(patsubst res/wallpapers/source/%.jpg,%,$(wildcard res/wallpapers/source/*.jpg)) \
+    $(patsubst res/wallpapers/source/%.jpeg,%,$(wildcard res/wallpapers/source/*.jpeg)))
+WALLPAPERS    := $(addprefix $(WALLPAPER_TMP)/,$(addsuffix .ppm,$(WALLPAPER_NAMES)))
+WALLPAPER_THUMBS := $(addprefix $(WALLPAPER_TMP)/thumbs/,$(addsuffix .ppm,$(WALLPAPER_NAMES)))
 
-$(WALLPAPERS): tools/gen_wallpapers.sh tools/gen_placeholder.c
+$(WALLPAPERS) $(WALLPAPER_THUMBS): tools/gen_wallpapers.sh tools/gen_placeholder.c
 	@./tools/gen_wallpapers.sh $(WALLPAPER_TMP)
 
 # Re-build sd.img whenever ANY built ELF changes or the build script
@@ -297,7 +306,7 @@ $(WALLPAPERS): tools/gen_wallpapers.sh tools/gen_placeholder.c
 # CRTN_O — which are declared further down in this file — resolve at
 # build time instead of at rule-parse time (when they'd still be empty).
 .SECONDEXPANSION:
-$(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $$(LIBTCC1_A) $$(CRTI_O) $$(CRTN_O) $(WALLPAPERS) GNUmakefile
+$(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $$(LIBTCC1_A) $$(CRTI_O) $$(CRTN_O) $(WALLPAPERS) $(WALLPAPER_THUMBS) GNUmakefile
 	@command -v mformat >/dev/null 2>&1 || { echo "error: mtools (mformat/mcopy) not found. Install: brew install mtools / sudo apt install mtools" >&2; exit 1; }
 	@command -v mcopy   >/dev/null 2>&1 || { echo "error: mtools (mformat/mcopy) not found. Install: brew install mtools / sudo apt install mtools" >&2; exit 1; }
 	@command -v mmd     >/dev/null 2>&1 || { echo "error: mtools mmd not found." >&2; exit 1; }
@@ -343,15 +352,19 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $$(LIBTCC1_A) $$(CRTI_O) $$(C
 	printf '# osnos demo Makefile — try `make hello` then `./hello`\n# Build the C compiler self-hosting story: tcc + pdpmake inside osnos.\nCC = tcc\nCFLAGS = -static\n\nhello: hello.c\n\t$$(CC) $$(CFLAGS) hello.c -o hello\n\nclean:\n\trm -f hello\n\n.PHONY: clean\n' > $(SD_TMP)/Makefile
 	mcopy -i $@ $(SD_TMP)/Makefile     ::/home/Makefile
 	@# Default .oxrc — oxsrv reads this at boot. /bin/oxsettings rewrites
-	@# it from the GUI. If left absent, oxsrv falls back to "samurai".
-	printf 'current_wallpaper=samurai\n' > $(SD_TMP)/.oxrc
+	@# it from the GUI. If left absent, oxsrv falls back to "wallpaper1".
+	printf 'current_wallpaper=wallpaper1\n' > $(SD_TMP)/.oxrc
 	mcopy -i $@ $(SD_TMP)/.oxrc       ::/home/.oxrc
 	@# lighttpd: solo index.html ahora; /etc/lighttpd/ se crea más
 	@# abajo (después de /etc) para mantener orden mmd correcto.
 	mcopy -i $@ -o res/lighttpd/index.html    ::/home/index.html
-	@# Wallpaper PPMs (FASE 12).
-	mcopy -i $@ $(WALLPAPER_TMP)/samurai.ppm ::/home/wallpapers/samurai.ppm
-	mcopy -i $@ $(WALLPAPER_TMP)/girl.ppm    ::/home/wallpapers/girl.ppm
+	@# Wallpaper PPMs + thumbnails (FASE 12). Driven by WALLPAPER_NAMES
+	@# so the disk image stays in sync with whatever's in res/wallpapers/source/.
+	mmd -i $@ ::/home/wallpapers/thumbs 2>/dev/null || true
+	@for name in $(WALLPAPER_NAMES); do \
+	    mcopy -i $@ $(WALLPAPER_TMP)/$$name.ppm        ::/home/wallpapers/$$name.ppm        || exit 1; \
+	    mcopy -i $@ $(WALLPAPER_TMP)/thumbs/$$name.ppm ::/home/wallpapers/thumbs/$$name.ppm || exit 1; \
+	done
 	@# SQLite demo DB (FASE 13.3) — pre-poblada con tablas books/users/
 	@# checkouts + view + indices, lista para `sqlite3 /home/demo.db
 	@# "SELECT ..."`. SQL fuente en res/demo.sql; regenera demo.db
