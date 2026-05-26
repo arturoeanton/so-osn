@@ -21,15 +21,122 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <ox.h>
 #include <osnos_ipc.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
 
 static long g_server_pid = 0;
+
+/* Per-window backing buffer — shared memory mapped from oxsrv. The
+ * client writes directly to it for ox_draw_rect/text/image; ox_present
+ * sends a single IPC to tell oxsrv "frame ready". Cuts heavy renders
+ * (oxsettings: 10 thumbnails = 1200 IPCs) down to 1 IPC. */
+#define OX_MAX_LOCAL_WINS 16
+typedef struct {
+    int       used;
+    int       id;
+    int       w, h;
+    uint32_t *back;
+    size_t    bytes;
+} ox_local_win_t;
+static ox_local_win_t g_local_wins[OX_MAX_LOCAL_WINS];
+
+static ox_local_win_t *local_lookup(int id) {
+    for (int i = 0; i < OX_MAX_LOCAL_WINS; i++) {
+        if (g_local_wins[i].used && g_local_wins[i].id == id)
+            return &g_local_wins[i];
+    }
+    return 0;
+}
+static ox_local_win_t *local_alloc(int id, int w, int h,
+                                    uint32_t *back, size_t bytes) {
+    for (int i = 0; i < OX_MAX_LOCAL_WINS; i++) {
+        if (!g_local_wins[i].used) {
+            g_local_wins[i].used  = 1;
+            g_local_wins[i].id    = id;
+            g_local_wins[i].w     = w;
+            g_local_wins[i].h     = h;
+            g_local_wins[i].back  = back;
+            g_local_wins[i].bytes = bytes;
+            return &g_local_wins[i];
+        }
+    }
+    return 0;
+}
+
+/* Local drawing primitives — write directly into the shared backing
+ * buffer. Same shape as oxsrv's buf_* helpers; clipped to the win's
+ * width/height. */
+static void local_fill_rect(ox_local_win_t *lw,
+                             int x, int y, int w, int h,
+                             uint32_t color) {
+    if (!lw || !lw->back) return;
+    int bw = lw->w, bh = lw->h;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > bw) w = bw - x;
+    if (y + h > bh) h = bh - y;
+    if (w <= 0 || h <= 0) return;
+    for (int row = 0; row < h; row++) {
+        uint32_t *p = lw->back + (size_t)(y + row) * bw + x;
+        for (int col = 0; col < w; col++) p[col] = color;
+    }
+}
+
+static void local_draw_glyph(ox_local_win_t *lw,
+                              int x, int y, int c, uint32_t color) {
+    if (!lw || !lw->back) return;
+    const uint8_t *g = ox_font_glyph(c);
+    int bw = lw->w, bh = lw->h;
+    for (int row = 0; row < 8; row++) {
+        for (int col = 0; col < 8; col++) {
+            if (g[row] & (1 << (7 - col))) {
+                int px = x + col, py = y + row;
+                if (px < 0 || py < 0 || px >= bw || py >= bh) continue;
+                lw->back[(size_t)py * bw + px] = color;
+            }
+        }
+    }
+}
+
+static void local_draw_text(ox_local_win_t *lw, int x, int y,
+                             const char *s, uint32_t color) {
+    if (!s) return;
+    int cx = x;
+    while (*s) {
+        if (*s == '\n') { y += 10; cx = x; s++; continue; }
+        local_draw_glyph(lw, cx, y, (unsigned char)*s, color);
+        cx += 8;
+        s++;
+    }
+}
+
+static void local_blit_image(ox_local_win_t *lw,
+                              int dx, int dy, int sw, int sh,
+                              const uint32_t *src, int src_pitch_px) {
+    if (!lw || !lw->back || !src) return;
+    int bw = lw->w, bh = lw->h;
+    int x0 = dx, y0 = dy;
+    int x1 = dx + sw, y1 = dy + sh;
+    int sx0 = 0, sy0 = 0;
+    if (x0 < 0) { sx0 = -x0; x0 = 0; }
+    if (y0 < 0) { sy0 = -y0; y0 = 0; }
+    if (x1 > bw) x1 = bw;
+    if (y1 > bh) y1 = bh;
+    if (x0 >= x1 || y0 >= y1) return;
+    for (int row = y0; row < y1; row++) {
+        const uint32_t *sp = src + (size_t)(sy0 + (row - y0)) * src_pitch_px + sx0;
+        uint32_t *dp = lw->back + (size_t)row * bw + x0;
+        memcpy(dp, sp, (size_t)(x1 - x0) * sizeof(uint32_t));
+    }
+}
 
 /* Per-client event ring — events arriving while we're waiting for a
  * RESPONSE get queued here so the next ox_poll_event drains them. */
@@ -80,9 +187,21 @@ int ox_init(void) {
     return 0;
 }
 
-/* Send a message, then drain the IPC queue until a RESPONSE arrives;
- * any events seen along the way are pushed to the local ring. */
-static long send_and_wait(ipc_msg_t *req) {
+/* send_and_wait was the IPC-draw path. Replaced by send_and_wait_resp
+ * (returns also the response data[] for shm name handoff). Removed
+ * to satisfy -Wunused. */
+
+/* Fire-and-forget sender (no response expected). The kernel
+ * sys_ipc_send blocks in-kernel on queue-full (since FASE perf),
+ * so a single call is enough — no userland retry/sleep loop. */
+static int send_one(ipc_msg_t *req) {
+    req->to = SERVER_OX;
+    return (ipc_send(req) == 0) ? 0 : -1;
+}
+
+/* Same as send_and_wait but also returns the response data[] so we
+ * can recover the shm name oxsrv assigned to our new window. */
+static long send_and_wait_resp(ipc_msg_t *req, char *resp_data, size_t cap) {
     req->to = SERVER_OX;
     if (ipc_send(req) < 0) return -1;
     for (;;) {
@@ -90,30 +209,20 @@ static long send_and_wait(ipc_msg_t *req) {
         if (ipc_recv(&r) == 0) {
             if (r.type == IPC_OX_RESPONSE) {
                 if ((int)r.arg0 != 0) { errno = (int)r.arg0; return -1; }
+                if (resp_data && cap > 0) {
+                    size_t copy = cap - 1;
+                    if (copy > sizeof(r.data)) copy = sizeof(r.data);
+                    memcpy(resp_data, r.data, copy);
+                    resp_data[copy] = 0;
+                }
                 return (long)r.arg1;
             }
-            if (is_event_type(r.type)) {
-                ev_push(&r);
-                continue;
-            }
-            /* Unknown opcode — drop and keep waiting. */
+            if (is_event_type(r.type)) { ev_push(&r); continue; }
             continue;
         }
         if (errno != EAGAIN) return -1;
-        struct timespec ts = { 0, 2 * 1000000 };  /* 2 ms */
-        nanosleep(&ts, 0);
-    }
-}
-
-/* Fire-and-forget sender (no response expected). */
-static int send_one(ipc_msg_t *req) {
-    req->to = SERVER_OX;
-    for (;;) {
-        if (ipc_send(req) == 0) return 0;
-        if (errno != EAGAIN) return -1;
-        /* Queue full — yield briefly and retry. */
-        struct timespec ts = { 0, 1 * 1000000 };
-        nanosleep(&ts, 0);
+        struct pollfd pfd = { -1, POLL_IPC_PENDING, 0 };
+        poll(&pfd, 1, 1000);
     }
 }
 
@@ -129,12 +238,37 @@ ox_win_t ox_window_create(int w, int h, const char *title) {
         memcpy(m.data, title, n);
         m.data[n] = 0;
     }
-    long id = send_and_wait(&m);
+    /* Response data[] holds the shm name oxsrv assigned. shm_open it,
+     * mmap MAP_SHARED, store the local backing pointer so subsequent
+     * ox_draw_* can write to it without any IPC round-trip. */
+    char shm_name[32] = {0};
+    long id = send_and_wait_resp(&m, shm_name, sizeof(shm_name));
+    if (id < 0) return -1;
+    if (shm_name[0] == '/') {
+        int fd = shm_open(shm_name, O_RDWR, 0);
+        if (fd >= 0) {
+            size_t bsz = (size_t)w * h * sizeof(uint32_t);
+            size_t mmap_bsz = (bsz + 4095) & ~(size_t)4095;
+            void *p = mmap(0, mmap_bsz, PROT_READ | PROT_WRITE,
+                           MAP_SHARED, fd, 0);
+            close(fd);
+            if (p && p != (void *)-1) {
+                local_alloc((int)id, w, h, (uint32_t *)p, mmap_bsz);
+            }
+        }
+    }
     return (ox_win_t)id;
 }
 
 void ox_window_destroy(ox_win_t win) {
     if (g_server_pid == 0) return;
+    /* Tear down local shared mapping first. */
+    ox_local_win_t *lw = local_lookup((int)win);
+    if (lw) {
+        if (lw->back && lw->bytes) munmap(lw->back, lw->bytes);
+        lw->used = 0; lw->id = 0; lw->w = 0; lw->h = 0;
+        lw->back = 0; lw->bytes = 0;
+    }
     ipc_msg_t m;
     memset(&m, 0, sizeof(m));
     m.type = IPC_OX_WINDOW_DESTROY;
@@ -157,77 +291,36 @@ void ox_window_set_title(ox_win_t win, const char *title) {
     send_one(&m);
 }
 
-static void put_u32(char *p, uint32_t v) {
-    p[0] = (char)(v & 0xff);
-    p[1] = (char)((v >> 8) & 0xff);
-    p[2] = (char)((v >> 16) & 0xff);
-    p[3] = (char)((v >> 24) & 0xff);
-}
+/* put_u32 was used by the IPC-draw payload encoders. With drawing
+ * now local (shm-backed), the wire encoders are gone. Kept this
+ * spot as a comment so anyone reading wire-format docs above can
+ * cross-reference. */
 
+/* Draws now go LOCAL: write directly into the shared-memory backing
+ * buffer mapped by ox_window_create. No IPC traffic. ox_present (one
+ * IPC) tells oxsrv "frame ready". This is the big perf win — what
+ * used to be hundreds of IPCs per render is now zero. */
 void ox_draw_rect(ox_win_t win, int x, int y, int w, int h,
                    uint32_t color) {
-    if (g_server_pid == 0) return;
-    ipc_msg_t m;
-    memset(&m, 0, sizeof(m));
-    m.type = IPC_OX_DRAW_RECT;
-    m.arg0 = (uint64_t)win;
-    m.arg1 = color;
-    put_u32(m.data + 0,  (uint32_t)x);
-    put_u32(m.data + 4,  (uint32_t)y);
-    put_u32(m.data + 8,  (uint32_t)w);
-    put_u32(m.data + 12, (uint32_t)h);
-    send_one(&m);
+    ox_local_win_t *lw = local_lookup((int)win);
+    if (!lw) return;
+    local_fill_rect(lw, x, y, w, h, color);
 }
 
 void ox_draw_text(ox_win_t win, int x, int y, const char *s,
                    uint32_t color) {
-    if (g_server_pid == 0 || !s) return;
-    size_t n = strlen(s);
-    if (n > sizeof(((ipc_msg_t *)0)->data) - 9) n = sizeof(((ipc_msg_t *)0)->data) - 9;
-    ipc_msg_t m;
-    memset(&m, 0, sizeof(m));
-    m.type = IPC_OX_DRAW_TEXT;
-    m.arg0 = (uint64_t)win;
-    m.arg1 = color;
-    put_u32(m.data + 0, (uint32_t)x);
-    put_u32(m.data + 4, (uint32_t)y);
-    memcpy(m.data + 8, s, n);
-    m.data[8 + n] = 0;
-    send_one(&m);
+    if (!s) return;
+    ox_local_win_t *lw = local_lookup((int)win);
+    if (!lw) return;
+    local_draw_text(lw, x, y, s, color);
 }
 
-/*
- * Chunk a BGRA rectangle into tile messages. Each IPC msg carries:
- *   header  : uint32 x, uint32 y, uint32 w, uint32 h  (16 bytes)
- *   payload : up to (1024-16) bytes of BGRA pixels
- *
- * Max payload = 1008 / 4 = 252 pixels per message. We chunk by
- * splitting the rectangle into 1-row stripes when the row is short
- * enough, or into 8×16 tiles otherwise. Simplest pattern: one row
- * at a time, clipped to 240 px wide.
- */
-#define OX_TILE_W 240
 void ox_draw_image(ox_win_t win, int x, int y, int w, int h,
                     const uint32_t *bgra, int src_pitch_px) {
-    if (g_server_pid == 0 || !bgra) return;
-    for (int row = 0; row < h; row++) {
-        const uint32_t *src = bgra + (size_t)row * src_pitch_px;
-        for (int col = 0; col < w; col += OX_TILE_W) {
-            int chunk_w = w - col;
-            if (chunk_w > OX_TILE_W) chunk_w = OX_TILE_W;
-            ipc_msg_t m;
-            memset(&m, 0, sizeof(m));
-            m.type = IPC_OX_DRAW_IMAGE;
-            m.arg0 = (uint64_t)win;
-            put_u32(m.data + 0,  (uint32_t)(x + col));
-            put_u32(m.data + 4,  (uint32_t)(y + row));
-            put_u32(m.data + 8,  (uint32_t)chunk_w);
-            put_u32(m.data + 12, 1);
-            memcpy(m.data + 16, src + col,
-                   (size_t)chunk_w * sizeof(uint32_t));
-            send_one(&m);
-        }
-    }
+    if (!bgra) return;
+    ox_local_win_t *lw = local_lookup((int)win);
+    if (!lw) return;
+    local_blit_image(lw, x, y, w, h, bgra, src_pitch_px);
 }
 
 void ox_present(ox_win_t win) {
@@ -304,7 +397,16 @@ int ox_wait_event(ox_event_t *out) {
     if (!out) return 0;
     for (;;) {
         if (ox_poll_event(out)) return 1;
-        struct timespec ts = { 0, 5 * 1000000 };  /* 5 ms */
-        nanosleep(&ts, 0);
+        /* True block in kernel: poll() with POLL_IPC_PENDING wakes
+         * the task INSTANTLY when ipc_send → task_unblock fires for
+         * our pid. Replaces a 200 Hz nanosleep busy-spin that burned
+         * CPU across every open GUI app and saturated the scheduler.
+         * The 1 s safety timeout is a fallback in case a wake hook
+         * gets missed (shouldn't happen with the kernel changes). */
+        struct pollfd pfd;
+        pfd.fd = -1;
+        pfd.events = POLL_IPC_PENDING;
+        pfd.revents = 0;
+        poll(&pfd, 1, 1000);
     }
 }

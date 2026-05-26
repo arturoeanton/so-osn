@@ -4,6 +4,7 @@
 
 #include "../drivers/framebuffer.h"
 #include "../drivers/serial.h"
+#include "../fs/devfs.h"
 #include "../fs/vfs.h"
 #include "../include/osnos_dirent.h"
 #include "../include/osnos_fb_abi.h"
@@ -1441,6 +1442,11 @@ static bool fd_readable(int fd) {
             ? pty_master_readable(f->pty_ref)
             : pty_slave_readable (f->pty_ref);
     }
+    /* Devfs ring-buffered devices: actually peek the ring level.
+     * The default "regular files always readable" would busy-spin
+     * any client polling /dev/mouse0 or /dev/input0. */
+    if (os_streq(f->path, "/dev/mouse0")) return devfs_mouse_has_data();
+    if (os_streq(f->path, "/dev/input0")) return devfs_input_has_data();
     /* Regular files / dirs are always readable up to EOF. */
     return true;
 }
@@ -1902,8 +1908,20 @@ int64_t sys_ipc_send(const ipc_msg_t *user_msg) {
     if (t) kmsg.from = t->pid;
 
     osnos_status_t s = ipc_send(&kmsg);
-    if (s != OSNOS_OK) return err(s);
-    return 0;
+    if (s == OSNOS_OK) return 0;
+    /* ESRCH = no such target — fatal for caller (e.g. dead client).
+     * Return immediately so they don't loop forever. */
+    if (s != OSNOS_EAGAIN) return err(s);
+
+    /* Queue full (EAGAIN). Block in kernel until a slot frees up,
+     * then re-execute the syscall. ipc_recv calls task_wake_senders
+     * when it frees a slot. Eliminates the userland nanosleep busy-
+     * spin in send_one() that hammered CPU during heavy GUI traffic.
+     * 10 ms safety fallback in case a wake hook is missed. */
+    if (block_restart_syscall(timer_ms() + 10, SYS_IPC_SEND) != 0) {
+        return err(OSNOS_EAGAIN);
+    }
+    return err(OSNOS_EAGAIN);   /* unreachable; block longjmps */
 }
 
 /* ------------------------------------------------------------------ */
@@ -3521,6 +3539,12 @@ int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
 #define POLL_POLLERR   0x0008
 #define POLL_POLLHUP   0x0010
 #define POLL_POLLNVAL  0x0020
+/* osnos-specific: poll the calling task's IPC inbox alongside fds.
+ * When set in `events`, poll returns ready if any queued IPC message
+ * targets the caller. Lets servers (oxsrv etc.) block on a single
+ * poll() that covers mouse + keyboard + IPC instead of nanosleep-
+ * spinning over three non-blocking checks. */
+#define POLL_IPC_PENDING 0x0040
 
 struct osnos_pollfd {
     int   fd;
@@ -3549,26 +3573,36 @@ int64_t sys_poll(void *u_fds, uint64_t nfds, int timeout_ms) {
 
     uint64_t now = timer_ms();
     uint64_t deadline = (timeout_ms > 0) ? now + (uint64_t)timeout_ms : 0;
+    task_t *self = task_current();
+    uint64_t self_pid = self ? self->pid : 0;
 
     for (;;) {
         int ready = 0;
         for (uint64_t i = 0; i < nfds; i++) {
             kfds[i].revents = 0;
-            if (kfds[i].fd < 0) continue;
-            osnos_fd_t *f = fd_get(task_current(), kfds[i].fd);
-            if (!f) {
-                kfds[i].revents = POLL_POLLNVAL;
-                ready++;
-                continue;
+            /* Synthetic IPC-pending check: any entry with events &
+             * POLL_IPC_PENDING returns ready if an IPC msg targets us.
+             * Independent of fd (fd<0 is fine — the entry exists just
+             * to carry this flag). */
+            if (kfds[i].events & POLL_IPC_PENDING) {
+                if (ipc_has_for_pid(self_pid)) {
+                    kfds[i].revents |= POLL_IPC_PENDING;
+                }
             }
-            if ((kfds[i].events & POLL_POLLIN) && fd_readable(kfds[i].fd)) {
-                kfds[i].revents |= POLL_POLLIN;
-            }
-            if (kfds[i].events & POLL_POLLOUT) {
-                /* Conservative: assume writable. Pipes/sockets/PTYs that
-                 * are full would still EAGAIN on actual write, but
-                 * poll-then-write loops accept that. */
-                kfds[i].revents |= POLL_POLLOUT;
+            if (kfds[i].fd >= 0) {
+                osnos_fd_t *f = fd_get(self, kfds[i].fd);
+                if (!f) {
+                    kfds[i].revents |= POLL_POLLNVAL;
+                } else {
+                    if ((kfds[i].events & POLL_POLLIN) && fd_readable(kfds[i].fd)) {
+                        kfds[i].revents |= POLL_POLLIN;
+                    }
+                    if (kfds[i].events & POLL_POLLOUT) {
+                        /* Conservative: assume writable. Pipes/sockets/PTYs
+                         * that are full still EAGAIN on actual write. */
+                        kfds[i].revents |= POLL_POLLOUT;
+                    }
+                }
             }
             if (kfds[i].revents) ready++;
         }
@@ -3592,14 +3626,18 @@ int64_t sys_poll(void *u_fds, uint64_t nfds, int timeout_ms) {
             return 0;
         }
 
-        /* Block via restart_syscall — when the task wakes (after the
-         * short timeout or sooner via signal) the CPU re-issues the
-         * same poll() and we re-check readiness. Cannot call
-         * sys_nanosleep here: it longjumps to the scheduler and the
-         * task resumes in user-space with rax=0, making poll appear
-         * to time out spuriously (ash interprets 0 with timeout=-1
-         * as "stdin closed" and exits). */
-        uint64_t wake = timer_ms() + 5;
+        /* Block via restart_syscall. Wake hooks (ipc_send →
+         * task_unblock; devfs_*_push → task_wake_pollers) flip our
+         * state to READY when real events arrive, so we re-execute
+         * immediately. The wake_at_ms here is just a safety net: at
+         * worst we sleep `quantum` ms before re-checking. Use the
+         * caller's deadline when it's near; otherwise a 50 ms quantum
+         * — big enough that idle CPU is low, small enough that any
+         * missed wake hook recovers quickly. */
+        uint64_t now2 = timer_ms();
+        uint64_t quantum = 50;
+        uint64_t wake = now2 + quantum;
+        if (timeout_ms > 0 && wake > deadline) wake = deadline;
         if (block_restart_syscall(wake, SYS_POLL) != 0) {
             if (copy_to_user(u_fds, kfds, bytes) != OSNOS_OK)
                 return err(OSNOS_EFAULT);

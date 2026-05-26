@@ -91,6 +91,11 @@ int vmm_map(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags) {
     return 1;
 }
 
+static int table_empty(const uint64_t *t) {
+    for (int i = 0; i < 512; i++) if (t[i] & PTE_P) return 0;
+    return 1;
+}
+
 void vmm_unmap(uint64_t *pml4, uint64_t virt) {
     if (!(pml4[idx(virt, 4)] & PTE_P)) return;
     uint64_t *pdpt = table_of(pml4[idx(virt, 4)]);
@@ -103,6 +108,26 @@ void vmm_unmap(uint64_t *pml4, uint64_t virt) {
 
     pt[idx(virt, 1)] = 0;
     invlpg(virt);
+
+    /* Reclaim empty intermediate page tables. Without this, every
+     * mmap/munmap cycle in a long-running process (e.g. oxsrv's
+     * window backings) leaks ~4 KB per cycle in stale PT pages
+     * because the bump cursor never reuses VAs. Walk up the tree,
+     * freeing each level as long as it's now empty. */
+    if (!table_empty(pt)) return;
+    uint64_t pt_phys = pd[idx(virt, 2)] & PTE_ADDR_MASK;
+    pd[idx(virt, 2)] = 0;
+    pmm_free_page(pt_phys);
+
+    if (!table_empty(pd)) return;
+    uint64_t pd_phys = pdpt[idx(virt, 3)] & PTE_ADDR_MASK;
+    pdpt[idx(virt, 3)] = 0;
+    pmm_free_page(pd_phys);
+
+    if (!table_empty(pdpt)) return;
+    uint64_t pdpt_phys = pml4[idx(virt, 4)] & PTE_ADDR_MASK;
+    pml4[idx(virt, 4)] = 0;
+    pmm_free_page(pdpt_phys);
 }
 
 uint64_t vmm_lookup(uint64_t *pml4, uint64_t virt) {

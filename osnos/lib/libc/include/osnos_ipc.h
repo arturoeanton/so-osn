@@ -58,17 +58,23 @@ static inline long ipc_recv(ipc_msg_t *out) {
 }
 
 /*
- * Blocking pop. Loops on EAGAIN with a short nanosleep so the
- * scheduler can dispatch other tasks. Mirrors how read() handles
- * blocking I/O.
+ * Blocking pop. Uses poll(POLL_IPC_PENDING) so the task TRULY
+ * blocks in the kernel — no nanosleep busy-spin. The kernel wake
+ * hook in ipc_send → task_unblock(pid) makes this return as soon
+ * as a message arrives. Wakeup latency ≈ 0; idle CPU = 0.
  */
+#include <poll.h>
+
 static inline long ipc_recv_block(ipc_msg_t *out) {
     for (;;) {
         long r = osnos_syscall2(SYS_IPC_RECV, (long)out, 1);
         if (r >= 0) return 0;
         if (-r != EAGAIN) { errno = (int)(-r); return -1; }
-        struct timespec ts = { 0, 20 * 1000000 };
-        nanosleep(&ts, 0);
+        /* Block in kernel via poll(POLL_IPC_PENDING). fd=-1 carries
+         * no fd query; the bit alone is the IPC-readiness probe.
+         * 1s safety timeout in case any wake hook is missed. */
+        struct pollfd pfd = { -1, POLL_IPC_PENDING, 0 };
+        poll(&pfd, 1, 1000);
     }
 }
 

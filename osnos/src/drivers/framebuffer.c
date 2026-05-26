@@ -459,13 +459,17 @@ void framebuffer_blit_kernel(
     if (w > max_w) w = max_w;
     if (h > max_h) h = max_h;
 
+    /* memcpy per row instead of per-pixel volatile writes. The old
+     * loop forced one volatile store per pixel (compiler couldn't
+     * vectorize, ~100ns/pixel on QEMU). memcpy is ~10x faster and
+     * lets the toolchain emit rep movsq / SSE writes. The framebuffer
+     * memory is RAM (Limine maps it linearly into HHDM), so giving up
+     * the volatile qualifier for this contiguous copy is safe. */
     const uint8_t *src_bytes = (const uint8_t *)src;
+    size_t row_bytes = (size_t)w * sizeof(uint32_t);
     for (uint32_t row = 0; row < h; row++) {
-        const uint32_t *src_row =
-            (const uint32_t *)(src_bytes + row * src_pitch_bytes);
-        volatile uint32_t *dst_row = fb + (y + row) * fb_pitch + x;
-        for (uint32_t col = 0; col < w; col++) {
-            dst_row[col] = src_row[col];
-        }
+        const void *src_row = src_bytes + row * src_pitch_bytes;
+        void *dst_row = (void *)(uintptr_t)(fb + (y + row) * fb_pitch + x);
+        os_memcpy(dst_row, src_row, row_bytes);
     }
 }

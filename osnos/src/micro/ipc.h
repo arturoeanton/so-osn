@@ -53,6 +53,18 @@ osnos_status_t ipc_send(const ipc_msg_t *msg);
 /* Number of messages currently waiting in the shared queue. For sysfs. */
 size_t ipc_pending(void);
 
+/* True if any queued message is addressed to `pid`. O(queue) peek — used
+ * by sys_poll's POLL_IPC_PENDING bit so a task can block waiting for
+ * IPC alongside file-descriptor events. */
+bool ipc_has_for_pid(uint64_t pid);
+
+/* Compact the queue, dropping every message addressed to `pid`. Called
+ * from proc_exit_current_user so a dying task doesn't leave stale
+ * messages stuck in the 64-slot queue forever. Without this, the queue
+ * saturates after a handful of app open/close cycles and ipc_send
+ * starts returning EAGAIN — events never reach the compositor. */
+void ipc_drop_for_pid(uint64_t pid);
+
 bool ipc_recv(uint64_t to, ipc_msg_t *out);
 
 bool ipc_recv_block(

@@ -355,6 +355,12 @@ task_t *task_current(void);
 void task_run_next(void);
 void task_unblock(uint64_t pid);
 
+/* Wake every BLOCKED task. Used by device drivers (mouse/kbd) when new
+ * data arrives so tasks blocked in poll(2) recheck readiness without
+ * waiting for the next timer tick. Tasks not actually polling for this
+ * event just re-block; cost is small. */
+void task_wake_pollers(void);
+
 /* Read-only slot accessor for introspection. NULL for unused/out-of-range. */
 const task_t *task_slot(size_t idx);
 

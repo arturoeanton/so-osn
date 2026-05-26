@@ -31,3 +31,10 @@ void devfs_input_push(keyboard_event_t ev);
  * lifecycle as devfs_input_push: kernel mouse_server polls the PS/2
  * controller each tick, decodes into mouse_event_t, calls this. */
 void devfs_mouse_push(mouse_event_t ev);
+
+/* Readability peeks — true iff the device's ring has at least one
+ * complete event queued. Used by sys_poll so /dev/mouse0 and
+ * /dev/input0 don't always report readable (which would busy-spin
+ * clients waiting on poll). */
+bool devfs_mouse_has_data(void);
+bool devfs_input_has_data(void);

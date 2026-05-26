@@ -25,12 +25,14 @@
 #include <fcntl.h>
 #include <osnos_ipc.h>
 #include <ox.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/mouse.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -85,6 +87,12 @@ static int      g_input_fd  = -1;
 
 static uint32_t g_scr_w = 0, g_scr_h = 0;
 static uint32_t *g_back = 0;          /* w*h BGRA backbuffer */
+/* Composed snapshot WITHOUT the cursor. After every composite we
+ * copy g_back → g_back_clean before drawing the cursor. Cursor-only
+ * frames then restore the dirty rect from g_back_clean instead of
+ * recomposing wallpaper + windows from scratch. Cuts cursor-frame
+ * cost from O(window draws) to a single memcpy of the cursor bbox. */
+static uint32_t *g_back_clean = 0;
 
 static char     g_wp_name[64] = "wallpaper1";
 static uint32_t *g_wp_scaled  = 0;    /* w*h scaled BGRA      */
@@ -106,7 +114,9 @@ typedef struct {
     int          x, y;
     int          w, h;
     char         title[64];
-    uint32_t    *back;                /* w*h BGRA */
+    uint32_t    *back;                /* w*h BGRA — mmap-SHARED with client */
+    char         shm_name[32];        /* "/oxw_<id>" — used for shm_unlink */
+    size_t       back_bytes;          /* page-rounded mmap length */
     int          dirty;
     int          dragging;
     int          drag_off_x, drag_off_y;
@@ -601,12 +611,33 @@ static int alloc_window(uint64_t owner_pid, int w, int h, const char *title) {
             } else {
                 g_wins[i].title[0] = 0;
             }
+            /* Window backing via SHARED MEMORY (shm_open + mmap MAP_SHARED).
+             * Both oxsrv AND the client mmap the same underlying pages,
+             * so the client can draw locally with no IPC traffic — only
+             * ox_present (1 IPC) tells oxsrv "frame ready". Wallpapers
+             * + thumbnails that used to cost 1200 IPCs per render now
+             * cost 1. */
             size_t bsz = (size_t)w * h * sizeof(uint32_t);
-            g_wins[i].back = (uint32_t *)malloc(bsz);
-            if (!g_wins[i].back) {
-                g_wins[i].used = 0;
-                return -1;
+            size_t mmap_bsz = (bsz + 4095) & ~(size_t)4095;
+            snprintf(g_wins[i].shm_name, sizeof(g_wins[i].shm_name),
+                     "/oxw_%d", g_wins[i].id);
+            int shmfd = shm_open(g_wins[i].shm_name,
+                                 O_CREAT | O_RDWR, 0600);
+            if (shmfd < 0) { g_wins[i].used = 0; return -1; }
+            if (ftruncate(shmfd, (off_t)mmap_bsz) < 0) {
+                close(shmfd); shm_unlink(g_wins[i].shm_name);
+                g_wins[i].used = 0; return -1;
             }
+            void *p = mmap(0, mmap_bsz,
+                           PROT_READ | PROT_WRITE,
+                           MAP_SHARED, shmfd, 0);
+            close(shmfd);  /* mmap holds the page references */
+            if (!p || p == (void *)-1) {
+                shm_unlink(g_wins[i].shm_name);
+                g_wins[i].used = 0; return -1;
+            }
+            g_wins[i].back = (uint32_t *)p;
+            g_wins[i].back_bytes = mmap_bsz;
             /* Default backing = solid grey. */
             for (size_t k = 0; k < (size_t)w * h; k++)
                 g_wins[i].back[k] = COL_BG;
@@ -641,8 +672,19 @@ static int find_owner_slot(uint64_t pid, int id) {
 
 static void destroy_slot(int slot) {
     if (slot < 0 || slot >= MAX_WINS || !g_wins[slot].used) return;
-    free(g_wins[slot].back);
+    if (g_wins[slot].back && g_wins[slot].back_bytes) {
+        munmap(g_wins[slot].back, g_wins[slot].back_bytes);
+    }
+    /* shm_unlink so the name slot can be reused. Refcount of the
+     * underlying object drops here; the client also munmap'd on its
+     * side (or will when it dies), and the last unref frees the
+     * physical pages back to the PMM. */
+    if (g_wins[slot].shm_name[0]) {
+        shm_unlink(g_wins[slot].shm_name);
+        g_wins[slot].shm_name[0] = 0;
+    }
     g_wins[slot].back = 0;
+    g_wins[slot].back_bytes = 0;
     g_wins[slot].used = 0;
     /* Remove from stack. */
     int j = 0;
@@ -787,45 +829,44 @@ static void draw_cursor(void) {
     }
 }
 
-static void composite_full(void) {
-    /* Wallpaper. */
+/* Copy a rect from g_back_clean → g_back. Used when only the cursor
+ * moved: we don't need to recompose, just restore the underlying
+ * pixels at old cursor position from the cached "no-cursor" frame. */
+static void restore_rect_from_clean(int dx0, int dy0, int dx1, int dy1) {
+    int dw = dx1 - dx0;
+    for (int row = dy0; row < dy1; row++) {
+        memcpy(g_back       + (size_t)row * g_scr_w + dx0,
+               g_back_clean + (size_t)row * g_scr_w + dx0,
+               (size_t)dw * sizeof(uint32_t));
+    }
+}
+
+/* Full recomposition WITHOUT cursor — used to rebuild g_back_clean
+ * whenever a non-cursor change happens. Caller is responsible for
+ * snapshotting to g_back_clean and drawing the cursor afterwards. */
+static void compose_no_cursor(void) {
     memcpy(g_back, g_wp_scaled,
            (size_t)g_scr_w * g_scr_h * sizeof(uint32_t));
-    /* Windows back→front. */
     for (int i = 0; i < g_stack_n; i++) {
         int slot = g_stack[i];
         if (slot >= 0 && slot < MAX_WINS && g_wins[slot].used) {
             draw_window_frame(slot);
         }
     }
-    /* Menu. */
     draw_menu();
-    /* Cursor (always on top). */
-    draw_cursor();
-    /* Push entire framebuffer to VRAM. */
-    struct fb_blit_req req = {
-        .x = 0, .y = 0,
-        .w = g_scr_w, .h = g_scr_h,
-        .src = g_back,
-        .src_pitch = g_scr_w * 4
-    };
-    ioctl(g_fb_fd, FBIO_BLIT, &req);
 }
 
-/* Re-composite + blit only the dirty rect. Wins big for cursor-only
- * frames (the 90% case): ~900 px touched vs 1M for a 1280×800 screen. */
-static void composite_dirty(int dx0, int dy0, int dx1, int dy1) {
-    int dw = dx1 - dx0, dh = dy1 - dy0;
-    if (dw <= 0 || dh <= 0) return;
-    /* 1. Restore wallpaper into the dirty rect. */
+/* Partial recomposition — restore only `dirty rect` of the no-cursor
+ * image, by replaying wallpaper + intersecting windows + menu. Used
+ * when window content updated (IPC_OX_PRESENT) and we want to refresh
+ * only the affected zone without a full screen rebuild. */
+static void compose_no_cursor_dirty(int dx0, int dy0, int dx1, int dy1) {
+    int dw = dx1 - dx0;
     for (int row = dy0; row < dy1; row++) {
-        memcpy(g_back     + (size_t)row * g_scr_w + dx0,
-               g_wp_scaled + (size_t)row * g_scr_w + dx0,
+        memcpy(g_back       + (size_t)row * g_scr_w + dx0,
+               g_wp_scaled  + (size_t)row * g_scr_w + dx0,
                (size_t)dw * sizeof(uint32_t));
     }
-    /* 2. Re-draw windows whose frame bbox intersects the dirty rect.
-     * The window frame includes shadow margin around it. We redraw
-     * the full window — primitives clip themselves to g_back bounds. */
     for (int i = 0; i < g_stack_n; i++) {
         int slot = g_stack[i];
         if (slot < 0 || slot >= MAX_WINS || !g_wins[slot].used) continue;
@@ -838,7 +879,6 @@ static void composite_dirty(int dx0, int dy0, int dx1, int dy1) {
             draw_window_frame(slot);
         }
     }
-    /* 3. Menu. */
     if (g_menu_visible) {
         int mh = (int)MENU_N * MENU_ITEM_H + 8;
         if (rect_intersects(g_menu_x, g_menu_y, MENU_W, mh,
@@ -846,29 +886,114 @@ static void composite_dirty(int dx0, int dy0, int dx1, int dy1) {
             draw_menu();
         }
     }
-    /* 4. Cursor (always — it likely IS what made this dirty). */
-    if (rect_intersects(g_cx, g_cy, CURSOR_W, CURSOR_H,
-                        dx0, dy0, dx1, dy1)) {
-        draw_cursor();
+}
+
+/* Copy a rect from g_back → g_back_clean to keep the cache in sync
+ * after we just drew non-cursor content into g_back. */
+static void snapshot_to_clean(int dx0, int dy0, int dx1, int dy1) {
+    int dw = dx1 - dx0;
+    for (int row = dy0; row < dy1; row++) {
+        memcpy(g_back_clean + (size_t)row * g_scr_w + dx0,
+               g_back       + (size_t)row * g_scr_w + dx0,
+               (size_t)dw * sizeof(uint32_t));
     }
-    /* 5. Blit only the dirty subregion. */
+}
+
+static void blit_rect(int dx0, int dy0, int dx1, int dy1) {
     struct fb_blit_req req = {
         .x = (uint32_t)dx0, .y = (uint32_t)dy0,
-        .w = (uint32_t)dw,  .h = (uint32_t)dh,
+        .w = (uint32_t)(dx1 - dx0), .h = (uint32_t)(dy1 - dy0),
         .src = g_back + (size_t)dy0 * g_scr_w + dx0,
         .src_pitch = g_scr_w * 4
     };
     ioctl(g_fb_fd, FBIO_BLIT, &req);
 }
 
+/* Track the cursor's previous draw position so we know what region
+ * to restore from the clean cache. */
+static int g_last_cursor_x = -1, g_last_cursor_y = -1;
+
+/* Diagnostic counters — included in heartbeat to see what triggered
+ * a slowdown. composite_full is the heavy path (~12 MB of memcpy);
+ * composite_dirty stays cheap. If full_count grows after a close,
+ * something is repeatedly invalidating the cache. */
+static uint64_t g_composite_full_count = 0;
+static uint64_t g_composite_dirty_count = 0;
+static uint64_t g_ipc_drained_count = 0;
+
 static void composite_and_flush(void) {
-    if (!g_back || !g_wp_scaled) return;
-    if (g_dirty_full || g_dirty_x0 >= g_dirty_x1) {
-        composite_full();
+    if (!g_back || !g_back_clean || !g_wp_scaled) return;
+
+    int full = g_dirty_full || g_dirty_x0 >= g_dirty_x1;
+    if (full) {
+        g_composite_full_count++;
     } else {
-        composite_dirty(g_dirty_x0, g_dirty_y0, g_dirty_x1, g_dirty_y1);
+        g_composite_dirty_count++;
     }
-    /* Reset dirty state for next frame. */
+    if (full) {
+        /* Full: rebuild no-cursor + cache, then draw cursor on top. */
+        compose_no_cursor();
+        memcpy(g_back_clean, g_back,
+               (size_t)g_scr_w * g_scr_h * sizeof(uint32_t));
+        draw_cursor();
+        g_last_cursor_x = g_cx; g_last_cursor_y = g_cy;
+        struct fb_blit_req req = {
+            .x = 0, .y = 0, .w = g_scr_w, .h = g_scr_h,
+            .src = g_back, .src_pitch = g_scr_w * 4
+        };
+        ioctl(g_fb_fd, FBIO_BLIT, &req);
+    } else {
+        /* Compute the cursor's old + new bbox union. Anything else
+         * in the dirty rect counts as "content changed" — we rebuild
+         * just that subregion of the clean cache before re-drawing
+         * the cursor. */
+        int cx0 = g_last_cursor_x >= 0 ? g_last_cursor_x : g_cx;
+        int cy0 = g_last_cursor_y >= 0 ? g_last_cursor_y : g_cy;
+        int old_l = cx0, old_t = cy0;
+        int old_r = cx0 + CURSOR_W, old_b = cy0 + CURSOR_H;
+        int new_l = g_cx, new_t = g_cy;
+        int new_r = g_cx + CURSOR_W, new_b = g_cy + CURSOR_H;
+        int cur_l = old_l < new_l ? old_l : new_l;
+        int cur_t = old_t < new_t ? old_t : new_t;
+        int cur_r = old_r > new_r ? old_r : new_r;
+        int cur_b = old_b > new_b ? old_b : new_b;
+
+        /* Is the dirty rect bigger than just the cursor union? If so,
+         * some non-cursor content changed and we need to refresh the
+         * clean cache for that region. */
+        int content_dirty = (g_dirty_x0 < cur_l) || (g_dirty_y0 < cur_t) ||
+                            (g_dirty_x1 > cur_r) || (g_dirty_y1 > cur_b);
+        if (content_dirty) {
+            int cx0r = g_dirty_x0, cy0r = g_dirty_y0;
+            int cx1r = g_dirty_x1, cy1r = g_dirty_y1;
+            compose_no_cursor_dirty(cx0r, cy0r, cx1r, cy1r);
+            snapshot_to_clean(cx0r, cy0r, cx1r, cy1r);
+        }
+        /* Restore old cursor area from cache (wipes the cursor). */
+        if (g_last_cursor_x >= 0) {
+            int rx0 = old_l, ry0 = old_t, rx1 = old_r, ry1 = old_b;
+            if (rx0 < 0) rx0 = 0;
+            if (ry0 < 0) ry0 = 0;
+            if (rx1 > (int)g_scr_w) rx1 = g_scr_w;
+            if (ry1 > (int)g_scr_h) ry1 = g_scr_h;
+            if (rx0 < rx1 && ry0 < ry1)
+                restore_rect_from_clean(rx0, ry0, rx1, ry1);
+        }
+        /* Draw cursor at new position. */
+        draw_cursor();
+        g_last_cursor_x = g_cx; g_last_cursor_y = g_cy;
+
+        /* Blit the union of dirty rect + cursor union. */
+        int bx0 = g_dirty_x0 < cur_l ? g_dirty_x0 : cur_l;
+        int by0 = g_dirty_y0 < cur_t ? g_dirty_y0 : cur_t;
+        int bx1 = g_dirty_x1 > cur_r ? g_dirty_x1 : cur_r;
+        int by1 = g_dirty_y1 > cur_b ? g_dirty_y1 : cur_b;
+        if (bx0 < 0) bx0 = 0;
+        if (by0 < 0) by0 = 0;
+        if (bx1 > (int)g_scr_w) bx1 = g_scr_w;
+        if (by1 > (int)g_scr_h) by1 = g_scr_h;
+        if (bx0 < bx1 && by0 < by1) blit_rect(bx0, by0, bx1, by1);
+    }
     g_dirty_full = 0;
     g_dirty_x0 = g_dirty_x1 = 0;
     g_dirty_y0 = g_dirty_y1 = 0;
@@ -1032,7 +1157,28 @@ static void handle_ipc(const ipc_msg_t *m) {
         if (slot < 0) {
             send_response(from, ENOMEM, 0);
         } else {
-            send_response(from, 0, (uint64_t)g_wins[slot].id);
+            /* Extended response: shm name packed into data[] so the
+             * client can shm_open + mmap the same backing buffer and
+             * draw locally. Backwards-compat: clients that ignore the
+             * shm name still get the window id via arg1. */
+            ipc_msg_t rsp;
+            memset(&rsp, 0, sizeof(rsp));
+            rsp.to   = from;
+            rsp.type = IPC_OX_RESPONSE;
+            rsp.arg0 = 0;
+            rsp.arg1 = (uint64_t)g_wins[slot].id;
+            size_t nl = strnlen(g_wins[slot].shm_name,
+                                sizeof(g_wins[slot].shm_name));
+            if (nl >= sizeof(rsp.data)) nl = sizeof(rsp.data) - 1;
+            memcpy(rsp.data, g_wins[slot].shm_name, nl);
+            rsp.data[nl] = 0;
+            /* Retry on EAGAIN — see send_response notes. */
+            for (int attempt = 0; attempt < 100; attempt++) {
+                if (ipc_send(&rsp) == 0) break;
+                if (errno != EAGAIN) break;
+                struct timespec ts = { 0, 2 * 1000000 };
+                nanosleep(&ts, 0);
+            }
         }
         return;
     }
@@ -1186,32 +1332,32 @@ static void process_mouse_event(mouse_event_t ev) {
     g_cy = new_cy;
     if (moved) {
         g_dirty = 1;   /* cursor moved → recompose */
-        /* Dirty-rect: union of old + new cursor bbox. Cheap to repaint.
-         * If the menu is visible OR the cursor is over a window titlebar
-         * (where hover state matters for the close button color), we
-         * fall back to full because partial rect would leave stale
-         * hover artifacts on regions outside the cursor's bbox. */
         mark_dirty(old_cx, old_cy, CURSOR_W, CURSOR_H);
         mark_dirty(new_cx, new_cy, CURSOR_W, CURSOR_H);
+        /* Hover-state propagation. Instead of full-repainting whenever
+         * the cursor crosses any window titlebar or menu, mark only
+         * those affected regions dirty. Keeps cursor-over-window as
+         * cheap as cursor-over-wallpaper. */
         if (g_menu_visible) {
-            mark_dirty_full();
-        } else {
-            /* Cheap check: if cursor (old or new) is over any window
-             * titlebar zone, also force full so close-button hover
-             * transitions are reflected. */
-            for (int i = 0; i < g_stack_n; i++) {
-                int s = g_stack[i];
-                if (!g_wins[s].used) continue;
-                ox_window_t *w = &g_wins[s];
-                int tb_y0 = w->y - TITLEBAR_H;
-                int tb_y1 = w->y;
-                int tb_x0 = w->x;
-                int tb_x1 = w->x + w->w;
-                int hit_old = (old_cx >= tb_x0 && old_cx < tb_x1 &&
-                               old_cy >= tb_y0 && old_cy < tb_y1);
-                int hit_new = (g_cx  >= tb_x0 && g_cx  < tb_x1 &&
-                               g_cy  >= tb_y0 && g_cy  < tb_y1);
-                if (hit_old || hit_new) { mark_dirty_full(); break; }
+            int mh = (int)MENU_N * MENU_ITEM_H + 8;
+            mark_dirty(g_menu_x, g_menu_y, MENU_W, mh);
+        }
+        /* Any window whose titlebar the cursor entered or left needs
+         * its titlebar redrawn to update close-button hover color. */
+        for (int i = 0; i < g_stack_n; i++) {
+            int s = g_stack[i];
+            if (!g_wins[s].used) continue;
+            ox_window_t *w = &g_wins[s];
+            int tb_y0 = w->y - TITLEBAR_H;
+            int tb_y1 = w->y;
+            int tb_x0 = w->x;
+            int tb_x1 = w->x + w->w;
+            int hit_old = (old_cx >= tb_x0 && old_cx < tb_x1 &&
+                           old_cy >= tb_y0 && old_cy < tb_y1);
+            int hit_new = (g_cx  >= tb_x0 && g_cx  < tb_x1 &&
+                           g_cy  >= tb_y0 && g_cy  < tb_y1);
+            if (hit_old || hit_new) {
+                mark_dirty(tb_x0, tb_y0, w->w, TITLEBAR_H);
             }
         }
     }
@@ -1373,29 +1519,10 @@ static void process_kbd_event(int ascii, int keycode) {
 extern long osnos_syscall2(long n, long a1, long a2);
 #define SYS_TASKINFO_NUM 515
 
-/* Return 1 if there's a LIVE task with the given pid. Zombie/Dead/
- * Unused all count as "not alive" — a zombie's window backing can be
- * reclaimed even though the slot will linger until the parent waits. */
-static int pid_is_alive(uint64_t pid) {
-    if (pid == 0) return 0;
-    for (int i = 0; i < 16; i++) {
-        osnos_taskinfo_t info;
-        if (osnos_syscall2(SYS_TASKINFO_NUM, i, (long)&info) < 0) continue;
-        if (info.state == OSNOS_TASK_UNUSED ||
-            info.state == OSNOS_TASK_DEAD   ||
-            info.state == OSNOS_TASK_ZOMBIE) continue;
-        if (info.pid == pid) return 1;
-    }
-    return 0;
-}
-
 static void reap_dead_windows(void) {
-    /* (1) Reap any exited child processes (apps oxsrv spawned via
-     * osn_spawn). Without this, MAX_TASKS=16 slots fill up with
-     * ZOMBIE entries that the kernel keeps around waiting for the
-     * parent to acknowledge — after ~10 app open/close cycles the
-     * task table is full and new spawns fail. waitpid(-1, ..., WNOHANG)
-     * is non-blocking, so this is safe to run every frame. */
+    /* (1) Reap exited child processes (oxsrv spawns via osn_spawn).
+     * Without waitpid, MAX_TASKS slots fill with ZOMBIEs and new
+     * spawns eventually fail. WNOHANG keeps it non-blocking. */
     int loop_guard = 32;
     while (loop_guard-- > 0) {
         int status = 0;
@@ -1403,19 +1530,29 @@ static void reap_dead_windows(void) {
         if (rp <= 0) break;
     }
 
-    /* (2) Destroy windows whose owner died (graceful close, crash,
-     * killed via oxtop, or any other reason). Without this the
-     * window backing leaks ~180KB per orphan and oxsrv heap fragments. */
+    /* (2) Build a one-shot snapshot of LIVE task pids — 16 syscalls
+     * total. Then check each used window against the snapshot in
+     * memory instead of 16-syscall-per-window. Old code did 16 ×
+     * MAX_WINS = 256 syscalls per reap; this is just 16. */
+    uint64_t live[16];
+    int n_live = 0;
+    for (int i = 0; i < 16; i++) {
+        osnos_taskinfo_t info;
+        if (osnos_syscall2(SYS_TASKINFO_NUM, i, (long)&info) < 0) continue;
+        if (info.state == OSNOS_TASK_UNUSED ||
+            info.state == OSNOS_TASK_DEAD   ||
+            info.state == OSNOS_TASK_ZOMBIE) continue;
+        live[n_live++] = info.pid;
+    }
+
     for (int i = 0; i < MAX_WINS; i++) {
         if (!g_wins[i].used) continue;
-        if (g_wins[i].should_close) {
-            destroy_slot(i);
-            continue;
+        if (g_wins[i].should_close) { destroy_slot(i); continue; }
+        int alive = 0;
+        for (int j = 0; j < n_live; j++) {
+            if (live[j] == g_wins[i].owner_pid) { alive = 1; break; }
         }
-        if (!pid_is_alive(g_wins[i].owner_pid)) {
-            destroy_slot(i);
-            continue;
-        }
+        if (!alive) destroy_slot(i);
     }
 }
 
@@ -1469,7 +1606,8 @@ int main(int argc, char **argv) {
             g_scr_w, g_scr_h, info.bits_per_pixel, info.line_length);
 
     g_back = (uint32_t *)malloc((size_t)g_scr_w * g_scr_h * sizeof(uint32_t));
-    if (!g_back) {
+    g_back_clean = (uint32_t *)malloc((size_t)g_scr_w * g_scr_h * sizeof(uint32_t));
+    if (!g_back || !g_back_clean) {
         fprintf(stderr,
                 "oxsrv: malloc backbuffer %u bytes FAILED\n",
                 (unsigned)((size_t)g_scr_w * g_scr_h * 4));
@@ -1543,7 +1681,7 @@ int main(int argc, char **argv) {
      * thousands of events/sec when QEMU grabs the cursor) from
      * starving the rest of the system or saturating the IPC queue.
      */
-    long frame = 0;
+    long frame = 0; (void)frame;
     for (;;) {
         if (g_quit) {
             /* "Exit Ox" was selected from the menu. Wake consrv +
@@ -1571,19 +1709,36 @@ int main(int argc, char **argv) {
             process_kbd_event((int)(unsigned char)kev.ascii, (int)kev.keycode);
             kdrained++;
         }
+        /* Drain the ENTIRE queue per iteration. */
         ipc_msg_t m;
         int idrained = 0;
-        while (idrained < 64 && ipc_recv(&m) == 0) {
+        while (idrained < 256 && ipc_recv(&m) == 0) {
             handle_ipc(&m);
             idrained++;
         }
-        reap_dead_windows();
-        /* Emit at most one MOVE event per frame to the focused
-         * window — coalescing prevents IPC saturation under a
-         * mouse storm. */
+        g_ipc_drained_count += idrained;
+        /* Get the current time ONCE per iteration — multiple
+         * throttles (reap, move, heartbeat) share this. Avoids 3×
+         * clock_gettime syscalls at every event-driven wake. */
+        struct timespec _now;
+        clock_gettime(0, &_now);
+        uint64_t now_ms = (uint64_t)_now.tv_sec * 1000 + _now.tv_nsec / 1000000;
+
+        /* Throttle dead-window reaping to once per ~500 ms. */
+        {
+            static uint64_t last_reap_ms = 0;
+            if (now_ms - last_reap_ms >= 500) {
+                reap_dead_windows();
+                last_reap_ms = now_ms;
+            }
+        }
+        /* Emit at most one MOVE event per frame, throttled to 60Hz. */
+        static uint64_t last_move_ms = 0;
         if (g_pending_move && g_pending_move_slot >= 0 &&
             g_pending_move_slot < MAX_WINS &&
-            g_wins[g_pending_move_slot].used) {
+            g_wins[g_pending_move_slot].used &&
+            now_ms - last_move_ms >= 16) {
+            last_move_ms = now_ms;
             int slot = g_pending_move_slot;
             send_event_mouse(slot,
                               g_cx - g_wins[slot].x,
@@ -1596,19 +1751,49 @@ int main(int argc, char **argv) {
             composite_and_flush();
             g_dirty = 0;
         }
-        /* Heartbeat every ~2 seconds for serial-log diagnostics. */
-        if (ttyfd >= 0 && (frame % 60) == 0) {
-            char hb[64];
+        /* Heartbeat every ~2 SECONDS (time-based, not frame-based —
+         * event-driven loop fires hundreds of times per second). */
+        static uint64_t last_hb_ms = 0;
+        if (ttyfd >= 0 && now_ms - last_hb_ms >= 2000) {
+            last_hb_ms = now_ms;
+            char hb[256];
+            void *brk = sbrk(0);
+            unsigned long mem_free_kb = 0, ipc_used = 0;
+            int sfd = open("/sys/meminfo", O_RDONLY);
+            if (sfd >= 0) {
+                char buf[1024];
+                int sn = (int)read(sfd, buf, sizeof(buf) - 1);
+                close(sfd);
+                if (sn > 0) {
+                    buf[sn] = 0;
+                    char *p;
+                    if ((p = strstr(buf, "mem free  kB: ")))
+                        mem_free_kb = strtoul(p + 14, 0, 10);
+                    if ((p = strstr(buf, "ipc:    ")))
+                        ipc_used = strtoul(p + 8, 0, 10);
+                }
+            }
             int n = snprintf(hb, sizeof(hb),
-                             "oxsrv: frame %ld cur=(%d,%d) wins=%d\n",
-                             frame, g_cx, g_cy, g_stack_n);
+                "oxsrv: wins=%d memfree=%lukB ipc=%lu | full=%lu dirty=%lu drains=%lu brk=0x%lx\n",
+                g_stack_n, mem_free_kb, ipc_used,
+                (unsigned long)g_composite_full_count,
+                (unsigned long)g_composite_dirty_count,
+                (unsigned long)g_ipc_drained_count,
+                (unsigned long)brk);
             if (n > 0) write(ttyfd, hb, n);
         }
         frame++;
-        /* 16ms ≈ 60 FPS. With the cheap-shadow refactor the typical
-         * composite is well under 16ms, so this sleeps the leftover. */
-        struct timespec ts = { 0, 16 * 1000000 };
-        nanosleep(&ts, 0);
+        /* Event-driven wait: block in the kernel until ANY of mouse,
+         * keyboard, or IPC has data ready — no userland busy-spin.
+         * Wake hooks (devfs_mouse_push, devfs_input_push,
+         * ipc_send→task_unblock) flip our state immediately. The 50ms
+         * timeout is a soft cap so the watchdog tick (reap windows /
+         * heartbeat) still fires when truly idle. */
+        struct pollfd pfds[3];
+        pfds[0].fd = g_mouse_fd; pfds[0].events = POLLIN; pfds[0].revents = 0;
+        pfds[1].fd = g_input_fd; pfds[1].events = POLLIN; pfds[1].revents = 0;
+        pfds[2].fd = -1;         pfds[2].events = POLL_IPC_PENDING; pfds[2].revents = 0;
+        poll(pfds, 3, 50);
     }
     return 0;
 }

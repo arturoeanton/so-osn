@@ -29,8 +29,13 @@
  *             hasta que se cierren todos.
  */
 
-#define SHM_OBJ_MAX        16
-#define SHM_PAGES_PER_OBJ  256   /* 1 MiB max por objeto */
+/* Bumped from 16/256 to 32/1024 for FASE perf: oxsrv backs every
+ * window with a shm so the client can draw locally and only ping
+ * oxsrv via IPC_OX_PRESENT (vs 1 IPC per draw call). 32 objects
+ * (one per oxsrv window × 2 mappers) × 4 MiB max covers oxsettings
+ * thumbs (~1.6 MB) and even bigger windows. */
+#define SHM_OBJ_MAX        32
+#define SHM_PAGES_PER_OBJ  1024  /* 4 MiB max por objeto */
 
 typedef struct shm_obj shm_obj_t;
 

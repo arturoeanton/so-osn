@@ -30,7 +30,11 @@
  */
 
 #define IPC_DATA_SIZE  1024
-#define IPC_QUEUE_SIZE 64
+/* 256 slots × ~1KB = ~256 KB shared queue. Under heavy GUI traffic
+ * (every ox_draw_rect/text/image/present is one IPC), the previous
+ * 64 saturated within a few frames of cursor activity, triggering
+ * userland busy-spin retries that hammered the scheduler. */
+#define IPC_QUEUE_SIZE 256
 
 /*
  * Well-known service IDs. Servers self-register against these via

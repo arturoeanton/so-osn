@@ -256,3 +256,20 @@ void task_unblock(uint64_t pid) {
         }
     }
 }
+
+void task_wake_pollers(void) {
+    /* Wake tasks blocked in sys_poll OR sys_ipc_send. Filtering by
+     * specific syscalls avoids thundering-herd: a mouse event wakes
+     * only pollers (not consrv blocked in IPC recv etc); freeing an
+     * IPC slot wakes only senders. Reused for both directions to
+     * keep the kernel-side API single-entry. */
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (tasks[i].state == TASK_BLOCKED && tasks[i].saved_valid) {
+            uint64_t sc = tasks[i].saved_rax;
+            if (sc == 7   /* SYS_POLL     */ ||
+                sc == 510 /* SYS_IPC_SEND */) {
+                tasks[i].state = TASK_READY;
+            }
+        }
+    }
+}

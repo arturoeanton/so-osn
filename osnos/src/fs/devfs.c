@@ -5,6 +5,7 @@
 #include "../drivers/serial.h"
 #include "../include/osnos_status.h"
 #include "../lib/string.h"
+#include "../micro/task.h"
 #include "../micro/tty.h"
 #include "vfs.h"
 
@@ -41,6 +42,8 @@ void devfs_input_push(keyboard_event_t ev) {
     input_ring.buf[input_ring.head] = ev;
     input_ring.head = (input_ring.head + 1) % DEVFS_INPUT_RING;
     input_ring.level++;
+    /* Wake poll-blocked tasks watching /dev/input0. */
+    task_wake_pollers();
 }
 
 static bool input_ring_pop(keyboard_event_t *out) {
@@ -66,6 +69,9 @@ static struct {
     size_t level;
 } mouse_ring;
 
+bool devfs_mouse_has_data(void) { return mouse_ring.level > 0; }
+bool devfs_input_has_data(void) { return input_ring.level > 0; }
+
 void devfs_mouse_push(mouse_event_t ev) {
     if (mouse_ring.level >= DEVFS_MOUSE_RING) {
         mouse_ring.tail = (mouse_ring.tail + 1) % DEVFS_MOUSE_RING;
@@ -74,6 +80,9 @@ void devfs_mouse_push(mouse_event_t ev) {
     mouse_ring.buf[mouse_ring.head] = ev;
     mouse_ring.head = (mouse_ring.head + 1) % DEVFS_MOUSE_RING;
     mouse_ring.level++;
+    /* Wake any task blocked in poll(/dev/mouse0). Lets compositors
+     * (oxsrv) sleep on poll() instead of nanosleep-spinning. */
+    task_wake_pollers();
 }
 
 static bool mouse_ring_pop(mouse_event_t *out) {

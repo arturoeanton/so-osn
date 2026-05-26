@@ -60,6 +60,7 @@
 #define SYS_ISATTY   500   /* osnos-specific (moved to 500+ to dodge Linux #201/#228/#262=newfstatat) */
 #define SYS_GETDENTS 217
 #define SYS_SELECT     23
+#define SYS_POLL        7
 #define SYS_SOCKET     41
 #define SYS_CONNECT    42
 #define SYS_ACCEPT     43

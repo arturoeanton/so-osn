@@ -2,6 +2,11 @@
 #include "task.h"
 #include "service.h"
 
+/* Forward decl — ipc_recv calls task_wake_pollers when it frees a
+ * queue slot so any sender blocked in sys_ipc_send (queue-full case)
+ * gets to retry. Defined in task.c. */
+void task_wake_pollers(void);
+
 static ipc_msg_t queue[IPC_QUEUE_SIZE];
 
 static unsigned int read_index = 0;
@@ -29,7 +34,17 @@ osnos_status_t ipc_send(const ipc_msg_t *msg) {
     if (pid == 0) {
         /* Direct-pid routing fallback (FASE 12 / Ox client events). */
         if (msg->to == 0) return OSNOS_ESRCH;
-        if (!task_by_pid(msg->to)) return OSNOS_ESRCH;
+        task_t *target = task_by_pid(msg->to);
+        if (!target) return OSNOS_ESRCH;
+        /* Reject ZOMBIE/DEAD targets — they can never receive again.
+         * Without this, oxsrv events sent to a just-died client get
+         * queued and orphan the slot until reaper-side ipc_drop_for_pid
+         * catches them. */
+        if (target->state == TASK_ZOMBIE ||
+            target->state == TASK_DEAD   ||
+            target->pml4 == 0) {
+            return OSNOS_ESRCH;
+        }
         pid = msg->to;
     }
 
@@ -52,6 +67,34 @@ osnos_status_t ipc_send(const ipc_msg_t *msg) {
 
 size_t ipc_pending(void) {
     return count;
+}
+
+bool ipc_has_for_pid(uint64_t pid) {
+    if (pid == 0) return false;
+    for (unsigned int i = 0; i < count; i++) {
+        unsigned int idx = (read_index + i) % IPC_QUEUE_SIZE;
+        if (queue[idx].to == pid) return true;
+    }
+    return false;
+}
+
+void ipc_drop_for_pid(uint64_t pid) {
+    if (pid == 0 || count == 0) return;
+    /* Walk the logical queue (read_index .. read_index+count) and
+     * rebuild it in place, skipping entries that target the dying
+     * pid. Same pattern as ipc_recv's compaction but we drop ALL
+     * matches in one pass. */
+    unsigned int new_count = 0;
+    unsigned int w = read_index;
+    for (unsigned int i = 0; i < count; i++) {
+        unsigned int r = (read_index + i) % IPC_QUEUE_SIZE;
+        if (queue[r].to == pid) continue;          /* drop */
+        if (r != w) queue[w] = queue[r];
+        w = (w + 1) % IPC_QUEUE_SIZE;
+        new_count++;
+    }
+    write_index = w;
+    count = new_count;
 }
 
 bool ipc_recv(uint64_t to, ipc_msg_t *out) {
@@ -89,6 +132,9 @@ bool ipc_recv(uint64_t to, ipc_msg_t *out) {
 
             count--;
 
+            /* Freed a slot — wake any sender blocked in sys_ipc_send
+             * waiting for queue space. Cheap (16 task slots checked). */
+            task_wake_pollers();
             return true;
         }
     }

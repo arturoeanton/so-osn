@@ -904,6 +904,14 @@ void proc_exit_current_user(int exit_code) {
     uint64_t *user_pml4   = t->pml4;
     void     *kstack_base = t->kernel_stack_base;
 
+    /* Drop every pending IPC addressed to this pid. Otherwise events
+     * queued by oxsrv (mouse moves, key presses, close events) for an
+     * app that's exiting stay stuck in the 64-slot queue forever. After
+     * a handful of open/close cycles the queue saturates and ipc_send
+     * starts returning EAGAIN — observable as "gets slow after opening
+     * and closing an app". */
+    ipc_drop_for_pid(t->pid);
+
     /*
      * Close every fd the dying task held open. Without this, a task
      * killed mid-blocking-syscall (e.g. httpd in accept loop killed by
