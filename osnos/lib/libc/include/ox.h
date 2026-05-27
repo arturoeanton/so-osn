@@ -123,3 +123,50 @@ int  ox_clipboard_get(char *buf, int cap);
 /* Internal — exported so oxsrv can render text using the same font
  * the client compiled against (so glyph metrics line up). */
 const uint8_t *ox_font_glyph(int c);     /* 8 bytes, 8x8 bitmap */
+
+/* ---- Proportional text rendering (Haiku/BeOS look) ------------------
+ *
+ * Optional TTF backend: callers ox_text_init() with a TTF path at
+ * startup. If load succeeds, subsequent ox_text_draw / ox_text_width /
+ * ox_text_height use proportional anti-aliased glyphs. If load fails
+ * (file missing, malformed), the calls transparently fall back to the
+ * 8x8 bitmap font — so apps stay readable even without a font.
+ *
+ * Recommended default: ox_text_init("/home/.fonts/default.ttf", 12);
+ *
+ * The Ox WM server (oxsrv) calls this once at boot; client apps may
+ * call it themselves to render text inside their own buffers with the
+ * same look.
+ */
+int  ox_text_init(const char *ttf_path, int pixel_height);
+int  ox_text_loaded(void);
+int  ox_text_height(void);                   /* px from top to bottom of glyphs */
+int  ox_text_line_height(void);              /* px between baselines */
+int  ox_text_width(const char *s);           /* width of single-line string */
+void ox_text_draw(uint32_t *buf, int bw, int bh,
+                   int x, int y, const char *s, uint32_t color);
+
+/* ---- Icon system (BeOS-style 16x16 mono icons) ---------------------
+ *
+ * Built-in icon registry of small monochrome bitmaps indexed by app
+ * name ("notepad", "browser", "sqlite", etc.). Each icon is a
+ * 16-row mask (uint16_t per row, bit 15 = leftmost pixel).
+ *
+ * Apps and oxsrv use these for window decorations, menu items, and
+ * deskbar tiles. ox_icon_get returns NULL for an unknown name (caller
+ * should draw a fallback). ox_icon_draw paints the icon with the given
+ * foreground color where mask bits are set; background is transparent.
+ */
+#define OX_ICON_W 16
+#define OX_ICON_H 16
+const uint16_t *ox_icon_get(const char *name);
+void  ox_icon_draw(uint32_t *buf, int bw, int bh, int x, int y,
+                    const uint16_t *icon, uint32_t color);
+
+/* Color icon API — 24x24 RGBA bitmaps loaded from /home/.icons/.
+ * Apps and oxsrv prefer this; the mono path above is a fallback when
+ * no .rgba file is staged on disk for the requested key. */
+const uint8_t *ox_icon_get_rgba(const char *name);
+int   ox_icon_dims(int *w, int *h);
+void  ox_icon_draw_rgba(uint32_t *buf, int bw, int bh, int x, int y,
+                         const uint8_t *rgba);

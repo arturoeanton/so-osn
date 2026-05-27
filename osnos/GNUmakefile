@@ -11,6 +11,12 @@ LINKER := $(DEPSDIR)/linker-scripts/$(ARCH).lds
 
 CC := clang
 LD := ld.lld
+# Use llvm-* binutils so we work cross-format on macOS. The native
+# `/usr/bin/ar` invokes BSD ranlib which rejects ELF members ("not a
+# mach-o file"); `objcopy` doesn't ship at all on macOS. llvm-ar and
+# llvm-objcopy are format-agnostic and produce valid GNU output.
+AR      := $(shell command -v llvm-ar      2>/dev/null || echo /opt/homebrew/opt/llvm/bin/llvm-ar)
+OBJCOPY := $(shell command -v llvm-objcopy 2>/dev/null || command -v objcopy 2>/dev/null || echo /opt/homebrew/opt/llvm/bin/llvm-objcopy)
 
 CFLAGS := -g -O2 -pipe \
 	-Wall -Wextra -std=gnu11 \
@@ -194,6 +200,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/gui/oxtop.c \
     elfs/gui/oxbrowser.c \
     elfs/gui/oxsqliteview.c \
+    elfs/gui/oxhexedit.c \
     elfs/tools/uxsh.c
 
 # musl-linked ELFs (vendor/musl). Declared early so USER_ELF_LIST sees it.
@@ -318,6 +325,8 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $$(LIBTCC1_A) $$(CRTI_O) $$(C
 	mmd -i $@ ::/bin
 	mmd -i $@ ::/home
 	mmd -i $@ ::/home/wallpapers
+	mmd -i $@ ::/home/.fonts
+	mmd -i $@ ::/home/.icons
 	mmd -i $@ ::/lib
 	mmd -i $@ ::/lib/tcc
 	mmd -i $@ ::/lib/tcc/include
@@ -357,6 +366,33 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $$(LIBTCC1_A) $$(CRTI_O) $$(C
 	@# it from the GUI. If left absent, oxsrv falls back to "wallpaper1".
 	printf 'current_wallpaper=wallpaper1\n' > $(SD_TMP)/.oxrc
 	mcopy -i $@ $(SD_TMP)/.oxrc       ::/home/.oxrc
+	@# Optional TTF font for the WM chrome (Haiku-style proportional
+	@# anti-aliased text). Drop any .ttf file at res/fonts/default.ttf
+	@# (or run `make fetch-fonts`) and oxsrv picks it up via
+	@# ox_text_init("/home/.fonts/default.ttf", 12). Without one we
+	@# fall back to the built-in 8x8 bitmap.
+	@if [ -f res/fonts/default.ttf ]; then \
+	    mcopy -i $@ -o res/fonts/default.ttf ::/home/.fonts/default.ttf; \
+	    echo "  COPY    /home/.fonts/default.ttf"; \
+	fi
+	@for f in res/fonts/*.ttf; do \
+	    [ -f "$$f" ] || continue; \
+	    base=$$(basename "$$f"); \
+	    [ "$$base" = "default.ttf" ] && continue; \
+	    mcopy -i $@ -o "$$f" "::/home/.fonts/$$base"; \
+	done
+	@# 24x24 RGBA icon set for the WM chrome (deskbar tiles, menu
+	@# items, future titlebar app glyphs). Populated by
+	@# `tools/fetch_icons.sh` from the Yaru theme. Each .rgba is
+	@# exactly 2304 bytes; oxsrv loads them lazily on first use.
+	@if ls res/icons/*.rgba >/dev/null 2>&1; then \
+	    for f in res/icons/*.rgba; do \
+	        base=$$(basename "$$f"); \
+	        mcopy -i $@ -o "$$f" "::/home/.icons/$$base" || exit 1; \
+	    done; \
+	    n=$$(ls res/icons/*.rgba | wc -l | tr -d ' '); \
+	    echo "  COPY    /home/.icons/  ($$n icons)"; \
+	fi
 	@# lighttpd: solo index.html ahora; /etc/lighttpd/ se crea más
 	@# abajo (después de /etc) para mantener orden mmd correcto.
 	mcopy -i $@ -o res/lighttpd/index.html    ::/home/index.html
@@ -497,9 +533,28 @@ $(BUILD)/%.c.o: %.c
 # -I src/include lets libc + user ELFs reach the shared ABI headers
 # (osnos_ipc_abi.h, osnos_keys.h, osnos_status.h) — single source of
 # truth shared with the kernel.
-$(BUILD)/$(LIBC_DIR)/%.c.o: $(LIBC_DIR)/%.c
+#
+# Use a STATIC pattern rule (with explicit target list) instead of a
+# bare pattern rule. The generic kernel pattern
+# `$(BUILD)/%.c.o: %.c` above also matches the libc target paths, and
+# GNU make tiebreaks pattern rules by order-of-definition — without
+# this static binding the kernel rule wins and compiles libc files
+# with kernel CFLAGS (no libc include path, -mcmodel=kernel, etc.),
+# which only worked accidentally when the .o files were already on
+# disk from a previous build.
+LIBC_C_OBJS := $(filter %.c.o,$(LIBC_OBJS))
+$(filter-out $(BUILD)/$(LIBC_DIR)/ox_text.c.o,$(LIBC_C_OBJS)): $(BUILD)/$(LIBC_DIR)/%.c.o: $(LIBC_DIR)/%.c
 	mkdir -p "$(dir $@)"
 	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include -MMD -MP -c $< -o $@
+
+# stb_truetype amalgamated build — public-domain single-header library
+# bundled inside ox_text.c. The implementation uses old-C constructs
+# that trip -Wsign-compare / -Wunused-but-set / -Wmissing-prototypes,
+# so we drop strictness for this one object (matches how TCC, Lua, jq
+# are compiled). The rest of libc still builds with -Werror.
+$(BUILD)/$(LIBC_DIR)/ox_text.c.o: $(LIBC_DIR)/ox_text.c
+	mkdir -p "$(dir $@)"
+	$(CC) $(USER_CFLAGS) -w -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include -I vendor/stb -MMD -MP -c $< -o $@
 
 # libc assembly objects (crt0.S).
 $(BUILD)/$(LIBC_DIR)/%.S.o: $(LIBC_DIR)/%.S
@@ -510,7 +565,8 @@ $(BUILD)/$(LIBC_DIR)/%.S.o: $(LIBC_DIR)/%.S
 # linker scripts can place it explicitly at the start of .text).
 $(LIBC_A): $(filter-out $(LIBC_CRT0),$(LIBC_OBJS))
 	mkdir -p "$(dir $@)"
-	ar rcs $@ $^
+	rm -f $@
+	$(AR) rcs $@ $^
 
 # Bare ring-3 ELF: source has its own _start, no libc, no crt0.
 $(BUILD)/elfs/tests/user_hello.elf: elfs/tests/user_hello.c elfs/tests/user_hello.lds
@@ -529,11 +585,50 @@ $(BUILD)/elfs/%.elf: elfs/%.c elfs/libc.lds $(LIBC_A) $(LIBC_CRT0)
 	rm $@.tmp.o
 
 # --------------------------------------------------------------------------
-# tlse port — FASE 12.4. Single-file TLS 1.2/1.3 library by Eduard Suica
-# (eduardsui/tlse), MIT/BSD. Vendor at vendor/tlse/{tlse.c, libtomcrypt.c,
-# tlse.h}. We use `-DTLS_AMALGAMATION` so tlse.c includes libtomcrypt.c
-# inline — one compilation unit, ~48K LOC. Output is libtlse.a linked
-# into oxbrowser for HTTPS support.
+# BearSSL port — FASE 12.5. Constant-time TLS 1.0/1.2 library by Thomas
+# Pornin (bearssl.org), MIT. Designed for embedded — fully freestanding,
+# no malloc, caller-provided buffers. Vendor at vendor/bearssl/.
+# ~67K LOC across 277 .c files. Output is libbearssl.a linked into
+# oxbrowser. Replaces tlse (which compiled but its ClientHello wasn't
+# accepted by major modern servers — Cloudflare, AWS-ELB, Google all
+# closed connections immediately).
+# --------------------------------------------------------------------------
+BEARSSL_DIR  := vendor/bearssl
+# Exclude SIMD/intrinsic-accelerated variants — they hard-#include
+# <x86intrin.h> / <altivec.h> at the top of the .c file regardless of
+# the BR_AES_X86NI runtime gate, so mini-libc freestanding chokes.
+# BearSSL ships pure-C fallbacks for every primitive (aes_ct, aes_big,
+# ghash_ctmul, etc.) which we use instead.
+BEARSSL_SRCS := $(shell find $(BEARSSL_DIR)/src -name '*.c' \
+                 ! -name '*x86ni*' ! -name '*pclmul*' \
+                 ! -name '*pwr8*'  ! -name '*sse2*' \
+                 ! -name 'sysrng.c') \
+                $(BEARSSL_DIR)/osnos_glue.c
+BEARSSL_OBJS := $(patsubst $(BEARSSL_DIR)/%.c,$(BUILD)/$(BEARSSL_DIR)/%.c.o,$(BEARSSL_SRCS))
+BEARSSL_A    := $(BUILD)/$(BEARSSL_DIR)/libbearssl.a
+BEARSSL_INC  := $(BEARSSL_DIR)/inc
+
+# Disable all Intel intrinsics-based code paths (AES-NI, PCLMUL,
+# SSE2, RDRAND) — mini-libc has no <x86intrin.h> / <immintrin.h>.
+# BearSSL has pure-C fallbacks for every primitive. Slower in QEMU
+# TCG but works freestanding.
+BEARSSL_DEFS := -DBR_AES_X86NI=0 -DBR_GHASH_PCLMUL=0 \
+                -DBR_SSE2=0 -DBR_RDRAND=0 \
+                -DBR_AMD64=1 -DBR_64=1
+
+$(BUILD)/$(BEARSSL_DIR)/%.c.o: $(BEARSSL_DIR)/%.c
+	mkdir -p "$(dir $@)"
+	$(CC) $(USER_CFLAGS) -w -isystem $(FREESTD_INC) -I $(LIBC_INC) \
+	    -I src/include -I $(BEARSSL_INC) -I $(BEARSSL_DIR)/src \
+	    $(BEARSSL_DEFS) -c $< -o $@
+
+$(BEARSSL_A): $(BEARSSL_OBJS)
+	ar rcs $@ $^
+
+# --------------------------------------------------------------------------
+# tlse port — kept for reference but oxbrowser no longer links it. tlse's
+# ClientHello had interop issues with modern servers. See FASE 12.5 notes
+# in STATUS.md.
 #
 # NOTA orden: estas variables se definen ACÁ (antes del override de
 # oxbrowser que las referencia en su prerequisite line) porque gmake
@@ -560,13 +655,15 @@ $(TLSE_OBJ): $(TLSE_DIR)/tlse.c $(TLSE_DIR)/libtomcrypt.c $(TLSE_DIR)/tlse.h
 $(TLSE_A): $(TLSE_OBJ)
 	ar rcs $@ $^
 
-# Override for oxbrowser: link in libtlse.a (TLS 1.2 client for the
-# https:// scheme). Otherwise identical to the generic pattern above.
-$(BUILD)/elfs/gui/oxbrowser.elf: elfs/gui/oxbrowser.c elfs/libc.lds $(LIBC_A) $(LIBC_CRT0) $(TLSE_A)
+# Override for oxbrowser: link in libbearssl.a (BearSSL — TLS 1.2
+# client). Replaces libtlse.a (whose ClientHello was rejected by all
+# major modern servers in our testing). Otherwise identical to the
+# generic ELF pattern above.
+$(BUILD)/elfs/gui/oxbrowser.elf: elfs/gui/oxbrowser.c elfs/libc.lds $(LIBC_A) $(LIBC_CRT0) $(BEARSSL_A)
 	mkdir -p "$(dir $@)"
 	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include -c $< -o $@.tmp.o
 	$(LD) $(USER_LDFLAGS) -T elfs/libc.lds \
-	    $(LIBC_CRT0) $@.tmp.o $(TLSE_A) $(LIBC_A) -o $@
+	    $(LIBC_CRT0) $@.tmp.o $(BEARSSL_A) $(LIBC_A) -o $@
 	rm $@.tmp.o
 
 # --------------------------------------------------------------------------
@@ -894,7 +991,7 @@ $(CRTN_O): lib/sysroot/crtn.S
 # directory so the resulting symbol is _binary_<basename>_elf_start,
 # stripping the elfs/<category>/ prefix.
 $(BUILD)/elfs/%.elf.o: $(BUILD)/elfs/%.elf
-	cd $(dir $<) && objcopy \
+	cd $(dir $<) && $(OBJCOPY) \
 	    -B i386:x86-64 \
 	    -I binary \
 	    -O elf64-x86-64 \
@@ -903,3 +1000,38 @@ $(BUILD)/elfs/%.elf.o: $(BUILD)/elfs/%.elf
 
 clean:
 	rm -rf $(BUILD) $(SD_IMG)
+
+# Fetch a permissively-licensed TTF font (DejaVu Sans, Bitstream Vera
+# license — free for any use). After running this once, sd.img will
+# include the font and oxsrv switches to proportional anti-aliased
+# chrome text. Drop other .ttf files in res/fonts/ to ship them too.
+DEJAVU_VERSION ?= 2.37
+DEJAVU_URL     ?= https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_$(subst .,_,$(DEJAVU_VERSION))/dejavu-fonts-ttf-$(DEJAVU_VERSION).tar.bz2
+.PHONY: fetch-fonts
+fetch-fonts:
+	@mkdir -p res/fonts
+	@if [ -f res/fonts/default.ttf ]; then \
+	    echo "fetch-fonts: res/fonts/default.ttf already exists — skipping"; \
+	    exit 0; \
+	fi
+	@command -v curl >/dev/null 2>&1 || { echo "error: curl required"; exit 1; }
+	@echo "  FETCH   DejaVu Sans $(DEJAVU_VERSION)"
+	@tmp=$$(mktemp -d); cd $$tmp && \
+	    curl -fsSL -o dejavu.tar.bz2 "$(DEJAVU_URL)" && \
+	    tar xjf dejavu.tar.bz2 && \
+	    find . -name 'DejaVuSans.ttf' -exec cp {} "$$OLDPWD/res/fonts/default.ttf" \; && \
+	    rm -rf $$tmp
+	@if [ -f res/fonts/default.ttf ]; then \
+	    echo "  OK      res/fonts/default.ttf ($$(wc -c < res/fonts/default.ttf) bytes)"; \
+	    echo "          run 'make' to refresh sd.img with the font"; \
+	else \
+	    echo "error: download failed"; exit 1; \
+	fi
+
+# Fetch 24x24 color app icons from the Yaru theme (Ubuntu/GPL-3) and
+# transcode them to raw RGBA byte streams for runtime loading. Look
+# at tools/fetch_icons.sh to see / extend the per-icon mapping.
+# Re-run with FETCH_ICON_ARGS=-f to overwrite cached .rgba files.
+.PHONY: fetch-icons
+fetch-icons:
+	@tools/fetch_icons.sh $(FETCH_ICON_ARGS)

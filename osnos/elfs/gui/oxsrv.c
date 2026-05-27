@@ -45,15 +45,23 @@ extern char **environ;
 #define MAX_WINS        16
 #define MAX_WIN_W       1024
 #define MAX_WIN_H       768
-#define TITLEBAR_H      22         /* Adwaita-style headerbar */
+#define TITLEBAR_H      22         /* yellow tab height (BeOS-style) */
+#define DESKBAR_H       32         /* top-right status strip, fits 24px icons */
+#define DESKBAR_W       360
+#define BEOS_TAB_PAD_X   8
+#define BEOS_BTN_SIZE   12
+#define BEOS_BTN_GAP     4
+#define BEOS_BTN_PAD     5         /* padding inside tab on right */
+#define RESIZE_HANDLE   12
+#define BEOS_BODY_BORDER 1
 #define BORDER_W        0          /* no visible border; shadow does the work */
 #define CORNER_RADIUS   8
 #define SHADOW_DEPTH    5
 #define SHADOW_OFFSET   3          /* downward bias (light source from top) */
 #define CLOSE_BTN_SIZE  14
 #define CLOSE_BTN_PAD   ((TITLEBAR_H - CLOSE_BTN_SIZE) / 2)
-#define MENU_ITEM_H     26
-#define MENU_W          200
+#define MENU_ITEM_H     28
+#define MENU_W          220
 #define CURSOR_W        12
 #define CURSOR_H        17
 #define WALLPAPER_PATH_LEN 96
@@ -107,6 +115,16 @@ static int      g_pending_move_slot = -1;
 static int      g_mods = 0;
 static int      g_alt_down = 0;       /* tracked separately for Alt+F4 etc */
 
+/* Window display state. WIN_NORMAL = visible at (x,y,w,h). WIN_MIN =
+ * hidden from compositor, shown only as Deskbar tile. WIN_ZOOM =
+ * temporary "fake maximize" (Fase A: 2x scaled blit into bigger
+ * screen rect, buffer unchanged). Saved bounds let us restore. */
+typedef enum {
+    WIN_NORMAL = 0,
+    WIN_MIN    = 1,
+    WIN_ZOOM   = 2,
+} win_state_t;
+
 typedef struct {
     int          used;
     int          id;
@@ -121,6 +139,13 @@ typedef struct {
     int          dragging;
     int          drag_off_x, drag_off_y;
     int          should_close;
+    win_state_t  state;
+    int          x_saved, y_saved, w_saved, h_saved;  /* WIN_NORMAL bounds */
+    /* When dragging the bottom-right resize handle, this records
+     * the original click offset so we can compute new w/h from cur. */
+    int          resizing;
+    int          resize_anchor_x, resize_anchor_y;
+    int          resize_start_w,  resize_start_h;
 } ox_window_t;
 
 static ox_window_t g_wins[MAX_WINS];
@@ -198,19 +223,21 @@ typedef struct {
     const char *label;
     const char *path;        /* NULL for separators / actions */
     int         action;      /* 0=spawn path, 1=reboot, 2=quit */
+    const char *icon;        /* ox_icon_get key (NULL → no icon) */
 } menu_item_t;
 
 static const menu_item_t g_menu[] = {
-    { "Files",       "/bin/oxfiles",     0 },
-    { "Notepad",     "/bin/oxnotepad",   0 },
-    { "Browser",     "/bin/oxbrowser",   0 },
-    { "SQLite",      "/bin/oxsqliteview", 0 },
-    { "Calculator",  "/bin/oxcalc",      0 },
-    { "Terminal",    "/bin/oxterm",      0 },
-    { "Processes",   "/bin/oxtop",       0 },
-    { "Settings",    "/bin/oxsettings",  0 },
-    { "Exit Ox",     0,                  2 },
-    { "Reboot",      0,                  1 },
+    { "Files",       "/bin/oxfiles",     0, "files"    },
+    { "Notepad",     "/bin/oxnotepad",   0, "notepad"  },
+    { "HexEdit",     "/bin/oxhexedit",   0, "hex"      },
+    { "Browser",     "/bin/oxbrowser",   0, "browser"  },
+    { "SQLite",      "/bin/oxsqliteview",0, "sqlite"   },
+    { "Calculator",  "/bin/oxcalc",      0, "calc"     },
+    { "Terminal",    "/bin/oxterm",      0, "term"     },
+    { "Processes",   "/bin/oxtop",       0, "top"      },
+    { "Settings",    "/bin/oxsettings",  0, "settings" },
+    { "Exit Ox",     0,                  2, "info"     },
+    { "Reboot",      0,                  1, "info"     },
 };
 
 /* Set when "Exit Ox" is chosen — main loop breaks on next iteration. */
@@ -223,13 +250,11 @@ static char g_clipboard[1024];
 static int  g_clip_len = 0;
 #define MENU_N (sizeof(g_menu)/sizeof(g_menu[0]))
 
-/* Mark only the menu's bounding box as dirty. Every menu interaction
- * (open / close / hover / item-pick) touches at most this rect, so a
- * dirty-rect composite suffices — no full-screen repaint needed.
- * Sin esto, cada hover sobre un item del menu = 4 MB memcpy + 4 MB blit. */
+/* Mark the menu's bounding box dirty. Haiku-style menu is a flat
+ * rect with a hard 1px outline — no shadow, so no padding needed. */
 static void mark_menu_dirty(void) {
-    int mh = (int)MENU_N * MENU_ITEM_H + 8;
-    mark_dirty(g_menu_x, g_menu_y, MENU_W, mh);
+    int mh = (int)MENU_N * MENU_ITEM_H + 6;
+    mark_dirty(g_menu_x - 1, g_menu_y - 1, MENU_W + 2, mh + 2);
 }
 
 /* Adwaita dark palette (GNOME 40+). */
@@ -240,14 +265,41 @@ static void mark_menu_dirty(void) {
 #define COL_TITLE_FG    OX_RGB(255,255,255)
 #define COL_TITLE_DIM   OX_RGB(154,153,150)   /* #9a9996 unfocused */
 #define COL_BG          OX_RGB(220,220,220)   /* legacy */
-#define COL_MENU_BG     OX_RGB( 36, 36, 36)   /* same as body */
-#define COL_MENU_FG     OX_RGB(238,238,236)
-#define COL_MENU_FG_HI  OX_RGB(255,255,255)
-#define COL_MENU_HI     OX_RGB( 53,132,228)   /* #3584e4 Adwaita blue */
-#define COL_MENU_SEP    OX_RGB( 56, 56, 56)
+/* Haiku menu palette — light cream bg, hard 1px black border, no
+ * shadow, no rounded corners, soft blue selection. Matches the
+ * BeOS R5 / Haiku BMenu look exactly. */
+#define COL_MENU_BG     OX_RGB(232, 232, 232)  /* Haiku BMenu cream/grey */
+#define COL_MENU_BORDER OX_RGB(  0,   0,   0)  /* hard black 1px outline */
+#define COL_MENU_FG     OX_RGB( 16,  16,  16)  /* near-black ink */
+#define COL_MENU_FG_HI  OX_RGB(255, 255, 255)  /* white on selection */
+#define COL_MENU_HI     OX_RGB(102, 152, 203)  /* Haiku blue selection */
+#define COL_MENU_SEP    OX_RGB(180, 180, 180)  /* light grey separator */
+#define COL_MENU_SHADE  OX_RGB(160, 160, 160)  /* darker grey under-edge */
 #define COL_CLOSE_BG    OX_RGB( 60, 60, 60)   /* subtle gray pill */
 #define COL_CLOSE_BG_F  OX_RGB(192, 28, 40)   /* #c01c28 red on hover */
 #define COL_CLOSE_FG    OX_RGB(255,255,255)
+
+/* BeOS R5 classic palette — yellow tab titlebars. We're transitioning
+ * the WM chrome (titlebar + window border + Deskbar) to this retro
+ * look. App body colors stay each-app's choice. */
+#define COL_BEOS_TAB_BG       OX_RGB(252, 224, 109)
+#define COL_BEOS_TAB_INA      OX_RGB(216, 216, 184)
+#define COL_BEOS_TAB_BORDER   OX_RGB(  0,   0,   0)
+#define COL_BEOS_TAB_FG       OX_RGB(  0,   0,   0)
+#define COL_BEOS_TAB_FG_INA   OX_RGB( 96,  96,  96)
+#define COL_BEOS_BTN_BG       OX_RGB(252, 224, 109)
+#define COL_BEOS_BTN_BG_HOT   OX_RGB(255, 240, 160)
+#define COL_BEOS_BTN_DOT      OX_RGB(  0,   0,   0)
+#define COL_BEOS_BORDER       OX_RGB(168, 168, 168)
+#define COL_BEOS_RESIZE_FG    OX_RGB(120, 120, 120)
+#define COL_BEOS_DESKBAR_BG   OX_RGB( 51,  51,  51)
+#define COL_BEOS_DESKBAR_BORDER OX_RGB( 30,  30,  30)
+#define COL_BEOS_DESKBAR_FG   OX_RGB(255, 255, 255)
+#define COL_BEOS_DESKBAR_TILE OX_RGB(110, 110, 110)
+#define COL_BEOS_DESKBAR_TILE_HOT OX_RGB(150, 150, 150)
+#define COL_BEOS_DESKBAR_TILE_MIN OX_RGB( 75,  75,  75)
+#define COL_BEOS_DESKBAR_TILE_FOCUS OX_RGB( 53, 132, 228)
+#define COL_BEOS_HOT          OX_RGB(255, 255, 255)
 
 /* ---------------- Utility drawing into BGRA buffer --------------- */
 
@@ -265,30 +317,13 @@ static void buf_fill_rect(uint32_t *buf, int buf_w, int buf_h,
     }
 }
 
-static void buf_draw_glyph(uint32_t *buf, int buf_w, int buf_h,
-                            int x, int y, int c, uint32_t color) {
-    const uint8_t *g = ox_font_glyph(c);
-    for (int row = 0; row < 8; row++) {
-        for (int col = 0; col < 8; col++) {
-            if (g[row] & (1 << (7 - col))) {
-                int px = x + col, py = y + row;
-                if (px < 0 || py < 0 || px >= buf_w || py >= buf_h) continue;
-                buf[(size_t)py * buf_w + px] = color;
-            }
-        }
-    }
-}
-
 static void buf_draw_text(uint32_t *buf, int buf_w, int buf_h,
                            int x, int y, const char *s, uint32_t color) {
-    if (!s) return;
-    int cx = x;
-    while (*s) {
-        if (*s == '\n') { y += 10; cx = x; s++; continue; }
-        buf_draw_glyph(buf, buf_w, buf_h, cx, y, (unsigned char)*s, color);
-        cx += 8;
-        s++;
-    }
+    /* Routes through ox_text_draw so that when a TTF is loaded at
+     * boot we automatically pick up proportional anti-aliased
+     * glyphs. With no TTF, ox_text_draw falls back to the same 8x8
+     * bitmap path we used to do here directly. */
+    ox_text_draw(buf, buf_w, buf_h, x, y, s, color);
 }
 
 /* Blit a sub-rect from `src` into `dst` (both BGRA full-screen buffers).
@@ -349,7 +384,9 @@ static void buf_blend_rect(uint32_t *buf, int bw, int bh,
 
 /* Filled rounded rectangle — corner pixels outside the inscribed
  * circles are skipped (left as wallpaper). r=0 falls through to a
- * plain rect. */
+ * plain rect. Currently unused after BeOS-style chrome rewrite
+ * (square corners everywhere), kept for future "Adwaita classic" toggle. */
+__attribute__((unused))
 static void buf_fill_rounded(uint32_t *buf, int bw, int bh,
                               int x, int y, int w, int h, int r,
                               uint32_t color) {
@@ -374,7 +411,10 @@ static void buf_fill_rounded(uint32_t *buf, int bw, int bh,
 /* buf_blit variant that masks the bottom-N rows by an inscribed circle
  * radius r — so the bottom corners stay un-touched (preserving the
  * rounded background they're sitting on). Used for the body blit so
- * client rectangular content doesn't square off the rounded window. */
+ * client rectangular content doesn't square off the rounded window.
+ * Currently unused after BeOS-style chrome rewrite (square bodies),
+ * kept for reference / future "Adwaita classic" toggle. */
+__attribute__((unused))
 static void buf_blit_rounded_bot(uint32_t *dst, int dw, int dh,
                                   int dx, int dy,
                                   const uint32_t *src, int sw, int sh,
@@ -429,7 +469,9 @@ static void buf_blit_rounded_bot(uint32_t *dst, int dw, int dh,
  * for pixels closer to the frame; each overlap stacks alpha-over,
  * giving correct gradient falloff identical to the old solid-nested-
  * rect approach but at ~25x less work (skips the interior that the
- * frame would overwrite anyway). */
+ * frame would overwrite anyway). Unused after BeOS rewrite — kept for
+ * a possible future Adwaita-style toggle. */
+__attribute__((unused))
 static void buf_draw_shadow(uint32_t *buf, int bw, int bh,
                              int x, int y, int w, int h) {
     /* Raw per-layer alphas (outer → inner). Painted outer-first so
@@ -638,11 +680,19 @@ static int alloc_window(uint64_t owner_pid, int w, int h, const char *title) {
             g_wins[i].used = 1;
             g_wins[i].id = g_next_id++;
             g_wins[i].owner_pid = owner_pid;
-            /* Cascade placement: 30+id*24 from top-left. */
+            /* Cascade placement: start below Deskbar + titlebar to
+             * avoid drawing over the strip. */
             g_wins[i].x = 40 + ((g_wins[i].id - 1) % 8) * 30;
-            g_wins[i].y = 40 + ((g_wins[i].id - 1) % 8) * 30;
+            g_wins[i].y = DESKBAR_H + TITLEBAR_H + 16 +
+                          ((g_wins[i].id - 1) % 8) * 30;
             g_wins[i].w = w;
             g_wins[i].h = h;
+            g_wins[i].state = WIN_NORMAL;
+            g_wins[i].x_saved = g_wins[i].x;
+            g_wins[i].y_saved = g_wins[i].y;
+            g_wins[i].w_saved = w;
+            g_wins[i].h_saved = h;
+            g_wins[i].resizing = 0;
             if (title) {
                 size_t L = strlen(title);
                 if (L >= sizeof(g_wins[i].title)) L = sizeof(g_wins[i].title) - 1;
@@ -764,103 +814,378 @@ static void raise_slot(int slot) {
     mark_dirty_full_reason("raise");
 }
 
+/* ---------------- Window state operations ------------------------ */
+
+static void mark_dirty_full_reason(const char *r);
+static void mark_dirty(int x, int y, int w, int h);
+
+/* Mark the screen rect occupied by this slot (incl. shadow) dirty so
+ * the compositor knows to refresh that area. */
+static void mark_slot_dirty(int slot) {
+    ox_window_t *w = &g_wins[slot];
+    if (w->state == WIN_MIN) return;
+    int fx = w->x - SHADOW_DEPTH;
+    int fy = w->y - TITLEBAR_H - SHADOW_DEPTH;
+    int fw = w->w + 2 * SHADOW_DEPTH;
+    int fh = TITLEBAR_H + w->h + 2 * SHADOW_DEPTH + SHADOW_OFFSET;
+    mark_dirty(fx, fy, fw, fh);
+}
+
+/* Hide a window (state→WIN_MIN). Compositor skips it; Deskbar shows
+ * the tile. Click-on-tile or Alt+Tab restores it. */
+static void minimize_slot(int slot) {
+    ox_window_t *w = &g_wins[slot];
+    if (w->state == WIN_MIN) return;
+    /* If currently zoomed, we'll restore to saved bounds on un-min. */
+    mark_slot_dirty(slot);   /* wallpaper now visible where it was */
+    w->state = WIN_MIN;
+    g_dirty = 1;
+    /* Drop focus if we minimized the focused window. */
+    if (g_focus_slot == slot) {
+        g_focus_slot = -1;
+        /* Pick next visible slot from top of stack. */
+        for (int i = g_stack_n - 1; i >= 0; i--) {
+            int s = g_stack[i];
+            if (g_wins[s].used && g_wins[s].state != WIN_MIN) {
+                g_focus_slot = s;
+                break;
+            }
+        }
+    }
+}
+
+/* Toggle WIN_NORMAL ↔ WIN_ZOOM. Fase A semantics: zoom = "grow visual
+ * footprint by 2x via scaled blit", buffer stays the same size. Fase
+ * B will replace with real CONFIGURE protocol. */
+static void zoom_slot(int slot) {
+    ox_window_t *w = &g_wins[slot];
+    mark_slot_dirty(slot);
+    if (w->state == WIN_ZOOM) {
+        /* Restore. */
+        w->x = w->x_saved;
+        w->y = w->y_saved;
+        w->w = w->w_saved;
+        w->h = w->h_saved;
+        w->state = WIN_NORMAL;
+    } else {
+        /* Save current bounds. */
+        w->x_saved = w->x;
+        w->y_saved = w->y;
+        w->w_saved = w->w;
+        w->h_saved = w->h;
+        w->state = WIN_ZOOM;
+        /* Compute new bounds: 2x but clamped to screen minus deskbar. */
+        int nw = w->w * 2;
+        int nh = w->h * 2;
+        int avail_w = (int)g_scr_w - 8;
+        int avail_h = (int)g_scr_h - DESKBAR_H - TITLEBAR_H - 8;
+        if (nw > avail_w) nw = avail_w;
+        if (nh > avail_h) nh = avail_h;
+        w->x = 4;
+        w->y = DESKBAR_H + TITLEBAR_H + 4;
+        w->w = nw;
+        w->h = nh;
+    }
+    mark_slot_dirty(slot);
+    g_dirty = 1;
+}
+
+/* Bring a minimized window back to its previous visible state. */
+static void restore_slot(int slot) {
+    ox_window_t *w = &g_wins[slot];
+    if (w->state != WIN_MIN) return;
+    /* Restore to whatever it was before — assume WIN_NORMAL. We do not
+     * track the pre-minimize state precisely; minimize from ZOOM also
+     * lands in NORMAL on restore. */
+    w->state = WIN_NORMAL;
+    g_focus_slot = slot;
+    /* Move to top of stack. */
+    int j = 0;
+    for (int i = 0; i < g_stack_n; i++)
+        if (g_stack[i] != slot) g_stack[j++] = g_stack[i];
+    g_stack[j++] = slot;
+    g_stack_n = j;
+    g_dirty = 1;
+    mark_dirty_full_reason("raise");   /* big change — easier than per-rect */
+}
+
 /* ---------------- Compositor ------------------------------------ */
+
+/* Compute the BeOS-style yellow tab geometry for a window. The tab
+ * doesn't span the whole width — it's a fixed-ish chunk on the left
+ * sized to the title text plus button area. We snap to a minimum so
+ * even a no-title window has space for buttons. */
+static void beos_tab_geom(int slot, int *out_x, int *out_y,
+                           int *out_w, int *out_h) {
+    ox_window_t *w = &g_wins[slot];
+    int title_w = 0;
+    for (const char *p = w->title; *p; p++) title_w += 8;
+    /* Tab content: 8px pad | title | 8px pad | 3*(btn+gap) | 5px pad. */
+    int btn_block_w = 3 * BEOS_BTN_SIZE + 2 * BEOS_BTN_GAP + BEOS_BTN_PAD;
+    int tab_w = BEOS_TAB_PAD_X + title_w + 8 + btn_block_w;
+    int min_w = btn_block_w + 24;
+    if (tab_w < min_w) tab_w = min_w;
+    int cap = w->w * 3 / 4;
+    if (cap < min_w + 8) cap = w->w;     /* tiny window → tab can span */
+    if (tab_w > cap) tab_w = cap;
+    *out_x = w->x;
+    *out_y = w->y - TITLEBAR_H;
+    *out_w = tab_w;
+    *out_h = TITLEBAR_H;
+}
+
+/* Compute the bbox of one of the three tab buttons. idx: 0=zoom, 1=min,
+ * 2=close. Buttons are right-aligned inside the tab. */
+static void beos_btn_geom(int slot, int idx,
+                           int *out_x, int *out_y,
+                           int *out_w, int *out_h) {
+    int tx, ty, tw, th;
+    beos_tab_geom(slot, &tx, &ty, &tw, &th);
+    int right = tx + tw - BEOS_BTN_PAD;
+    /* Order right-to-left in pixels: close (idx=2) is rightmost. */
+    int from_right = (2 - idx);
+    int x = right - (from_right + 1) * BEOS_BTN_SIZE
+                  - from_right * BEOS_BTN_GAP;
+    int y = ty + (th - BEOS_BTN_SIZE) / 2;
+    *out_x = x; *out_y = y;
+    *out_w = BEOS_BTN_SIZE; *out_h = BEOS_BTN_SIZE;
+}
+
+static int point_in(int px, int py, int rx, int ry, int rw, int rh) {
+    return px >= rx && px < rx + rw && py >= ry && py < ry + rh;
+}
+
+/* Bottom-right resize handle bbox (lives inside the body, overlapping
+ * the bottom-right corner). */
+static void beos_resize_handle_geom(int slot,
+                                     int *out_x, int *out_y,
+                                     int *out_w, int *out_h) {
+    ox_window_t *w = &g_wins[slot];
+    *out_w = RESIZE_HANDLE;
+    *out_h = RESIZE_HANDLE;
+    *out_x = w->x + w->w - RESIZE_HANDLE;
+    *out_y = w->y + w->h - RESIZE_HANDLE;
+}
+
+/* Set a single pixel safely. */
+static inline void beos_set_px(int x, int y, uint32_t color) {
+    if (x < 0 || y < 0 || x >= (int)g_scr_w || y >= (int)g_scr_h) return;
+    g_back[(size_t)y * g_scr_w + x] = color;
+}
+
+/* Zoom button: small "expand" icon — inner square in upper-left
+ * suggesting "grow". 12×12 button, icon at center 8×8. */
+static void beos_draw_zoom_icon(int bx, int by) {
+    /* Inner rectangle outline (5×5) at top-left of the 8x8 area. */
+    int x0 = bx + 2, y0 = by + 2;
+    int x1 = bx + 6, y1 = by + 6;
+    for (int x = x0; x <= x1; x++) {
+        beos_set_px(x, y0, COL_BEOS_BTN_DOT);
+        beos_set_px(x, y1, COL_BEOS_BTN_DOT);
+    }
+    for (int y = y0; y <= y1; y++) {
+        beos_set_px(x0, y, COL_BEOS_BTN_DOT);
+        beos_set_px(x1, y, COL_BEOS_BTN_DOT);
+    }
+    /* Outer rectangle outline (offset bottom-right) suggesting zoom. */
+    int X0 = bx + 4, Y0 = by + 4;
+    int X1 = bx + 9, Y1 = by + 9;
+    for (int x = X0; x <= X1; x++) {
+        beos_set_px(x, Y0, COL_BEOS_BTN_DOT);
+        beos_set_px(x, Y1, COL_BEOS_BTN_DOT);
+    }
+    for (int y = Y0; y <= Y1; y++) {
+        beos_set_px(X0, y, COL_BEOS_BTN_DOT);
+        beos_set_px(X1, y, COL_BEOS_BTN_DOT);
+    }
+}
+
+/* Minimize button: thick horizontal bar near the bottom. */
+static void beos_draw_min_icon(int bx, int by) {
+    for (int y = by + 8; y <= by + 9; y++)
+        for (int x = bx + 2; x <= bx + 9; x++)
+            beos_set_px(x, y, COL_BEOS_BTN_DOT);
+}
+
+/* Close button: clear bold X. */
+static void beos_draw_close_icon(int bx, int by) {
+    /* Diagonal 1: top-left to bottom-right, 2px wide. */
+    for (int i = 0; i <= 7; i++) {
+        int x = bx + 2 + i, y = by + 2 + i;
+        beos_set_px(x,     y, COL_BEOS_BTN_DOT);
+        beos_set_px(x + 1, y, COL_BEOS_BTN_DOT);
+    }
+    /* Diagonal 2: top-right to bottom-left, 2px wide. */
+    for (int i = 0; i <= 7; i++) {
+        int x = bx + 9 - i, y = by + 2 + i;
+        beos_set_px(x,     y, COL_BEOS_BTN_DOT);
+        beos_set_px(x - 1, y, COL_BEOS_BTN_DOT);
+    }
+}
+
+/* Resize handle icon — 3 diagonal lines in the corner. */
+static void beos_draw_resize_handle(int hx, int hy) {
+    for (int d = 0; d < 3; d++) {
+        int off = d * 4 + 2;
+        for (int i = 0; i <= 8 - d * 4; i++) {
+            int px = hx + off + i;
+            int py = hy + RESIZE_HANDLE - 2 - i;
+            if (px >= 0 && py >= 0 &&
+                px < (int)g_scr_w && py < (int)g_scr_h)
+                g_back[(size_t)py * g_scr_w + px] = COL_BEOS_RESIZE_FG;
+        }
+    }
+}
 
 static void draw_window_frame(int slot) {
     ox_window_t *w = &g_wins[slot];
+    if (w->state == WIN_MIN) return;  /* invisible while minimized */
     int wx = w->x, wy = w->y, ww = w->w, wh = w->h;
     int focused = (slot == g_focus_slot);
 
-    /* Frame bounds = headerbar + body (no extra border — shadow alone
-     * separates the window from the wallpaper). */
-    int fx = wx;
-    int fy = wy - TITLEBAR_H;
-    int fw = ww;
-    int fh = TITLEBAR_H + wh;
+    /* BeOS R5 classic: NO drop shadow. The yellow tab is short
+     * (typical BeOS), so a full-width shadow would render a strip
+     * above the body to the right of the tab. Just paint a 1px
+     * black outline below the body for visual separation. */
 
-    /* 1. Soft drop shadow. */
-    buf_draw_shadow(g_back, g_scr_w, g_scr_h, fx, fy, fw, fh);
-
-    /* 2. Rounded outer shape — unified body color first. The headerbar
-     * overpaints the top region; bottom corners stay body-colored. */
-    buf_fill_rounded(g_back, g_scr_w, g_scr_h,
-                     fx, fy, fw, fh, CORNER_RADIUS, COL_BODY_BG);
-
-    /* 3. Headerbar — flat color, only top corners rounded. We paint the
-     * full-width rect over the rounded body's top region. To preserve
-     * the top rounded corners we use buf_fill_rounded with the same
-     * radius and full headerbar height (the corner clipping clips the
-     * top corners; the bottom row is just one flat line — accepted
-     * since the divider below covers any seam). */
-    uint32_t hdr = focused ? COL_HDR_BG : COL_HDR_INA;
-    buf_fill_rounded(g_back, g_scr_w, g_scr_h,
-                     fx, fy, fw, TITLEBAR_H, CORNER_RADIUS, hdr);
-
-    /* 4. 1-px subtle divider between headerbar and body. */
+    /* 1px BeOS-style grey border around the body. */
     buf_fill_rect(g_back, g_scr_w, g_scr_h,
-                  fx + CORNER_RADIUS, fy + TITLEBAR_H - 1,
-                  fw - 2 * CORNER_RADIUS, 1, COL_DIVIDER);
+                  wx - BEOS_BODY_BORDER, wy - 1,
+                  ww + 2 * BEOS_BODY_BORDER, BEOS_BODY_BORDER,
+                  COL_BEOS_BORDER);
+    buf_fill_rect(g_back, g_scr_w, g_scr_h,
+                  wx - BEOS_BODY_BORDER, wy + wh,
+                  ww + 2 * BEOS_BODY_BORDER, BEOS_BODY_BORDER,
+                  COL_BEOS_BORDER);
+    buf_fill_rect(g_back, g_scr_w, g_scr_h,
+                  wx - BEOS_BODY_BORDER, wy,
+                  BEOS_BODY_BORDER, wh, COL_BEOS_BORDER);
+    buf_fill_rect(g_back, g_scr_w, g_scr_h,
+                  wx + ww, wy,
+                  BEOS_BODY_BORDER, wh, COL_BEOS_BORDER);
 
-    /* 5. Title text — centered horizontally in the headerbar. */
-    int title_w = 0;
-    for (const char *p = w->title; *p; p++) title_w += 8;
-    int text_x = fx + (fw - title_w) / 2;
-    int text_y = fy + (TITLEBAR_H - 8) / 2;
+    /* Yellow tab (BeOS R5 classic). */
+    int tx, ty, tw, th;
+    beos_tab_geom(slot, &tx, &ty, &tw, &th);
+    uint32_t tab_bg = focused ? COL_BEOS_TAB_BG : COL_BEOS_TAB_INA;
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, tx, ty, tw, th, tab_bg);
+    /* 1px black outline. */
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, tx, ty, tw, 1, COL_BEOS_TAB_BORDER);
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, tx, ty + th - 1, tw, 1, COL_BEOS_TAB_BORDER);
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, tx, ty, 1, th, COL_BEOS_TAB_BORDER);
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, tx + tw - 1, ty, 1, th, COL_BEOS_TAB_BORDER);
+
+    /* Title text — left-aligned, vertical-centered. */
+    int text_x = tx + BEOS_TAB_PAD_X;
+    int text_y = ty + (th - 8) / 2;
     buf_draw_text(g_back, g_scr_w, g_scr_h,
                   text_x, text_y, w->title,
-                  focused ? COL_TITLE_FG : COL_TITLE_DIM);
+                  focused ? COL_BEOS_TAB_FG : COL_BEOS_TAB_FG_INA);
 
-    /* 6. Close button — circular pill on the right. Subtle gray by
-     * default, red on hover (Adwaita pattern). */
-    int cb_x = fx + fw - CLOSE_BTN_SIZE - CLOSE_BTN_PAD - 2;
-    int cb_y = fy + CLOSE_BTN_PAD;
-    int cb_hover = (g_cx >= cb_x && g_cx < cb_x + CLOSE_BTN_SIZE &&
-                    g_cy >= cb_y && g_cy < cb_y + CLOSE_BTN_SIZE);
-    buf_fill_rounded(g_back, g_scr_w, g_scr_h,
-                     cb_x, cb_y, CLOSE_BTN_SIZE, CLOSE_BTN_SIZE,
-                     CLOSE_BTN_SIZE / 2,
-                     cb_hover ? COL_CLOSE_BG_F : COL_CLOSE_BG);
-    buf_draw_glyph(g_back, g_scr_w, g_scr_h,
-                   cb_x + (CLOSE_BTN_SIZE - 8) / 2,
-                   cb_y + (CLOSE_BTN_SIZE - 8) / 2,
-                   'x', COL_CLOSE_FG);
+    /* Three buttons — zoom (0), min (1), close (2). */
+    for (int idx = 0; idx < 3; idx++) {
+        int bx, by, bw, bh;
+        beos_btn_geom(slot, idx, &bx, &by, &bw, &bh);
+        int hover = point_in(g_cx, g_cy, bx, by, bw, bh);
+        uint32_t fill = hover ? COL_BEOS_BTN_BG_HOT : COL_BEOS_BTN_BG;
+        buf_fill_rect(g_back, g_scr_w, g_scr_h, bx, by, bw, bh, fill);
+        /* 1px border around the button. */
+        buf_fill_rect(g_back, g_scr_w, g_scr_h, bx, by, bw, 1, COL_BEOS_BTN_DOT);
+        buf_fill_rect(g_back, g_scr_w, g_scr_h, bx, by + bh - 1, bw, 1, COL_BEOS_BTN_DOT);
+        buf_fill_rect(g_back, g_scr_w, g_scr_h, bx, by, 1, bh, COL_BEOS_BTN_DOT);
+        buf_fill_rect(g_back, g_scr_w, g_scr_h, bx + bw - 1, by, 1, bh, COL_BEOS_BTN_DOT);
+        if      (idx == 0) beos_draw_zoom_icon(bx, by);
+        else if (idx == 1) beos_draw_min_icon (bx, by);
+        else               beos_draw_close_icon(bx, by);
+    }
 
-    /* 7. Body — blit client content with rounded-bottom mask so the
-     * window's bottom corners stay rounded (Adwaita style). */
-    buf_blit_rounded_bot(g_back, g_scr_w, g_scr_h, wx, wy,
-                         w->back, ww, wh, CORNER_RADIUS);
+    /* Body blit. In WIN_NORMAL state the buffer is ww×wh (1:1). In
+     * WIN_ZOOM the buffer is the SAVED original dims (w_saved × h_saved)
+     * and we nearest-neighbor scale into ww×wh on screen. */
+    if (w->back) {
+        int src_w = (w->state == WIN_ZOOM) ? w->w_saved : ww;
+        int src_h = (w->state == WIN_ZOOM) ? w->h_saved : wh;
+        if (src_w <= 0) src_w = 1;
+        if (src_h <= 0) src_h = 1;
+        for (int row = 0; row < wh; row++) {
+            int dy = wy + row;
+            if (dy < 0 || dy >= (int)g_scr_h) continue;
+            int sy = (int)((long)row * src_h / wh);
+            if (sy >= src_h) sy = src_h - 1;
+            int xs = wx, xe = wx + ww;
+            if (xs < 0) xs = 0;
+            if (xe > (int)g_scr_w) xe = g_scr_w;
+            int run = xe - xs;
+            if (run <= 0) continue;
+            uint32_t *src_row = w->back + (size_t)sy * src_w;
+            uint32_t *dst = g_back + (size_t)dy * g_scr_w + xs;
+            for (int i = 0; i < run; i++) {
+                int col_on_screen = xs - wx + i;
+                int sx = (int)((long)col_on_screen * src_w / ww);
+                if (sx >= src_w) sx = src_w - 1;
+                dst[i] = src_row[sx];
+            }
+        }
+    }
+
+    /* Bottom-right resize handle (visual cue). */
+    {
+        int hx, hy, hw, hh;
+        beos_resize_handle_geom(slot, &hx, &hy, &hw, &hh);
+        beos_draw_resize_handle(hx, hy);
+    }
 }
 
 static void draw_menu(void) {
     if (!g_menu_visible) return;
-    int mh = (int)MENU_N * MENU_ITEM_H + 8;
+    int mh = (int)MENU_N * MENU_ITEM_H + 6;
     int mx = g_menu_x, my = g_menu_y;
 
-    /* Shadow under the menu (same primitive as windows). */
-    buf_draw_shadow(g_back, g_scr_w, g_scr_h, mx, my, MENU_W, mh);
+    /* Haiku BMenu look: flat light cream rect, square corners, NO
+     * drop shadow, hard 1px black outline. */
+    buf_fill_rect(g_back, g_scr_w, g_scr_h,
+                  mx, my, MENU_W, mh, COL_MENU_BG);
 
-    /* Rounded dark background. */
-    buf_fill_rounded(g_back, g_scr_w, g_scr_h,
-                     mx, my, MENU_W, mh, CORNER_RADIUS, COL_MENU_BG);
+    /* Hard 1px black outline. */
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, mx,             my,            MENU_W, 1, COL_MENU_BORDER);
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, mx,             my + mh - 1,   MENU_W, 1, COL_MENU_BORDER);
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, mx,             my,            1,      mh, COL_MENU_BORDER);
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, mx + MENU_W -1, my,            1,      mh, COL_MENU_BORDER);
 
-    /* Items. */
+    /* Subtle inner shading line at bottom-right (Haiku "bevel"). */
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, mx + 1, my + mh - 2, MENU_W - 2, 1, COL_MENU_SHADE);
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, mx + MENU_W - 2, my + 1, 1, mh - 2, COL_MENU_SHADE);
+
     for (size_t i = 0; i < MENU_N; i++) {
-        int iy = my + 4 + (int)i * MENU_ITEM_H;
-        int hovered = (g_cx >= mx && g_cx < mx + MENU_W &&
+        int iy = my + 3 + (int)i * MENU_ITEM_H;
+        int hovered = (g_cx >= mx + 1 && g_cx < mx + MENU_W - 1 &&
                        g_cy >= iy && g_cy < iy + MENU_ITEM_H);
         if (hovered) {
-            /* Adwaita accent blue, rounded pill inside the menu. */
-            buf_fill_rounded(g_back, g_scr_w, g_scr_h,
-                             mx + 6, iy, MENU_W - 12, MENU_ITEM_H,
-                             4, COL_MENU_HI);
-        } else if (i > 0) {
-            /* Subtle separator between non-hovered items. */
-            buf_blend_rect(g_back, g_scr_w, g_scr_h,
-                           mx + 14, iy, MENU_W - 28, 1,
-                           COL_MENU_SEP, 180);
+            /* Haiku blue selection — flat rectangle, no rounding,
+             * stops 1px short of the outline. */
+            buf_fill_rect(g_back, g_scr_w, g_scr_h,
+                          mx + 2, iy, MENU_W - 4, MENU_ITEM_H,
+                          COL_MENU_HI);
+        }
+        /* Color icon at the left of the item, falling back to mono
+         * if /home/.icons/<key>.rgba isn't staged on this disk. */
+        if (g_menu[i].icon) {
+            const uint8_t *rgba = ox_icon_get_rgba(g_menu[i].icon);
+            int icw = 24, ich = 24;
+            ox_icon_dims(&icw, &ich);
+            int ix = mx + 4;
+            int iyc = iy + (MENU_ITEM_H - ich) / 2;
+            if (rgba) {
+                ox_icon_draw_rgba(g_back, g_scr_w, g_scr_h, ix, iyc, rgba);
+            } else {
+                const uint16_t *ic = ox_icon_get(g_menu[i].icon);
+                ox_icon_draw(g_back, g_scr_w, g_scr_h, ix,
+                             iy + (MENU_ITEM_H - OX_ICON_H) / 2, ic,
+                             hovered ? COL_MENU_FG_HI : COL_MENU_FG);
+            }
         }
         buf_draw_text(g_back, g_scr_w, g_scr_h,
-                      mx + 16, iy + (MENU_ITEM_H - 8) / 2,
+                      mx + 34, iy + (MENU_ITEM_H - 8) / 2,
                       g_menu[i].label,
                       hovered ? COL_MENU_FG_HI : COL_MENU_FG);
     }
@@ -893,6 +1218,136 @@ static void restore_rect_from_clean(int dx0, int dy0, int dx1, int dy1) {
     }
 }
 
+/* Deskbar geometry — top-right strip, fixed dimensions. */
+#define DESKBAR_X       ((int)g_scr_w - DESKBAR_W)
+#define DESKBAR_Y       0
+
+/* Per-deskbar-element geometry: menu button → tile list → clock. */
+#define DESKBAR_MENU_BTN_W   28
+#define DESKBAR_CLOCK_W      72   /* fits "HH:MM:SS" 8 chars × 8 px */
+#define DESKBAR_TILE_W       28
+#define DESKBAR_TILE_GAP      2
+
+/* Where the tile area starts and ends inside the deskbar. */
+static int deskbar_tiles_x0(void) { return DESKBAR_X + DESKBAR_MENU_BTN_W + 4; }
+static int deskbar_tiles_x1(void) { return DESKBAR_X + DESKBAR_W - DESKBAR_CLOCK_W - 6; }
+
+/* Compute (x,y,w,h) of the i-th visible tile in the deskbar window
+ * list. Returns 0 if i would overflow available tile slots. */
+static int deskbar_tile_geom(int idx, int *out_x, int *out_y,
+                              int *out_w, int *out_h) {
+    int x0 = deskbar_tiles_x0();
+    int x1 = deskbar_tiles_x1();
+    int avail = x1 - x0;
+    int max_tiles = avail / (DESKBAR_TILE_W + DESKBAR_TILE_GAP);
+    if (idx >= max_tiles) return 0;
+    *out_x = x0 + idx * (DESKBAR_TILE_W + DESKBAR_TILE_GAP);
+    *out_y = DESKBAR_Y + 3;
+    *out_w = DESKBAR_TILE_W;
+    *out_h = DESKBAR_H - 6;
+    return 1;
+}
+
+/* Map a window title to a built-in icon name. The match is
+ * case-insensitive on the first word — "Notepad — file.txt" still
+ * picks up the notepad icon. Returns the lowercase first word in
+ * `out` (NUL-terminated, capped to `cap`). */
+static void icon_key_for_title(const char *title, char *out, int cap) {
+    if (!title || cap <= 0) { if (cap > 0) out[0] = 0; return; }
+    int n = 0;
+    while (title[n] && title[n] != ' ' && title[n] != '-' &&
+           title[n] != ':' && n < cap - 1) {
+        char c = title[n];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        out[n] = c;
+        n++;
+    }
+    out[n] = 0;
+}
+
+/* Format uptime as HH:MM:SS for the Deskbar. osnos's clock_gettime
+ * returns monotonic kernel uptime (no real RTC mapping yet) so we
+ * label it "up HH:MM" to be honest about what it is. SS is included
+ * so the user can see the clock actually ticking. */
+static void deskbar_format_clock(char *out, size_t cap) {
+    struct timespec ts; clock_gettime(0, &ts);
+    long total = (long)ts.tv_sec;
+    int h = (int)(total / 3600) % 24;
+    int m = (int)((total % 3600) / 60);
+    int s = (int)(total % 60);
+    snprintf(out, cap, "%02d:%02d:%02d", h, m, s);
+}
+
+static void draw_deskbar(void) {
+    /* Strip background. */
+    buf_fill_rect(g_back, g_scr_w, g_scr_h,
+                  DESKBAR_X, DESKBAR_Y, DESKBAR_W, DESKBAR_H,
+                  COL_BEOS_DESKBAR_BG);
+    /* 1px lower border (darker). */
+    buf_fill_rect(g_back, g_scr_w, g_scr_h,
+                  DESKBAR_X, DESKBAR_Y + DESKBAR_H - 1, DESKBAR_W, 1,
+                  COL_BEOS_DESKBAR_BORDER);
+
+    /* Menu button — yellow square with "Ox" text. */
+    int mbx = DESKBAR_X + 2, mby = DESKBAR_Y + 2;
+    int mbw = DESKBAR_MENU_BTN_W - 4, mbh = DESKBAR_H - 4;
+    int mb_hot = point_in(g_cx, g_cy, mbx, mby, mbw, mbh);
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, mbx, mby, mbw, mbh,
+                  mb_hot ? COL_BEOS_BTN_BG_HOT : COL_BEOS_TAB_BG);
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, mbx, mby, mbw, 1, COL_BEOS_TAB_BORDER);
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, mbx, mby + mbh - 1, mbw, 1, COL_BEOS_TAB_BORDER);
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, mbx, mby, 1, mbh, COL_BEOS_TAB_BORDER);
+    buf_fill_rect(g_back, g_scr_w, g_scr_h, mbx + mbw - 1, mby, 1, mbh, COL_BEOS_TAB_BORDER);
+    buf_draw_text(g_back, g_scr_w, g_scr_h,
+                  mbx + (mbw - 16) / 2, mby + (mbh - 8) / 2,
+                  "Ox", COL_BEOS_TAB_FG);
+
+    /* Window list tiles. */
+    int tile_idx = 0;
+    for (int i = 0; i < g_stack_n; i++) {
+        int slot = g_stack[i];
+        if (slot < 0 || slot >= MAX_WINS) continue;
+        if (!g_wins[slot].used) continue;
+        int tx, ty, tw, th;
+        if (!deskbar_tile_geom(tile_idx++, &tx, &ty, &tw, &th)) break;
+        int hot = point_in(g_cx, g_cy, tx, ty, tw, th);
+        uint32_t bg;
+        if (slot == g_focus_slot && g_wins[slot].state != WIN_MIN)
+            bg = COL_BEOS_DESKBAR_TILE_FOCUS;
+        else if (g_wins[slot].state == WIN_MIN)
+            bg = hot ? COL_BEOS_DESKBAR_TILE_HOT : COL_BEOS_DESKBAR_TILE_MIN;
+        else
+            bg = hot ? COL_BEOS_DESKBAR_TILE_HOT : COL_BEOS_DESKBAR_TILE;
+        buf_fill_rect(g_back, g_scr_w, g_scr_h, tx, ty, tw, th, bg);
+        /* Tile shows the per-app color icon (24x24 RGBA loaded from
+         * /home/.icons/), centered. Falls back to the generic mono
+         * glyph when no .rgba file is on disk. */
+        char key[16]; icon_key_for_title(g_wins[slot].title, key, sizeof key);
+        const uint8_t *rgba = ox_icon_get_rgba(key);
+        int icw = 24, ich = 24;
+        ox_icon_dims(&icw, &ich);
+        int ix = tx + (tw - icw) / 2;
+        int iy = ty + (th - ich) / 2;
+        if (rgba) {
+            ox_icon_draw_rgba(g_back, g_scr_w, g_scr_h, ix, iy, rgba);
+        } else {
+            const uint16_t *ic = ox_icon_get(key);
+            ox_icon_draw(g_back, g_scr_w, g_scr_h,
+                         tx + (tw - OX_ICON_W) / 2,
+                         ty + (th - OX_ICON_H) / 2,
+                         ic, COL_BEOS_DESKBAR_FG);
+        }
+    }
+
+    /* Clock at the right end. */
+    char clk[8];
+    deskbar_format_clock(clk, sizeof(clk));
+    int clk_x = DESKBAR_X + DESKBAR_W - DESKBAR_CLOCK_W + 4;
+    int clk_y = DESKBAR_Y + (DESKBAR_H - 8) / 2;
+    buf_draw_text(g_back, g_scr_w, g_scr_h,
+                  clk_x, clk_y, clk, COL_BEOS_DESKBAR_FG);
+}
+
 /* Full recomposition WITHOUT cursor — used to rebuild g_back_clean
  * whenever a non-cursor change happens. Caller is responsible for
  * snapshotting to g_back_clean and drawing the cursor afterwards. */
@@ -901,10 +1356,12 @@ static void compose_no_cursor(void) {
            (size_t)g_scr_w * g_scr_h * sizeof(uint32_t));
     for (int i = 0; i < g_stack_n; i++) {
         int slot = g_stack[i];
-        if (slot >= 0 && slot < MAX_WINS && g_wins[slot].used) {
+        if (slot >= 0 && slot < MAX_WINS && g_wins[slot].used &&
+            g_wins[slot].state != WIN_MIN) {
             draw_window_frame(slot);
         }
     }
+    draw_deskbar();
     draw_menu();
 }
 
@@ -923,6 +1380,7 @@ static void compose_no_cursor_dirty(int dx0, int dy0, int dx1, int dy1) {
         int slot = g_stack[i];
         if (slot < 0 || slot >= MAX_WINS || !g_wins[slot].used) continue;
         ox_window_t *w = &g_wins[slot];
+        if (w->state == WIN_MIN) continue;
         int fx = w->x - SHADOW_DEPTH;
         int fy = w->y - TITLEBAR_H - SHADOW_DEPTH;
         int fw = w->w + 2 * SHADOW_DEPTH;
@@ -930,6 +1388,12 @@ static void compose_no_cursor_dirty(int dx0, int dy0, int dx1, int dy1) {
         if (rect_intersects(fx, fy, fw, fh, dx0, dy0, dx1, dy1)) {
             draw_window_frame(slot);
         }
+    }
+    /* Deskbar always re-rendered if the dirty rect crosses it — it's
+     * cheap (small strip). */
+    if (rect_intersects(DESKBAR_X, DESKBAR_Y, DESKBAR_W, DESKBAR_H,
+                        dx0, dy0, dx1, dy1)) {
+        draw_deskbar();
     }
     if (g_menu_visible) {
         int mh = (int)MENU_N * MENU_ITEM_H + 8;
@@ -1398,36 +1862,53 @@ static void handle_ipc(const ipc_msg_t *m) {
 
 /* ---------------- Mouse / Keyboard processing -------------------- */
 
-/* Returns 1 if any window contains (mx,my) on its title bar. */
-static int hit_title(int slot, int mx, int my, int *out_close) {
+/* Hit-test the yellow tab. Returns 1 if (mx,my) is inside the tab
+ * rect. out_close/min/zoom are set to which (if any) of the three
+ * buttons was hit. */
+static int hit_title(int slot, int mx, int my,
+                      int *out_close, int *out_min, int *out_zoom) {
+    *out_close = 0; *out_min = 0; *out_zoom = 0;
     ox_window_t *w = &g_wins[slot];
-    if (mx < w->x - BORDER_W ||
-        mx >= w->x + w->w + BORDER_W ||
-        my < w->y - TITLEBAR_H - BORDER_W ||
-        my >= w->y) return 0;
-    int cb_x = w->x + w->w - CLOSE_BTN_SIZE - CLOSE_BTN_PAD - 2;
-    int cb_y = w->y - TITLEBAR_H + CLOSE_BTN_PAD;
-    if (mx >= cb_x && mx < cb_x + CLOSE_BTN_SIZE &&
-        my >= cb_y && my < cb_y + CLOSE_BTN_SIZE) {
-        *out_close = 1;
-    } else {
-        *out_close = 0;
-    }
+    if (w->state == WIN_MIN) return 0;
+    int tx, ty, tw, th;
+    beos_tab_geom(slot, &tx, &ty, &tw, &th);
+    if (!point_in(mx, my, tx, ty, tw, th)) return 0;
+    int bx, by, bw, bh;
+    beos_btn_geom(slot, 0, &bx, &by, &bw, &bh);
+    if (point_in(mx, my, bx, by, bw, bh)) { *out_zoom = 1; return 1; }
+    beos_btn_geom(slot, 1, &bx, &by, &bw, &bh);
+    if (point_in(mx, my, bx, by, bw, bh)) { *out_min = 1; return 1; }
+    beos_btn_geom(slot, 2, &bx, &by, &bw, &bh);
+    if (point_in(mx, my, bx, by, bw, bh)) { *out_close = 1; return 1; }
     return 1;
+}
+
+/* Returns 1 if (mx,my) is in the bottom-right resize handle. */
+static int hit_resize(int slot, int mx, int my) {
+    ox_window_t *w = &g_wins[slot];
+    if (w->state != WIN_NORMAL) return 0;
+    int hx, hy, hw, hh;
+    beos_resize_handle_geom(slot, &hx, &hy, &hw, &hh);
+    return point_in(mx, my, hx, hy, hw, hh);
 }
 
 static int hit_body(int slot, int mx, int my) {
     ox_window_t *w = &g_wins[slot];
+    if (w->state == WIN_MIN) return 0;
     return (mx >= w->x && mx < w->x + w->w &&
             my >= w->y && my < w->y + w->h);
 }
 
-static int pick_top_slot(int mx, int my, int *is_title, int *is_close) {
-    *is_title = 0; *is_close = 0;
+static int pick_top_slot(int mx, int my, int *is_title, int *is_close,
+                          int *is_min, int *is_zoom, int *is_resize) {
+    *is_title = 0; *is_close = 0; *is_min = 0; *is_zoom = 0; *is_resize = 0;
     for (int i = g_stack_n - 1; i >= 0; i--) {
         int slot = g_stack[i];
         if (!g_wins[slot].used) continue;
-        if (hit_title(slot, mx, my, is_close)) {
+        if (g_wins[slot].state == WIN_MIN) continue;
+        /* Resize handle takes priority because it overlaps the body. */
+        if (hit_resize(slot, mx, my)) { *is_resize = 1; return slot; }
+        if (hit_title(slot, mx, my, is_close, is_min, is_zoom)) {
             *is_title = 1;
             return slot;
         }
@@ -1512,8 +1993,98 @@ static void process_mouse_event(mouse_event_t ev) {
     }
 
     /* Edge-detect button transitions. */
-    int is_title = 0, is_close = 0;
-    int slot = pick_top_slot(g_cx, g_cy, &is_title, &is_close);
+    int is_title = 0, is_close = 0, is_min = 0, is_zoom = 0, is_resize = 0;
+    int slot = pick_top_slot(g_cx, g_cy, &is_title, &is_close,
+                              &is_min, &is_zoom, &is_resize);
+
+    /* Deskbar click handling — runs BEFORE menu/window logic so the
+     * Ox-button on the Deskbar opens the menu just like F1/right-click
+     * used to, and tile clicks switch windows. */
+    if (g_cy >= DESKBAR_Y && g_cy < DESKBAR_Y + DESKBAR_H &&
+        g_cx >= DESKBAR_X && g_cx < DESKBAR_X + DESKBAR_W) {
+        if ((new_b & MOUSE_BTN_LEFT) && !(old_b & MOUSE_BTN_LEFT)) {
+            int mbx = DESKBAR_X + 2;
+            int mbw = DESKBAR_MENU_BTN_W - 4;
+            if (g_cx >= mbx && g_cx < mbx + mbw) {
+                /* Menu button → toggle root menu just under the Deskbar. */
+                if (g_menu_visible) {
+                    mark_menu_dirty();
+                    g_menu_visible = 0;
+                } else {
+                    g_menu_x = DESKBAR_X + 2;
+                    g_menu_y = DESKBAR_Y + DESKBAR_H + 2;
+                    if (g_menu_x + MENU_W > (int)g_scr_w)
+                        g_menu_x = (int)g_scr_w - MENU_W - 2;
+                    g_menu_visible = 1;
+                    mark_menu_dirty();
+                }
+                g_dirty = 1;
+                return;
+            }
+            /* Tile area — find which tile we clicked. */
+            int tile_idx = 0;
+            for (int i = 0; i < g_stack_n; i++) {
+                int s = g_stack[i];
+                if (s < 0 || s >= MAX_WINS || !g_wins[s].used) continue;
+                int tx, ty, tw, th;
+                if (!deskbar_tile_geom(tile_idx++, &tx, &ty, &tw, &th)) break;
+                if (point_in(g_cx, g_cy, tx, ty, tw, th)) {
+                    if (g_wins[s].state == WIN_MIN) restore_slot(s);
+                    else raise_slot(s);
+                    g_dirty = 1;
+                    return;
+                }
+            }
+        }
+        /* Hover over deskbar: mark deskbar dirty so highlights update. */
+        if (moved) {
+            mark_dirty(DESKBAR_X, DESKBAR_Y, DESKBAR_W, DESKBAR_H);
+        }
+        /* Don't fall through to window logic when over Deskbar. */
+        return;
+    }
+
+    /* If we're mid-resize, follow the cursor and skip the rest of
+     * the body/title logic — drag-resize "owns" the mouse for now. */
+    if (g_focus_slot >= 0 && g_wins[g_focus_slot].resizing) {
+        if (new_b & MOUSE_BTN_LEFT) {
+            ox_window_t *rw = &g_wins[g_focus_slot];
+            int new_w = rw->resize_start_w +
+                        (g_cx - rw->resize_anchor_x);
+            int new_h = rw->resize_start_h +
+                        (g_cy - rw->resize_anchor_y);
+            /* Fase A: shrink-only within the original buffer. */
+            int max_w = (int)rw->back_bytes /
+                        (rw->h > 0 ? (int)sizeof(uint32_t) * rw->h : 1);
+            (void)max_w;
+            if (new_w < 100) new_w = 100;
+            if (new_h < 80)  new_h = 80;
+            /* Hard cap: don't exceed the original buffer we allocated. */
+            if (rw->w_saved > 0 && rw->state == WIN_NORMAL) {
+                if (new_w > rw->w_saved) new_w = rw->w_saved;
+                if (new_h > rw->h_saved) new_h = rw->h_saved;
+            } else {
+                /* w_saved=0 means we never zoomed — use back_bytes
+                 * as the upper bound. Stored geometry IS the buffer. */
+                if (new_w > (int)g_scr_w - rw->x) new_w = g_scr_w - rw->x;
+                if (new_h > (int)g_scr_h - rw->y) new_h = g_scr_h - rw->y;
+            }
+            int old_w = rw->w, old_h = rw->h;
+            rw->w = new_w;
+            rw->h = new_h;
+            if (old_w != new_w || old_h != new_h) {
+                g_dirty = 1;
+                int fw = (old_w > new_w ? old_w : new_w) + 2 * SHADOW_DEPTH;
+                int fh = TITLEBAR_H +
+                         (old_h > new_h ? old_h : new_h) +
+                         2 * SHADOW_DEPTH + SHADOW_OFFSET;
+                mark_dirty(rw->x - SHADOW_DEPTH,
+                           rw->y - TITLEBAR_H - SHADOW_DEPTH, fw, fh);
+            }
+        } else {
+            g_wins[g_focus_slot].resizing = 0;
+        }
+    }
 
     /* Menu interaction. */
     if (g_menu_visible) {
@@ -1565,10 +2136,21 @@ static void process_mouse_event(mouse_event_t ev) {
     if ((new_b & MOUSE_BTN_LEFT) && !(old_b & MOUSE_BTN_LEFT)) {
         if (slot >= 0) {
             raise_slot(slot);
-            if (is_title) {
+            if (is_resize) {
+                ox_window_t *rw = &g_wins[slot];
+                rw->resizing        = 1;
+                rw->resize_anchor_x = g_cx;
+                rw->resize_anchor_y = g_cy;
+                rw->resize_start_w  = rw->w;
+                rw->resize_start_h  = rw->h;
+            } else if (is_title) {
                 if (is_close) {
                     send_event_close(slot);
                     g_wins[slot].should_close = 1;
+                } else if (is_min) {
+                    minimize_slot(slot);
+                } else if (is_zoom) {
+                    zoom_slot(slot);
                 } else {
                     g_wins[slot].dragging = 1;
                     g_wins[slot].drag_off_x = g_cx - g_wins[slot].x;
@@ -1628,6 +2210,37 @@ static void process_kbd_event(int ascii, int keycode) {
         }
         return;
     }
+    /* Alt+Tab cycles forward through the window stack (LIFO order).
+     * Alt+Shift+Tab cycles backwards. Skips minimized windows; if
+     * cycling lands on a min'd one we restore it. */
+    if (ascii == 0 && keycode == OX_KEY_TAB &&
+        (g_alt_down || (g_mods & OX_MOD_ALT))) {
+        if (g_stack_n > 1) {
+            int backward = (g_mods & OX_MOD_SHIFT) != 0;
+            /* Find next/prev visible slot. */
+            int cur_idx = g_stack_n - 1;
+            int tries = g_stack_n;
+            int next_slot = -1;
+            while (tries-- > 0) {
+                cur_idx = backward
+                    ? (cur_idx + 1) % g_stack_n
+                    : (cur_idx + g_stack_n - 1) % g_stack_n;
+                int s = g_stack[cur_idx];
+                if (s >= 0 && s < MAX_WINS && g_wins[s].used) {
+                    next_slot = s;
+                    break;
+                }
+            }
+            if (next_slot >= 0) {
+                if (g_wins[next_slot].state == WIN_MIN)
+                    restore_slot(next_slot);
+                else
+                    raise_slot(next_slot);
+            }
+        }
+        return;
+    }
+
     /* Alt+F4: close focused. F4 keycode is 62. */
     if (ascii == 0 && keycode == 62 && (g_alt_down || (g_mods & OX_MOD_ALT))) {
         if (g_focus_slot >= 0) {
@@ -1750,6 +2363,16 @@ int main(int argc, char **argv) {
     fprintf(stderr, "oxsrv: fb %ux%u bpp=%u pitch=%u\n",
             g_scr_w, g_scr_h, info.bits_per_pixel, info.line_length);
 
+    /* Try to load a proportional TTF font for chrome text. If no font
+     * is installed at /home/.fonts/default.ttf the call returns -1
+     * and every ox_text_* call falls back to the 8x8 bitmap font.
+     * Either way the WM keeps booting. */
+    if (ox_text_init("/home/.fonts/default.ttf", 12) == 0) {
+        fprintf(stderr, "oxsrv: TTF font loaded\n");
+    } else {
+        fprintf(stderr, "oxsrv: no TTF font, using 8x8 bitmap fallback\n");
+    }
+
     g_back = (uint32_t *)malloc((size_t)g_scr_w * g_scr_h * sizeof(uint32_t));
     g_back_clean = (uint32_t *)malloc((size_t)g_scr_w * g_scr_h * sizeof(uint32_t));
     if (!g_back || !g_back_clean) {
@@ -1871,6 +2494,20 @@ int main(int argc, char **argv) {
         struct timespec _now;
         clock_gettime(0, &_now);
         uint64_t now_ms = (uint64_t)_now.tv_sec * 1000 + _now.tv_nsec / 1000000;
+
+        /* Tick the Deskbar clock once per second so the seconds field
+         * visibly advances. Only the clock area gets marked dirty —
+         * that's a ~72×26 px region, super cheap. */
+        {
+            static uint64_t last_clock_sec = (uint64_t)-1;
+            uint64_t cur_sec = (uint64_t)_now.tv_sec;
+            if (cur_sec != last_clock_sec) {
+                last_clock_sec = cur_sec;
+                int clk_x = (int)g_scr_w - DESKBAR_CLOCK_W;
+                mark_dirty(clk_x, DESKBAR_Y, DESKBAR_CLOCK_W, DESKBAR_H);
+                g_dirty = 1;
+            }
+        }
 
         /* Throttle dead-window reaping to once per ~500 ms. */
         {

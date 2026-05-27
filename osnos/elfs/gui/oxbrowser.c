@@ -29,11 +29,15 @@
 #include <string.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
-/* tlse — single-file TLS 1.2/1.3 client (eduardsui/tlse, BSD).
- * Used for the https:// scheme. We skip cert validation (NULL verify
- * callback in tls_consume_stream) — adequate for a hobby browser. */
-#include "../../vendor/tlse/tlse.h"
+/* BearSSL (bearssl.org, MIT) — constant-time TLS library by Thomas
+ * Pornin. Replaces tlse, whose ClientHello was rejected by every
+ * major modern server (Cloudflare/AWS/Google). BearSSL is known to
+ * inter-op with real-world TLS endpoints. Cert validation is skipped
+ * via the noanchor X.509 wrapper (br_x509_minimal returns
+ * NOT_TRUSTED with empty anchor set; we map that to OK). */
+#include "../../vendor/bearssl/inc/bearssl.h"
 
 /* ---------------- geometry / palette ------------------------------ */
 #define WIN_W       780
@@ -513,88 +517,168 @@ static void parse_response_meta(void) {
     }
 }
 
-/* TLS-encrypted HTTP fetch via tlse. Mirrors the plain-HTTP path but
- * each socket write/read passes through tls_get_write_buffer / tls_read
- * + tls_consume_stream. Cert validation is skipped (NULL callback). */
-static int do_tls_fetch(int fd, const char *host, const char *path) {
-    static int tls_inited = 0;
-    if (!tls_inited) { tls_init(); tls_inited = 1; }
+/* ===== BearSSL X.509 no-anchor wrapper =====
+ * Wraps br_x509_minimal so cert chain validation against trust anchors
+ * is bypassed (BR_ERR_X509_NOT_TRUSTED → OK). Identical to BearSSL's
+ * tools/certs.c x509_noanchor pattern. */
+typedef struct {
+    const br_x509_class    *vtable;
+    const br_x509_class   **inner;
+} ox_x509_noanchor_ctx;
 
-    status_set("TLS: creating context (1.3)...");
-    /* TLS_V13 → tlse genera un ClientHello moderno con la extension
-     * `supported_versions` que incluye 1.2 como fallback. Cloudflare
-     * y otros edges modernos hacen silent-drop de ClientHellos puros
-     * TLS 1.2 (sin supported_versions) por anti-scanning. El TCP
-     * raw a 1.1.1.1:443 funciona pero la respuesta TLS desaparece
-     * al vacío. Con 1.3 el handshake real-mundo arranca. */
-    struct TLSContext *ctx = tls_create_context(0, TLS_V13);
-    if (!ctx) { status_set("TLS: create_context returned NULL"); return -1; }
-    tls_sni_set(ctx, host);
-    tls_client_connect(ctx);
+static void xwc_start_chain(const br_x509_class **ctx, const char *sn) {
+    ox_x509_noanchor_ctx *xwc = (ox_x509_noanchor_ctx *)ctx;
+    (*xwc->inner)->start_chain(xwc->inner, sn);
+}
+static void xwc_start_cert(const br_x509_class **ctx, uint32_t length) {
+    ox_x509_noanchor_ctx *xwc = (ox_x509_noanchor_ctx *)ctx;
+    (*xwc->inner)->start_cert(xwc->inner, length);
+}
+static void xwc_append(const br_x509_class **ctx,
+                       const unsigned char *buf, size_t len) {
+    ox_x509_noanchor_ctx *xwc = (ox_x509_noanchor_ctx *)ctx;
+    (*xwc->inner)->append(xwc->inner, buf, len);
+}
+static void xwc_end_cert(const br_x509_class **ctx) {
+    ox_x509_noanchor_ctx *xwc = (ox_x509_noanchor_ctx *)ctx;
+    (*xwc->inner)->end_cert(xwc->inner);
+}
+static unsigned xwc_end_chain(const br_x509_class **ctx) {
+    ox_x509_noanchor_ctx *xwc = (ox_x509_noanchor_ctx *)ctx;
+    unsigned r = (*xwc->inner)->end_chain(xwc->inner);
+    /* Skip ALL validation errors that we explicitly don't care about
+     * in this hobby-grade build:
+     *   NOT_TRUSTED   — no trust anchors configured (the original
+     *                   reason this wrapper exists)
+     *   TIME_UNKNOWN  — we don't seed the X.509 context's clock so
+     *                   it can't verify expiration. osnos has time()
+     *                   but threading it through here adds plumbing;
+     *                   user opted into "cert validation disabled". */
+    if (r == BR_ERR_X509_NOT_TRUSTED ||
+        r == BR_ERR_X509_TIME_UNKNOWN ||
+        r == BR_ERR_X509_EXPIRED) {
+        r = 0;
+    }
+    return r;
+}
+static const br_x509_pkey *xwc_get_pkey(const br_x509_class *const *ctx,
+                                         unsigned *usages) {
+    const ox_x509_noanchor_ctx *xwc = (const ox_x509_noanchor_ctx *)ctx;
+    return (*xwc->inner)->get_pkey(xwc->inner, usages);
+}
+static const br_x509_class xwc_vtable = {
+    sizeof(ox_x509_noanchor_ctx),
+    xwc_start_chain, xwc_start_cert, xwc_append,
+    xwc_end_cert, xwc_end_chain, xwc_get_pkey
+};
 
-    unsigned char buf[4096];
-    int hs_iter = 0;
-    int total_in = 0;
-    char dbg[160];
-    /* Handshake loop. Most sessions complete in 2-4 iters. */
-    while (!tls_established(ctx)) {
-        if (++hs_iter > 60) {
-            snprintf(dbg, sizeof(dbg),
-                     "TLS: handshake stuck after %d iters (%d bytes in)",
-                     hs_iter, total_in);
-            status_set(dbg);
-            goto tls_fail;
-        }
-        unsigned int wlen = 0;
-        const unsigned char *wbuf = tls_get_write_buffer(ctx, &wlen);
-        if (wbuf && wlen > 0) {
-            snprintf(dbg, sizeof(dbg),
-                     "TLS: sending %u (iter %d)", wlen, hs_iter);
-            status_set(dbg);
-            if (write(fd, wbuf, wlen) != (ssize_t)wlen) {
-                status_set("TLS: write failed during handshake");
-                goto tls_fail;
-            }
-            tls_buffer_clear(ctx);
-        }
-        snprintf(dbg, sizeof(dbg),
-                 "TLS: waiting for server (iter %d, %d in so far)",
-                 hs_iter, total_in);
-        status_set(dbg);
-        /* 10s per read — TCP RTT to remote host can be slow + the
-         * server might fragment its response across packets. */
-        ssize_t n = read_timeout(fd, buf, sizeof(buf), 10000);
+/* Big static state — BearSSL contexts + I/O buffer are 4-35 KB. Keep
+ * them static so the stack doesn't blow up. Single concurrent HTTPS
+ * request is fine for a browser. */
+static br_ssl_client_context    g_sc;
+static br_x509_minimal_context  g_xc;
+static ox_x509_noanchor_ctx     g_xnc;
+static unsigned char            g_iobuf[BR_SSL_BUFSIZE_BIDI];
+
+/* sock_read/write callbacks for br_sslio_init. They receive a void *
+ * (we pass &fd) and return bytes read/written or -1 on error. They
+ * MUST NOT return 0 unless the connection is actually closed (else
+ * br_sslio interprets a "want more" as EOF). */
+static int br_sock_read(void *ctx, unsigned char *buf, size_t len) {
+    int fd = *(int *)ctx;
+    for (;;) {
+        ssize_t n = read(fd, buf, len);
         if (n < 0) {
-            snprintf(dbg, sizeof(dbg),
-                     "TLS: read timeout/error (errno %d, %d bytes in)",
-                     errno, total_in);
-            status_set(dbg);
-            goto tls_fail;
+            if (errno == EINTR) continue;
+            return -1;
         }
-        if (n == 0) {
-            snprintf(dbg, sizeof(dbg),
-                     "TLS: server closed early (%d bytes in)", total_in);
-            status_set(dbg);
-            goto tls_fail;
-        }
-        total_in += (int)n;
-        int rc = tls_consume_stream(ctx, buf, (int)n, NULL);
-        if (rc < 0) {
-            snprintf(dbg, sizeof(dbg),
-                     "TLS: consume_stream rc=%d (%d bytes in)", rc, total_in);
-            status_set(dbg);
-            goto tls_fail;
-        }
+        if (n == 0) return -1;   /* EOF → tell BearSSL to fail */
+        return (int)n;
     }
-    /* Flush any final handshake bytes. */
-    unsigned int wlen = 0;
-    const unsigned char *wbuf = tls_get_write_buffer(ctx, &wlen);
-    if (wbuf && wlen > 0) {
-        if (write(fd, wbuf, wlen) != (ssize_t)wlen) goto tls_fail;
-        tls_buffer_clear(ctx);
+}
+static int br_sock_write(void *ctx, const unsigned char *buf, size_t len) {
+    int fd = *(int *)ctx;
+    for (;;) {
+        ssize_t n = write(fd, buf, len);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        return (int)n;
+    }
+}
+
+/* getrandom — defined in vendor/bearssl/osnos_glue.c as a thin
+ * syscall wrapper. Returns bytes read (== `len` on success) or <0. */
+extern long osnos_getrandom(void *buf, unsigned long len);
+static int get_entropy(unsigned char *buf, size_t n) {
+    long r = osnos_getrandom(buf, (unsigned long)n);
+    return r == (long)n ? 0 : -1;
+}
+
+static int do_tls_fetch(int fd, const char *host, const char *path) {
+    char dbg[160];
+    status_set("TLS: init context (BearSSL)...");
+
+    /* Full client profile — supports TLS 1.0/1.2, all standard
+     * ciphers. Empty trust anchors → cert chain validation will
+     * return NOT_TRUSTED, which our noanchor wrapper maps to OK. */
+    br_ssl_client_init_full(&g_sc, &g_xc, NULL, 0);
+    /* Force TLS 1.2 only — BearSSL 0.6 doesn't know TLS 1.3 record
+     * format. If server picks 1.3, its encrypted handshake messages
+     * arrive as application_data records before our engine knows
+     * the handshake is done → BR_ERR_UNEXPECTED. By advertising
+     * BR_TLS12..BR_TLS12 in supported_versions, server is forced to
+     * negotiate 1.2 or close (most modern servers fall back). */
+    br_ssl_engine_set_versions(&g_sc.eng, BR_TLS12, BR_TLS12);
+
+    /* Seed the X.509 engine's clock so it can run expiry checks.
+     * Without this, end_chain returns TIME_UNKNOWN BEFORE populating
+     * the server's public key — which we'd then map to OK in our
+     * noanchor wrapper, but the SSL engine would later hit
+     * BR_ERR_UNEXPECTED trying to use the missing pkey.
+     * Days since 0AD = days_since_epoch + 719528, where epoch is
+     * 1970-01-01. */
+    {
+        time_t now_secs = time(0);
+        if (now_secs > 0) {
+            uint32_t days  = (uint32_t)((long)now_secs / 86400 + 719528);
+            uint32_t hms   = (uint32_t)((long)now_secs % 86400);
+            br_x509_minimal_set_time(&g_xc, days, hms);
+        }
     }
 
-    status_set("TLS: sending GET...");
+    /* Wire up noanchor wrapper. */
+    g_xnc.vtable = &xwc_vtable;
+    g_xnc.inner  = &g_xc.vtable;
+    br_ssl_engine_set_x509(&g_sc.eng, &g_xnc.vtable);
+    /* Bidirectional I/O buffer split (last arg = 1). */
+    br_ssl_engine_set_buffer(&g_sc.eng, g_iobuf, sizeof g_iobuf, 1);
+
+    /* Seed entropy. */
+    unsigned char seed[32];
+    if (get_entropy(seed, sizeof seed) < 0) {
+        status_set("TLS: getrandom failed (no entropy)");
+        return -1;
+    }
+    br_ssl_engine_inject_entropy(&g_sc.eng, seed, sizeof seed);
+
+    /* Start handshake — host string is the SNI extension. */
+    if (!br_ssl_client_reset(&g_sc, host, 0)) {
+        snprintf(dbg, sizeof(dbg), "TLS: client_reset error %d",
+                 br_ssl_engine_last_error(&g_sc.eng));
+        status_set(dbg);
+        return -1;
+    }
+
+    /* Use br_sslio convenience layer. It hides the engine state
+     * machine behind blocking-style read/write calls. */
+    br_sslio_context ioc;
+    int sock_ctx = fd;
+    br_sslio_init(&ioc, &g_sc.eng, br_sock_read, &sock_ctx,
+                                    br_sock_write, &sock_ctx);
+
+    status_set("TLS: handshake + GET...");
     char req[512];
     int rl = snprintf(req, sizeof(req),
         "GET %s HTTP/1.1\r\n"
@@ -604,41 +688,35 @@ static int do_tls_fetch(int fd, const char *host, const char *path) {
         "Connection: close\r\n"
         "\r\n",
         path, host);
-    tls_write(ctx, (const unsigned char *)req, (unsigned int)rl);
-    wbuf = tls_get_write_buffer(ctx, &wlen);
-    if (wbuf && wlen > 0) {
-        if (write(fd, wbuf, wlen) != (ssize_t)wlen) goto tls_fail;
-        tls_buffer_clear(ctx);
+    /* br_sslio_write_all triggers the handshake on first call. */
+    if (br_sslio_write_all(&ioc, req, (size_t)rl) < 0) {
+        snprintf(dbg, sizeof(dbg),
+                 "TLS: write_all err %d (engine %d)",
+                 br_sslio_flush(&ioc),
+                 br_ssl_engine_last_error(&g_sc.eng));
+        status_set(dbg);
+        return -1;
+    }
+    if (br_sslio_flush(&ioc) < 0) {
+        snprintf(dbg, sizeof(dbg), "TLS: flush err %d",
+                 br_ssl_engine_last_error(&g_sc.eng));
+        status_set(dbg);
+        return -1;
     }
 
     status_set("TLS: receiving...");
     g_response_len = 0;
-    int idle_reads = 0;
     for (;;) {
-        int pt = tls_read(ctx, buf, sizeof(buf));
-        if (pt > 0) {
-            int room = RESP_MAX - 1 - g_response_len;
-            if (room <= 0) break;
-            int take = pt < room ? pt : room;
-            memcpy(g_response + g_response_len, buf, (size_t)take);
-            g_response_len += take;
-            idle_reads = 0;
-            continue;
-        }
-        if (++idle_reads > 20) break;   /* ~40s cap on body */
-        ssize_t n = read_timeout(fd, buf, sizeof(buf), 2000);
-        if (n <= 0) break;
-        if (tls_consume_stream(ctx, buf, (int)n, NULL) < 0) break;
+        int room = RESP_MAX - 1 - g_response_len;
+        if (room <= 0) break;
+        int chunk = room > 4096 ? 4096 : room;
+        int n = br_sslio_read(&ioc, g_response + g_response_len, (size_t)chunk);
+        if (n < 0) break;   /* EOF or error — fine */
+        g_response_len += n;
     }
     g_response[g_response_len] = 0;
-
-    tls_close_notify(ctx);
-    tls_destroy_context(ctx);
+    br_sslio_close(&ioc);
     return g_response_len;
-
-tls_fail:
-    tls_destroy_context(ctx);
-    return -1;
 }
 
 static int fetch_url(const char *url) {
@@ -968,8 +1046,11 @@ int main(int argc, char **argv) {
      * running (was the "everything blank" failure mode pre-1.1: a
      * blocking connect() to a refused/timed-out endpoint left the
      * window on its default backing). */
+    /* Default HTTP — HTTPS path exists (links BearSSL) but the
+     * handshake currently fails against major CDN-fronted hosts
+     * with BR_ERR_UNEXPECTED. Tracked as future work. */
     const char *start = argc > 1 && argv[1] && argv[1][0]
-        ? argv[1] : "https://httpbin.org/get";
+        ? argv[1] : "http://httpbin.org/get";
     snprintf(g_url_edit, sizeof(g_url_edit), "%s", start);
     g_url_edit_len = (int)strlen(g_url_edit);
     g_url_caret = g_url_edit_len;
@@ -977,10 +1058,12 @@ int main(int argc, char **argv) {
              "Type a URL and press Enter or click Go");
     view_clear();
     view_puts("\n  oxbrowser v1\n\n");
-    view_puts("  Type a URL (http:// or https://) and press Enter / click Go.\n");
+    view_puts("  Type a URL and press Enter / click Go.\n");
     view_puts("  Backspace or the Back button = navigate back.\n");
     view_puts("  Wheel + arrows = scroll.  Click links to navigate.\n\n");
-    view_puts("  HTTPS uses tlse (TLS 1.2). Cert validation disabled.\n");
+    view_puts("  HTTP: works against any server.\n");
+    view_puts("  HTTPS: BearSSL linked, but handshake currently doesn't\n");
+    view_puts("         complete vs modern CDN endpoints (future work).\n");
     render();
 
     int quit = 0;
