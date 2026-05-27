@@ -98,6 +98,23 @@ double sqrt(double x) {
 
 float sqrtf(float x) { return (float)sqrt(x); }
 
+/* cbrt — cube root. ES2015 defines it for ±0, ±Inf, NaN; the natural
+ * pow() route would NaN on negatives, so we mirror the sign. */
+double cbrt(double x) {
+    if (isnan(x))    return x;
+    if (x == 0.0)    return x;             /* preserves sign of zero */
+    if (isinf(x))    return x;
+    if (x < 0.0)     return -pow(-x, 1.0 / 3.0);
+    return pow(x, 1.0 / 3.0);
+}
+
+/* signbit — IEEE 754 sign bit (works for -0.0 too). */
+int signbit(double x) {
+    union { double d; uint64_t u; } v;
+    v.d = x;
+    return (v.u >> 63) & 1;
+}
+
 /* exp via the standard truncated series exp(x) = sum x^k/k!. Argument
  * reduction halves x repeatedly and squares the result, keeping the
  * series accurate over a wider range. */

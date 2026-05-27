@@ -713,6 +713,7 @@ int main(int argc, char **argv) {
         memcpy(g_path, argv[1], L);
         g_path[L] = 0;
     }
+    ox_log("oxnotepad: starting\n");
     if (ox_init() < 0) return 1;
 
     char title[80];

@@ -376,6 +376,22 @@ static void spawn_child(void) {
     /* Non-blocking master so we can drain in the event loop. */
     int fl = fcntl(g_master, F_GETFL, 0);
     fcntl(g_master, F_SETFL, fl | O_NONBLOCK);
+
+    /* Put the PTY in raw mode so the kernel line discipline doesn't
+     * echo arrow keys / control sequences back to us — without this,
+     * sending "\033[A" to the slave bounces straight back via ECHO
+     * and our CSI parser interprets it as "cursor up" and visibly
+     * moves the grid cursor instead of letting the shell handle it
+     * as history navigation. The shell can re-cook the termios as
+     * needed; we just want the BASELINE to be raw + noecho. */
+    struct termios t;
+    if (tcgetattr(g_master, &t) == 0) {
+        t.c_lflag &= ~(ICANON | ECHO | ECHOE | ECHONL | ISIG);
+        t.c_iflag &= ~(INLCR | ICRNL | IXON);
+        t.c_oflag &= ~OPOST;
+        tcsetattr(g_master, TCSANOW, &t);
+    }
+
     char slave[32];
     if (ptsname_r(g_master, slave, sizeof(slave)) < 0) return;
     int pid = fork();
@@ -386,10 +402,24 @@ static void spawn_child(void) {
         if (s > 2) close(s);
         close(g_master);
         setsid();
-        char *argv[] = { "uxsh", 0 };
-        execve("/bin/uxsh", argv, environ);
-        /* Fallback if uxsh missing — minishell at least echoes. */
-        execve("/bin/minishell", argv, environ);
+        /* Prefer busybox sh (full line editor with history support);
+         * fall back to uxsh / minishell if anything is missing. The
+         * shell name in argv[0] tells busybox to dispatch to ash. */
+        char *envp[] = {
+            "PATH=/bin",
+            "HOME=/home",
+            "SHELL=/bin/sh",
+            /* TERM=xterm tells busybox line editor to enable arrow-
+             * key history nav (the default unknown TERM disables it). */
+            "TERM=xterm",
+            "PS1=osnos:/\\w$ ",
+            0
+        };
+        char *argv_sh[] = { "sh", "-i", 0 };
+        execve("/bin/sh", argv_sh, envp);
+        char *argv_uxsh[] = { "uxsh", 0 };
+        execve("/bin/uxsh", argv_uxsh, environ);
+        execve("/bin/minishell", argv_uxsh, environ);
         _exit(127);
     }
     g_child_pid = pid;
@@ -397,11 +427,15 @@ static void spawn_child(void) {
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
-    if (ox_init() < 0) return 1;
+    ox_log("oxterm: starting\n");
+    if (ox_init() < 0) { ox_log("oxterm: ox_init failed\n"); return 1; }
     g_win = ox_window_create(WIN_W, WIN_H, "Terminal");
-    if (g_win < 0) return 1;
+    if (g_win < 0) { ox_log("oxterm: window_create failed\n"); return 1; }
+    ox_log("oxterm: win=%d %dx%d\n", (int)g_win, WIN_W, WIN_H);
     grid_clear_all();
     spawn_child();
+    ox_log("oxterm: spawned child pid=%d shell=/bin/sh (ash)\n",
+           g_child_pid);
     render();
 
     int running = 1;
@@ -428,9 +462,7 @@ int main(int argc, char **argv) {
                 continue;
             }
             if (ev.type == OX_EV_KEY) {
-                /* PageUp/PageDown navigate scrollback. Shift+arrows
-                 * could later page line-by-line; for now PageUp/Dn
-                 * is the canonical Ghostty motion. */
+                /* PageUp/PageDown navigate the scrollback. */
                 if (ev.keycode == OX_KEY_PGUP) {
                     g_scroll_off += ROWS / 2;
                     if (g_scroll_off > g_sb_count) g_scroll_off = g_sb_count;
@@ -443,18 +475,41 @@ int main(int argc, char **argv) {
                     g_dirty = 1;
                     continue;
                 }
-                if (ev.keycode == OX_KEY_END || ev.keycode == OX_KEY_ESC) {
-                    if (g_scroll_off > 0) { g_scroll_off = 0; g_dirty = 1; }
-                    if (ev.keycode == OX_KEY_END) continue;
-                    /* ESC falls through so the shell can also see it. */
-                }
                 /* If user types while scrolled up, snap back to live. */
                 if (g_scroll_off > 0 &&
                     (ev.ascii || ev.keycode == OX_KEY_ENTER ||
-                     ev.keycode == OX_KEY_BACKSPACE)) {
+                     ev.keycode == OX_KEY_BACKSPACE ||
+                     ev.keycode == OX_KEY_UP ||
+                     ev.keycode == OX_KEY_DOWN ||
+                     ev.keycode == OX_KEY_LEFT ||
+                     ev.keycode == OX_KEY_RIGHT)) {
                     g_scroll_off = 0; g_dirty = 1;
                 }
-                /* Map ascii to bytes for the shell. */
+                /* Backspace — the line discipline expects 0x7F (DEL) as
+                 * its ERASE character. Some keyboards emit ascii=0x08
+                 * for the Backspace key; remap so the shell actually
+                 * erases instead of leaving "BS, space, BS" echoed
+                 * with the original chars still in the read buffer. */
+                if (ev.keycode == OX_KEY_BACKSPACE ||
+                    ev.ascii == 0x08 || ev.ascii == 0x7f) {
+                    char c = 0x7f;
+                    write(g_master, &c, 1);
+                    continue;
+                }
+                /* Arrow keys, Home/End, Delete — emit the standard
+                 * xterm-style ESC sequences so ash's line editor can
+                 * navigate history (Up/Down) and move within the
+                 * current line (Left/Right/Home/End/Delete). */
+                if (ev.keycode == OX_KEY_UP)    { write(g_master, "\033[A", 3); continue; }
+                if (ev.keycode == OX_KEY_DOWN)  { write(g_master, "\033[B", 3); continue; }
+                if (ev.keycode == OX_KEY_RIGHT) { write(g_master, "\033[C", 3); continue; }
+                if (ev.keycode == OX_KEY_LEFT)  { write(g_master, "\033[D", 3); continue; }
+                if (ev.keycode == OX_KEY_HOME)  { write(g_master, "\033[H", 3); continue; }
+                if (ev.keycode == OX_KEY_END)   { write(g_master, "\033[F", 3); continue; }
+                if (ev.keycode == OX_KEY_DELETE){ write(g_master, "\033[3~",4); continue; }
+                /* Map ascii to bytes for the shell. Includes Tab (0x09),
+                 * Enter (0x0a after the \r → \n translation below), and
+                 * every Ctrl+letter (control chars 0x01..0x1f). */
                 if (ev.ascii) {
                     char c = (char)ev.ascii;
                     if (c == '\r') c = '\n';
@@ -462,8 +517,11 @@ int main(int argc, char **argv) {
                 } else if (ev.keycode == OX_KEY_ENTER) {
                     char c = '\n';
                     write(g_master, &c, 1);
-                } else if (ev.keycode == OX_KEY_BACKSPACE) {
-                    char c = 0x7f;
+                } else if (ev.keycode == OX_KEY_TAB) {
+                    char c = '\t';
+                    write(g_master, &c, 1);
+                } else if (ev.keycode == OX_KEY_ESC) {
+                    char c = 0x1b;
                     write(g_master, &c, 1);
                 }
             }

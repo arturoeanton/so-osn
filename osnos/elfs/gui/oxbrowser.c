@@ -845,26 +845,29 @@ static void resolve_relative(const char *href, char *out, size_t cap) {
         snprintf(out, cap, "%s", href);
         return;
     }
-    /* Extract scheme+host from current URL. */
+    /* Preserve the current scheme — clicking a relative link from
+     * an HTTPS page must stay HTTPS (downgrading to HTTP both leaks
+     * the request and breaks TLS-only servers). */
+    const char *scheme = "http://";
     char base[URL_MAX];
     snprintf(base, sizeof(base), "%s", g_url_current);
     char *p = base;
-    if (strncmp(p, "http://", 7) == 0) p += 7;
+    if (strncmp(p, "https://", 8) == 0) { scheme = "https://"; p += 8; }
+    else if (strncmp(p, "http://", 7) == 0) p += 7;
     /* Find first '/' after host. */
     char *slash = strchr(p, '/');
     if (href[0] == '/') {
         if (slash) *slash = 0;
-        snprintf(out, cap, "http://%s%s", p, href);
+        snprintf(out, cap, "%s%s%s", scheme, p, href);
     } else {
-        /* Strip last path segment. */
         if (slash) {
             char *last = strrchr(slash, '/');
             if (last) last[1] = 0;
         } else {
-            snprintf(out, cap, "http://%s/%s", p, href);
+            snprintf(out, cap, "%s%s/%s", scheme, p, href);
             return;
         }
-        snprintf(out, cap, "http://%s%s", p, href);
+        snprintf(out, cap, "%s%s%s", scheme, p, href);
     }
 }
 
@@ -1036,6 +1039,7 @@ static int hit(int x, int y, int rx, int ry, int rw, int rh) {
 }
 
 int main(int argc, char **argv) {
+    ox_log("oxbrowser: starting\n");
     if (ox_init() < 0) return 1;
     g_win = ox_window_create(WIN_W, WIN_H, "Browser");
     if (g_win < 0) return 1;

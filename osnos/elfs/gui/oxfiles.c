@@ -400,16 +400,26 @@ static void open_entry(int idx) {
         set_wallpaper_via_oxrc(e->name);
         return;
     }
-    /* Otherwise open in notepad. */
+    /* Build absolute path. */
     char full[512];
     if (strcmp(g_cwd, "/") == 0) snprintf(full, sizeof(full), "/%s", e->name);
     else                         snprintf(full, sizeof(full), "%s/%s", g_cwd, e->name);
     static const char envp_flat[] =
         "PATH=/bin\0"
         "HOME=/home\0"
-        "SHELL=/bin/uxsh\0"
+        "SHELL=/bin/sh\0"
         "TERM=osnos\0";
-    osn_spawn("/bin/oxnotepad", full, envp_flat, -1, -1);
+    /* Per-extension dispatch:
+     *   .js  → /bin/oxjs    (JavaScript runner with Ox bindings)
+     *   .db  → /bin/oxsqliteview
+     *   .ppm → /bin/oxnotepad (or wallpaper handled above)
+     *   else → /bin/oxnotepad (default text editor) */
+    const char *opener = "/bin/oxnotepad";
+    if (has_ext(e->name, ".js"))                opener = "/bin/oxjs";
+    else if (has_ext(e->name, ".db"))           opener = "/bin/oxsqliteview";
+    else if (has_ext(e->name, ".sqlite"))       opener = "/bin/oxsqliteview";
+    ox_log("oxfiles: open %s → %s\n", full, opener);
+    osn_spawn(opener, full, envp_flat, -1, -1);
 }
 
 /* ---------------- hit-testing -------------------------------------- */

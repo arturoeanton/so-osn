@@ -180,3 +180,12 @@ const uint8_t *ox_icon_get_rgba(const char *name);
 int   ox_icon_dims(int *w, int *h);
 void  ox_icon_draw_rgba(uint32_t *buf, int bw, int bh, int x, int y,
                          const uint8_t *rgba);
+
+/* Diagnostic log — writes printf-style text to /dev/ttyS0 (which
+ * QEMU captures into serial.log). Use this from Ox apps because
+ * stderr is broken for children of oxsrv. Always available; the
+ * underlying open() of /dev/ttyS0 is lazy + per-process.
+ *
+ * Convention: every line should start with "<app>: " so multi-app
+ * traces in serial.log stay readable. */
+void ox_log(const char *fmt, ...);

@@ -205,6 +205,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/gui/oxmem.c \
     elfs/gui/oxipc.c \
     elfs/gui/oxnet.c \
+    elfs/gui/oxjs.c \
     elfs/tools/uxsh.c
 
 # musl-linked ELFs (vendor/musl). Declared early so USER_ELF_LIST sees it.
@@ -331,6 +332,7 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $$(LIBTCC1_A) $$(CRTI_O) $$(C
 	mmd -i $@ ::/home/wallpapers
 	mmd -i $@ ::/home/.fonts
 	mmd -i $@ ::/home/.icons
+	mmd -i $@ ::/home/apps
 	mmd -i $@ ::/lib
 	mmd -i $@ ::/lib/tcc
 	mmd -i $@ ::/lib/tcc/include
@@ -396,6 +398,16 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $$(LIBTCC1_A) $$(CRTI_O) $$(C
 	    done; \
 	    n=$$(ls res/icons/*.rgba | wc -l | tr -d ' '); \
 	    echo "  COPY    /home/.icons/  ($$n icons)"; \
+	fi
+	@# JavaScript apps for /bin/oxjs. Anything ending in `.js` under
+	@# res/apps/ gets staged at /home/apps/ on the FAT image.
+	@if ls res/apps/*.js >/dev/null 2>&1; then \
+	    for f in res/apps/*.js; do \
+	        base=$$(basename "$$f"); \
+	        mcopy -i $@ -o "$$f" "::/home/apps/$$base" || exit 1; \
+	    done; \
+	    n=$$(ls res/apps/*.js | wc -l | tr -d ' '); \
+	    echo "  COPY    /home/apps/  ($$n JS apps)"; \
 	fi
 	@# lighttpd: solo index.html ahora; /etc/lighttpd/ se crea más
 	@# abajo (después de /etc) para mantener orden mmd correcto.
@@ -630,6 +642,31 @@ $(BEARSSL_A): $(BEARSSL_OBJS)
 	ar rcs $@ $^
 
 # --------------------------------------------------------------------------
+# Duktape 2.7.0 — small embeddable ECMAScript engine for JS-as-app
+# scripting. ~100K LOC in a single `duktape.c` (amalgamated source).
+# Compiled with `-w` because the amalgam uses idioms that trip our
+# strict warning set, like every other vendored amalgamation.
+# --------------------------------------------------------------------------
+DUKTAPE_DIR  := vendor/duktape
+DUKTAPE_SRC  := $(DUKTAPE_DIR)/src/duktape.c
+DUKTAPE_OBJ  := $(BUILD)/$(DUKTAPE_DIR)/src/duktape.c.o
+DUKTAPE_A    := $(BUILD)/$(DUKTAPE_DIR)/libduktape.a
+DUKTAPE_INC  := $(DUKTAPE_DIR)/src
+
+# Duktape defaults assume a hosted POSIX env. Override math macros for
+# functions our mini-libc doesn't ship (cbrt); Duktape has internal
+# pow()-based fallbacks when the macros are undefined.
+DUKTAPE_DEFS := -UDUK_CBRT
+
+$(DUKTAPE_OBJ): $(DUKTAPE_SRC) $(DUKTAPE_DIR)/src/duktape.h $(DUKTAPE_DIR)/src/duk_config.h
+	mkdir -p "$(dir $@)"
+	$(CC) $(USER_CFLAGS) -w -isystem $(FREESTD_INC) -I $(LIBC_INC) \
+	    -I src/include -I $(DUKTAPE_INC) $(DUKTAPE_DEFS) -c $< -o $@
+
+$(DUKTAPE_A): $(DUKTAPE_OBJ)
+	$(AR) rcs $@ $^
+
+# --------------------------------------------------------------------------
 # tlse port — kept for reference but oxbrowser no longer links it. tlse's
 # ClientHello had interop issues with modern servers. See FASE 12.5 notes
 # in STATUS.md.
@@ -668,6 +705,16 @@ $(BUILD)/elfs/gui/oxbrowser.elf: elfs/gui/oxbrowser.c elfs/libc.lds $(LIBC_A) $(
 	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include -c $< -o $@.tmp.o
 	$(LD) $(USER_LDFLAGS) -T elfs/libc.lds \
 	    $(LIBC_CRT0) $@.tmp.o $(BEARSSL_A) $(LIBC_A) -o $@
+	rm $@.tmp.o
+
+# Override for oxjs: link in libduktape.a. The runner needs the
+# Duktape headers for the script API and the static library for the
+# engine itself.
+$(BUILD)/elfs/gui/oxjs.elf: elfs/gui/oxjs.c elfs/libc.lds $(LIBC_A) $(LIBC_CRT0) $(DUKTAPE_A)
+	mkdir -p "$(dir $@)"
+	$(CC) $(USER_CFLAGS) -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include -I $(DUKTAPE_INC) -c $< -o $@.tmp.o
+	$(LD) $(USER_LDFLAGS) -T elfs/libc.lds \
+	    $(LIBC_CRT0) $@.tmp.o $(DUKTAPE_A) $(LIBC_A) -o $@
 	rm $@.tmp.o
 
 # --------------------------------------------------------------------------

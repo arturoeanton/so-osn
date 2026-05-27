@@ -42,11 +42,17 @@ double round(double x);
 double fmod (double x, double y);
 
 double sqrt (double x);
+double cbrt (double x);
 double pow  (double base, double exp);
 double exp  (double x);
 double log  (double x);
 double log2 (double x);
 double log10(double x);
+
+/* signbit: 1 if the sign bit is set (negative or -0.0), else 0.
+ * C99 spec defines it as a type-generic macro; we expose just the
+ * double form because that's what Duktape's DUK_SIGNBIT resolves to. */
+int    signbit(double x);
 /* ldexp: x * 2^n. Used by TCC's preprocessor when constant-folding
  * decimal FP literals like 1.5e10 — frequently in a row, so worth
  * having even though it's trivial. */

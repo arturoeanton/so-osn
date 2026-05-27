@@ -146,6 +146,7 @@ int main(int argc, char **argv) {
         memcpy(g_path, argv[1], L);
         g_path[L] = 0;
     }
+    ox_log("oxlog: starting\n");
     if (ox_init() < 0) return 1;
     char title[300];
     snprintf(title, sizeof(title), "Log — %s", g_path);

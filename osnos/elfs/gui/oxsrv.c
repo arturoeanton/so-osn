@@ -248,6 +248,8 @@ static const menu_item_t g_menu[] = {
     { "Memory",      "/bin/oxmem",       0, "info"     },
     { "IPC",         "/bin/oxipc",       0, "info"     },
     { "Network",     "/bin/oxnet",       0, "browser"  },
+    { "JS: Snake",   "/bin/oxjs",        3, "paint"    },
+    { "JS: Quadratic","/bin/oxjs",       4, "calc"     },
     { "Settings",    "/bin/oxsettings",  0, "settings" },
     { "Exit Ox",     0,                  2, "info"     },
     { "Reboot",      0,                  1, "info"     },
@@ -1168,27 +1170,51 @@ static void draw_window_frame(int slot) {
      * WIN_ZOOM the buffer is the SAVED original dims (w_saved × h_saved)
      * and we nearest-neighbor scale into ww×wh on screen. */
     if (w->back) {
-        int src_w = (w->state == WIN_ZOOM) ? w->w_saved : ww;
-        int src_h = (w->state == WIN_ZOOM) ? w->h_saved : wh;
-        if (src_w <= 0) src_w = 1;
-        if (src_h <= 0) src_h = 1;
+        /* CRITICAL: the source buffer's pitch is the BUFFER width
+         * (`buf_w`), not the visible width `ww`. After the user
+         * shrinks the window with the resize handle, `w` and `h`
+         * change but the SHM stride stays at `buf_w/buf_h`. Reading
+         * with the old `src_w = ww` produced a diagonal stride shear
+         * — looked like the app got corrupted. Visible w/h still
+         * govern WHAT we copy + clip; only the source-stride per
+         * row uses buf_w. For WIN_ZOOM we scale buf_w/buf_h up into
+         * ww/wh via nearest-neighbor. */
+        int buf_w = w->buf_w > 0 ? w->buf_w : ww;
+        int buf_h = w->buf_h > 0 ? w->buf_h : wh;
+        int copy_w = (w->state == WIN_ZOOM) ? buf_w : (ww < buf_w ? ww : buf_w);
+        int copy_h = (w->state == WIN_ZOOM) ? buf_h : (wh < buf_h ? wh : buf_h);
+        if (copy_w <= 0) copy_w = 1;
+        if (copy_h <= 0) copy_h = 1;
         for (int row = 0; row < wh; row++) {
             int dy = wy + row;
             if (dy < 0 || dy >= (int)g_scr_h) continue;
-            int sy = (int)((long)row * src_h / wh);
-            if (sy >= src_h) sy = src_h - 1;
+            /* For NORMAL: row 1:1; for ZOOM: scaled. */
+            int sy = (w->state == WIN_ZOOM)
+                       ? (int)((long)row * copy_h / wh)
+                       : row;
+            if (sy >= buf_h) sy = buf_h - 1;
             int xs = wx, xe = wx + ww;
             if (xs < 0) xs = 0;
             if (xe > (int)g_scr_w) xe = g_scr_w;
             int run = xe - xs;
             if (run <= 0) continue;
-            uint32_t *src_row = w->back + (size_t)sy * src_w;
+            uint32_t *src_row = w->back + (size_t)sy * buf_w;
             uint32_t *dst = g_back + (size_t)dy * g_scr_w + xs;
-            for (int i = 0; i < run; i++) {
-                int col_on_screen = xs - wx + i;
-                int sx = (int)((long)col_on_screen * src_w / ww);
-                if (sx >= src_w) sx = src_w - 1;
-                dst[i] = src_row[sx];
+            if (w->state == WIN_ZOOM) {
+                for (int i = 0; i < run; i++) {
+                    int col_on_screen = xs - wx + i;
+                    int sx = (int)((long)col_on_screen * copy_w / ww);
+                    if (sx >= buf_w) sx = buf_w - 1;
+                    dst[i] = src_row[sx];
+                }
+            } else {
+                /* 1:1 normal-state copy. Walk the visible slice
+                 * of the source row using its true buf_w stride. */
+                int src_start = xs - wx;
+                int max_run = buf_w - src_start;
+                if (max_run < run) run = max_run;
+                if (run > 0) memcpy(dst, src_row + src_start,
+                                    (size_t)run * sizeof(uint32_t));
             }
         }
     }
@@ -1619,6 +1645,18 @@ static void spawn_app(const char *path) {
         "SHELL=/bin/minishell\0"
         "TERM=osnos\0";
     osn_spawn(path, "", envp_flat, -1, -1);
+}
+
+/* Variant that passes a packed argv string to the spawned binary
+ * (osn_spawn copies the second arg verbatim into argv[1]). Used for
+ * JS apps where the menu entry says `/bin/oxjs /home/apps/snake.js`. */
+static void spawn_app_argv(const char *path, const char *argv) {
+    static const char envp_flat[] =
+        "PATH=/bin\0"
+        "HOME=/home\0"
+        "SHELL=/bin/minishell\0"
+        "TERM=osnos\0";
+    osn_spawn(path, argv ? argv : "", envp_flat, -1, -1);
 }
 
 static void do_reboot(void) {
@@ -2166,6 +2204,10 @@ static void process_mouse_event(mouse_event_t ev) {
                     g_menu_visible = 0;
                     if (g_menu[idx].action == 1) do_reboot();
                     else if (g_menu[idx].action == 2) g_quit = 1;
+                    else if (g_menu[idx].action == 3)
+                        spawn_app_argv("/bin/oxjs", "/home/apps/snake.js");
+                    else if (g_menu[idx].action == 4)
+                        spawn_app_argv("/bin/oxjs", "/home/apps/quadratic.js");
                     else if (g_menu[idx].path) spawn_app(g_menu[idx].path);
                     g_dirty = 1;
                     mark_menu_dirty();
@@ -2263,6 +2305,14 @@ static void process_mouse_event(mouse_event_t ev) {
 }
 
 static void process_kbd_event(int ascii, int keycode) {
+    /* Esc dismisses the root menu without sending the key on to the
+     * focused app. Other keys fall through. */
+    if (keycode == OX_KEY_ESC && g_menu_visible) {
+        mark_menu_dirty();
+        g_menu_visible = 0;
+        g_dirty = 1;
+        return;
+    }
     /* Track modifier state from keycodes. The PS/2 driver also
      * cooks shift/ctrl into ASCII (uppercase, ^C) so most apps
      * don't need mods; the bits are reported for completeness. */

@@ -230,6 +230,7 @@ static int hit_refresh_btn(int mx, int my) {
 /* ---------------- main -------------------------------------------- */
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
+    ox_log("oxtop: starting\n");
     if (ox_init() < 0) return 1;
     g_win = ox_window_create(WIN_W, WIN_H, "Processes");
     if (g_win < 0) return 1;

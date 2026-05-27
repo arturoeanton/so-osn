@@ -28,10 +28,14 @@
 #include <fcntl.h>
 #include <ox.h>
 #include <ox_ui.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/* Route logs through the libc helper that writes to /dev/ttyS0. */
+#define oxlog ox_log
 
 /* ---------------- geometry / palette ------------------------------ */
 #define WIN_W       880
@@ -240,18 +244,17 @@ static void q_end(void) {
  * `with_header = 1` we get a header row in the first line of output. */
 static int sqlite_run(const char *sql, int with_header) {
     const char *tmp = "/tmp/oxsqv.sql";
+    oxlog( "oxsqliteview: sqlite_run db=%s with_hdr=%d sql_len=%lu\n",
+            g_db, with_header, (unsigned long)strlen(sql));
     FILE *qf = fopen(tmp, "w");
     if (!qf) {
+        oxlog( "oxsqliteview: fopen(%s, w) failed errno=%d\n",
+                tmp, errno);
         snprintf(g_status, sizeof(g_status),
                  "fopen tmp: %s", strerror(errno));
         g_status_err = 1;
         return -1;
     }
-    /* Write the actual SQL we received. Ensure it terminates in `;`
-     * before the `.exit` dot-command, otherwise sqlite3 parses the
-     * two as a single (invalid) statement and emits a syntax error.
-     * Looking at strlen(sql) — NOT the editor globals — is what
-     * matters here. */
     size_t sql_len = strlen(sql);
     fputs(sql, qf);
     if (sql_len == 0 || sql[sql_len - 1] != ';') fputc(';', qf);
@@ -269,9 +272,11 @@ static int sqlite_run(const char *sql, int with_header) {
             "sqlite3 -separator '|' '%s' < %s 2>&1",
             g_db, tmp);
     }
+    oxlog( "oxsqliteview: cmd=%s\n", cmd);
 
     FILE *p = popen(cmd, "r");
     if (!p) {
+        oxlog( "oxsqliteview: popen failed errno=%d\n", errno);
         snprintf(g_status, sizeof(g_status),
                  "popen sqlite3: %s", strerror(errno));
         g_status_err = 1;
@@ -286,6 +291,13 @@ static int sqlite_run(const char *sql, int with_header) {
     }
     g_raw[g_raw_len] = 0;
     pclose(p);
+    /* Echo first 200 chars of output to serial — invaluable for
+     * diagnosing "0 tables" / mystery empty results when the FS or
+     * the shell ate something. */
+    int show = g_raw_len < 200 ? g_raw_len : 200;
+    oxlog( "oxsqliteview: got %d bytes: \"%.*s\"%s\n",
+            g_raw_len, show, g_raw,
+            g_raw_len > show ? "..." : "");
     return 0;
 }
 
@@ -548,8 +560,6 @@ static void render(void) {
     ox_draw_text(g_win, RUN_X + (RUN_W - 6 * CHAR_W) / 2,
                  RUN_Y + 8, "Run F5", COL_RUN_BTN_FG);
 
-    if (g_fp_active) ox_filepicker_draw(g_win, &g_fp);
-
     /* Left panel — table list. */
     ox_draw_rect(g_win, 0, BODY_Y, LEFT_W, WIN_H - BODY_Y - STATUS_H,
                  COL_LEFT_BG);
@@ -661,6 +671,12 @@ static void render(void) {
     ox_draw_text(g_win, 8, WIN_H - 12, g_status,
                  g_status_err ? COL_STATUS_ERR : COL_STATUS_FG);
 
+    /* File picker overlay — drawn LAST so it sits on top of every
+     * other surface. Must come after the status bar (the dialog is
+     * smaller and centered, but moving it earlier let the body
+     * overdraw it and the user sees nothing). */
+    if (g_fp_active) ox_filepicker_draw(g_win, &g_fp);
+
     ox_present(g_win);
 }
 
@@ -734,10 +750,13 @@ int main(int argc, char **argv) {
             if (g_fp.result == OX_DLG_CHOSEN) {
                 size_t L = strlen(g_fp.chosen);
                 if (L >= sizeof(g_db)) L = sizeof(g_db) - 1;
+                /* Order matters: clear the active flag BEFORE reopen
+                 * (which itself renders) so the modal doesn't draw
+                 * its already-decided state over the new content. */
+                g_fp_active = 0;
                 memcpy(g_db, g_fp.chosen, L);
                 g_db[L] = 0;
                 g_db_cur = (int)L;
-                g_fp_active = 0;
                 reopen_db();
                 render();
                 continue;

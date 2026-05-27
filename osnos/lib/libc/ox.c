@@ -223,7 +223,10 @@ static long send_and_wait_resp(ipc_msg_t *req, char *resp_data, size_t cap) {
         }
         if (errno != EAGAIN) return -1;
         struct pollfd pfd = { -1, POLL_IPC_PENDING, 0 };
-        poll(&pfd, 1, 1000);
+        /* 100 ms cap — long enough that we sleep, short enough that
+         * any missed wake hook from oxsrv shows up as a ~10 Hz hit
+         * instead of an absurd 1-second hang. */
+        poll(&pfd, 1, 100);
     }
 }
 
@@ -489,6 +492,6 @@ int ox_wait_event(ox_event_t *out) {
         pfd.fd = -1;
         pfd.events = POLL_IPC_PENDING;
         pfd.revents = 0;
-        poll(&pfd, 1, 1000);
+        poll(&pfd, 1, 100);
     }
 }

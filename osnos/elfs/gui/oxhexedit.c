@@ -261,6 +261,7 @@ int main(int argc, char **argv) {
         memcpy(g_path, argv[1], L);
         g_path[L] = 0;
     }
+    ox_log("oxhexedit: starting\n");
     if (ox_init() < 0) return 1;
     char title[80];
     snprintf(title, sizeof(title), "HexEdit \xb7 %s", g_path);

@@ -372,6 +372,7 @@ static int hit_apply(int mx, int my) {
 /* ---------------- main --------------------------------------------- */
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
+    ox_log("oxsettings: starting\n");
     if (ox_init() < 0) return 1;
     g_win = ox_window_create(WIN_W, WIN_H, "Settings");
     if (g_win < 0) return 1;
