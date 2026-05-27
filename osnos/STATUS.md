@@ -279,7 +279,7 @@ y bugs notables encontrados.
 
 - **Kernel ELF**: ~1.8 MB stripped (`build/kernel`)
 - **sd.img**: **128 MiB** FAT16 (4 KiB clusters), **115 ELFs en `/bin/`** + sysroot completo en `/lib/` (libc.a + crt + libtcc1.a + **libc.so + ld-musl-x86_64.so.1**) + `/usr/include/`. Bump 64→128 MiB acomoda NetSurf libs (~6 MB de `.a`s) + Duktape (`/bin/oxjs` ~600 KB) + lighttpd (1.85 MB) + sqlite3 (5 MB) + busybox 1.45 MB.
-- **Ox apps (15)**: `oxnotepad oxcalc oxterm oxfiles oxtop oxsettings oxhexedit oxbrowser oxsqliteview oxlog oxmem oxipc oxnet oxnetsurf oxjs` cableadas en menu BeOS-style.
+- **Ox apps (15)**: `oxnotepad oxcalc oxterm oxfiles oxtop oxsettings oxhexedit oxbrowser oxsqliteview oxlog oxmem oxipc oxnet oxnetsurf oxjs` cableadas en menu BeOS-style. **+14 JS apps**: `hello clock paint sysinfo weather notes db_demo fs_explorer calc colors bench lab snake quadratic` accesibles desde el menu como `JS: ...` (cargados por oxjs desde `/home/apps/*.js`).
 - **NetSurf libs (.a)**: libwapcaplet 21 KB + libparserutils 384 KB + libnsutils 19 KB + libnslog 198 KB + libhubbub 1.2 MB + libdom 4.1 MB + BearSSL ~600 KB + liboxshim 260 KB. Group total `--start-group` ~7 MB.
 - **ISO bootable**: ~22 MB (`build/osnos-x86_64.iso`)
 - **Memoria total esperada**: 2 GiB de RAM (`-m 2G` en QEMU)
@@ -486,11 +486,28 @@ Tres bugs encadenados rompían el resolver de musl, más SOCK_RAW que no existí
 - ❌ Forms básicos: `<input>` + `<form>` parse → submit POST.
 - ❌ Back/forward history + bookmarks (mismo patrón que oxbrowser).
 
-### FASE 12.6 — ox.fs / ox.http / ox.sqlite JS bindings (pendiente)
-- ❌ `ox.fs.{readFile, writeFile, listDir, stat}` para que apps JS lean/escriban a `/home`.
-- ❌ `ox.http.get(url, cb)` async via BearSSL + connect-retry (mismo backend que oxbrowser).
-- ❌ `ox.sqlite.open(path) → db; db.exec(sql) → rows[]` linked-in via libsqlite3.a.
-- Esto convierte a oxjs en runtime para "apps reales" sin compilar TCC.
+### FASE 12.6 — oxjs API surface masivamente expandida — ✅ **CERRADA**
+**Antes**: 9 bindings (`window/clear/rect/text/present/onPaint/onKey/onClick/onTick`). **Ahora**: ~70 bindings agrupados en 12 sub-módulos, todo desde un único ELF mini-libc-linked de ~2.9 MB.
+
+- ✅ **`ox.fs`** (12 fn): `readFile/writeFile/appendFile/listDir/exists/stat/mkdir/unlink/rmdir/rename/chdir/cwd`. Devuelve null o false en falla, strings/objects en éxito.
+- ✅ **`ox.os`** (10 fn): `exec` (popen→string), `system` (rc), `exit`, `getpid`, `getenv`, `setenv`, `sleep`, `usleep`, `hostname` (lee `/etc/hostname`), `argv`.
+- ✅ **`ox.http`** (2 fn): `get(url)` / `post(url, body, contentType?)` → `{status, body, headers}`. HTTP/1.0 puro vía `socket+connect+read`. mini-libc connect tiene retry built-in; el `read` se hace con backoff EAGAIN inline. JSON.parse del body funciona out of the box (Duktape global).
+- ✅ **`ox.net`** (7 fn): `tcpConnect(host, port)`, `tcpListen(port)`, `accept(fd)`, `send(fd, data)`, `recv(fd, max?)` con backoff EAGAIN, `close(fd)`, `udpSend(host, port, data)`. Apps pueden hacer servers TCP o clientes a mano.
+- ✅ **`ox.draw` extras en ox.*** : `line(x1,y1,x2,y2,col)` (Bresenham), `circle(cx,cy,r,col)` (filled mid-point), `pixel(x,y,col)`, `frame(x,y,w,h,col,thickness?)`.
+- ✅ **`ox.color`**: `rgb(r,g,b) → "#rrggbb"`, `hex(r,g,b) → int 0xRRGGBB`.
+- ✅ **`ox.sys`** (4 fn): `sysread(path)`, `meminfo()`, `uptime()`, `tasks()` — para construir monitors en JS.
+- ✅ **`ox.time`** (4 fn): `now()` (ms con frac), `epoch()`, `date()` (`"YYYY-MM-DD HH:MM:SS"`), `format(epoch, fmt)` (strftime).
+- ✅ **`ox.clipboard`** (2 fn): `set(text)` / `get()` — pasa por el clipboard global del Ox WM.
+- ✅ **`ox.log`** (3 fn): `info/warn/error` — prefijo categorizado a `/dev/ttyS0`.
+- ✅ **`ox.syscall(num, ...args)`** — invoca syscall arbitrario; strings se pasan por puntero, números por valor. Constantes en `ox.syscall.{READ,WRITE,OPEN,...}` (30+ Linux x86_64 codes).
+- ✅ **`ox.sqlite`** (2 fn): `exec(db, sql)` / `query(db, sql)` — popen-out a `/bin/sqlite3 -separator '\t'` y split por tab. No requiere linkear libsqlite3 contra oxjs.
+- ✅ **`ox.ui`** (2 fn): `msgbox(title, text)` y `prompt(title, text)` — modales sincrónicos que dibujan panel BeOS-style sobre la ventana actual y bloquean en su propio event loop hasta OK/Enter/Esc.
+- ✅ **`ox` core ampliado**: `title(str)`, `size() → {w,h}`, `onMouse(ev)` que recibe `{x, y, buttons, kind, wheel}` (más rico que onClick).
+- ✅ **Sample apps** en `res/apps/` → `/home/apps/`: `hello`, `clock` (digital+analog), `paint` (drag, palette, save log), `sysinfo` (live `/sys/` monitor), `weather` (HTTP+JSON), `notes` (sticky notes con prompt + JSON storage), `db_demo` (SQL grid sobre /home/demo.db), `fs_explorer` (file browser con preview), `calc` (calculadora con eval), `colors` (HSV grid con clipboard copy), `bench` (perf bench multi-test), `lab` (sampler de todos los módulos), `snake`, `quadratic`. **14 apps**.
+- ✅ **Menu refactor en oxsrv**: action=3 ahora toma `path` como nombre JS bare (`"snake"` → `/home/apps/snake.js`). 14 entradas `JS: ...` cableadas al BeOS menu.
+- ✅ **`resolve_script` en oxjs**: argv[1] acepta abs path, bare name, "name.js", o integer N (Nth `.js` en /home/apps alfabético).
+
+**Sin pendientes funcionales — la única limitación actual es performance**: ox.http.get bloquea el event loop completo durante el fetch, no hay async/promises. Esto está OK para apps simples ("press reload"), pero un browser-like app necesitaría un mainloop integrado.
 
 ### FASE 15 — Drivers a ring 3 (item pendiente del FASE 11 original)
 - ❌ IRQ delegation por IPC desde kernel-side handlers

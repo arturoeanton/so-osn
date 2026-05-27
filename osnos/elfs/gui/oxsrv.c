@@ -249,8 +249,12 @@ static const menu_item_t g_menu[] = {
     { "Memory",      "/bin/oxmem",       0, "info"     },
     { "IPC",         "/bin/oxipc",       0, "info"     },
     { "Network",     "/bin/oxnet",       0, "browser"  },
-    { "JS: Snake",   "/bin/oxjs",        3, "paint"    },
-    { "JS: Quadratic","/bin/oxjs",       4, "calc"     },
+    /* action=3 → oxjs <path-field>. path field is the JS name (oxjs
+     * resolves bare names against /home/apps/<name>.js).
+     * Only "showcase" apps in the menu — the rest stay in /home/apps/
+     * and can be launched from the file browser by clicking them. */
+    { "JS: Notes",      "notes",      3, "notepad"  },
+    { "JS: Snake",      "snake",      3, "paint"    },
     { "Settings",    "/bin/oxsettings",  0, "settings" },
     { "Exit Ox",     0,                  2, "info"     },
     { "Reboot",      0,                  1, "info"     },
@@ -2205,10 +2209,8 @@ static void process_mouse_event(mouse_event_t ev) {
                     g_menu_visible = 0;
                     if (g_menu[idx].action == 1) do_reboot();
                     else if (g_menu[idx].action == 2) g_quit = 1;
-                    else if (g_menu[idx].action == 3)
-                        spawn_app_argv("/bin/oxjs", "/home/apps/snake.js");
-                    else if (g_menu[idx].action == 4)
-                        spawn_app_argv("/bin/oxjs", "/home/apps/quadratic.js");
+                    else if (g_menu[idx].action == 3 && g_menu[idx].path)
+                        spawn_app_argv("/bin/oxjs", g_menu[idx].path);
                     else if (g_menu[idx].path) spawn_app(g_menu[idx].path);
                     g_dirty = 1;
                     mark_menu_dirty();
