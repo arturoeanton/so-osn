@@ -74,3 +74,53 @@ int shm_unlink(const char *name) {
     if (r < 0) { errno = (int)(-r); return -1; }
     return 0;
 }
+
+/* --- connect() retry-on-EINPROGRESS override ------------------------
+ * osnos's kernel sys_connect is non-blocking: SYN sent → returns
+ * EINPROGRESS=115. Mini-libc wraps that with a retry+nanosleep loop;
+ * musl's connect does NOT retry (POSIX semantics expect the kernel to
+ * block). Provide a wrapping connect() so musl-linked code on osnos
+ * gets the same retry behaviour as mini-libc.
+ *
+ * We also retry on EAGAIN=11 (which has been observed empirically —
+ * the SYN_SENT slot transiently returns EAGAIN before flipping to
+ * ECONNREFUSED). 10 ms backoff, 500 attempts → 5 s total cap.
+ */
+#define OXSHIM_SYS_CONNECT          42
+#define OXSHIM_SYS_NANOSLEEP        35
+#define OXSHIM_EAGAIN               11
+#define OXSHIM_EINPROGRESS         115
+
+struct oxshim_timespec { long tv_sec; long tv_nsec; };
+
+static long oxshim_syscall2(long n, long a, long b) {
+    long ret;
+    register long r10 __asm__("r10") = 0;
+    register long r8  __asm__("r8")  = 0;
+    register long r9  __asm__("r9")  = 0;
+    __asm__ volatile (
+        "syscall"
+        : "=a"(ret)
+        : "0"(n), "D"(a), "S"(b),
+          "r"(r10), "r"(r8), "r"(r9)
+        : "rcx", "r11", "memory"
+    );
+    return ret;
+}
+
+int connect(int fd, const void *addr, unsigned int len) {
+    for (int i = 0; i < 500; i++) {
+        long r = oxshim_syscall3(OXSHIM_SYS_CONNECT, (long)fd,
+                                  (long)addr, (long)len);
+        if (r == 0) return 0;
+        long e = -r;
+        if (e != OXSHIM_EINPROGRESS && e != OXSHIM_EAGAIN) {
+            errno = (int)e;
+            return -1;
+        }
+        struct oxshim_timespec t = { 0, 10L * 1000L * 1000L };
+        oxshim_syscall2(OXSHIM_SYS_NANOSLEEP, (long)&t, 0);
+    }
+    errno = OXSHIM_EINPROGRESS;
+    return -1;
+}
