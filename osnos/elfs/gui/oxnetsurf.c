@@ -42,6 +42,24 @@
 /* BearSSL for HTTPS (vendored same as oxbrowser). */
 #include "bearssl.h"
 
+/* --- blocking_read: retry on EAGAIN with backoff.
+ * osnos's kernel sys_read on AF_INET returns EAGAIN immediately when
+ * no data has arrived yet on an ESTABLISHED TCP socket. Mini-libc has
+ * a retry loop (lib/libc/inet.c:177); musl does not — read returns -1
+ * with errno=EAGAIN and we'd break the fetch loop with got=0.
+ * 10 ms backoff × 1500 attempts = 15 s cap. Returns ssize_t same as
+ * read(2): -1 on real error, 0 on EOF, >0 bytes. */
+static ssize_t blocking_read(int fd, void *buf, size_t cap) {
+    for (int i = 0; i < 1500; i++) {
+        ssize_t r = read(fd, buf, cap);
+        if (r >= 0) return r;
+        if (errno != EAGAIN) return -1;
+        struct timespec t = { 0, 10L * 1000L * 1000L };
+        nanosleep(&t, NULL);
+    }
+    return -1;
+}
+
 /* --- Logging direct to /dev/ttyS0 (musl stderr doesn't reach serial
  * for spawned-by-oxsrv children). --- */
 static int  g_log_fd = -1;
@@ -190,14 +208,15 @@ static int http_fetch(const char *host, int port, const char *path,
     if (write(s, req, rlen) != rlen) { close(s); return -1; }
     size_t got = 0;
     while (got < cap - 1) {
-        ssize_t n = read(s, resp + got, cap - 1 - got);
+        ssize_t n = blocking_read(s, resp + got, cap - 1 - got);
         if (n <= 0) break;
         got += n;
     }
     close(s);
     resp[got] = 0;
     *out_len = got;
-    return 0;
+    nslog("oxnetsurf: http_fetch got %zu bytes\n", got);
+    return got > 0 ? 0 : -1;
 }
 
 /* --- HTTPS fetch using BearSSL (no-anchor X.509). Adapted from oxbrowser. --- */
@@ -301,7 +320,7 @@ static int https_fetch(const char *host, int port, const char *path,
         if (st & BR_SSL_RECVREC) {
             size_t avail;
             unsigned char *p = br_ssl_engine_recvrec_buf(&sc.eng, &avail);
-            ssize_t r = read(s, p, avail);
+            ssize_t r = blocking_read(s, p, avail);
             if (r <= 0) { br_ssl_engine_close(&sc.eng); continue; }
             br_ssl_engine_recvrec_ack(&sc.eng, r);
             continue;
