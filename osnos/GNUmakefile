@@ -206,6 +206,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/gui/oxipc.c \
     elfs/gui/oxnet.c \
     elfs/gui/oxjs.c \
+    elfs/gui/oxnetsurf.c \
     elfs/tools/uxsh.c
 
 # musl-linked ELFs (vendor/musl). Declared early so USER_ELF_LIST sees it.

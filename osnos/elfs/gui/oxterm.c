@@ -140,9 +140,16 @@ static void grid_putc(char c) {
         return;
     }
     if (c == '\b') {
+        /* Backspace per VT100/xterm: cursor moves one column left,
+         * the cell content is NOT erased. Erasure is the caller's
+         * responsibility — kernel line discipline ECHOE sends the
+         * standard "\b \b" three-byte trio, and shell line editors
+         * combine \b with \x1b[K or \x1b[J to repaint. If we cleared
+         * the cell here, ash's history redraw (which sends \b's to
+         * move the cursor over the previous line before printing the
+         * new one) would silently destroy adjacent characters. */
         if (g_cx > 0) g_cx--;
         else if (g_cy > 0) { g_cy--; g_cx = COLS - 1; }
-        grid_clear_cell(&g_grid[g_cy][g_cx]);
         return;
     }
     if (c == 0x07) return;                /* bell */
@@ -183,15 +190,35 @@ static void csi_dispatch(char final) {
     case 'C': g_cx += (p0 ? p0 : 1); if (g_cx >= COLS) g_cx = COLS - 1; break;
     case 'D': g_cx -= (p0 ? p0 : 1); if (g_cx < 0) g_cx = 0; break;
     case 'J': {
-        /* Erase in display. 0/none = below, 1 = above, 2 = all. */
+        /* Erase in display:
+         *   0 (default) = from cursor (INCLUSIVE) to end of display
+         *   1           = from start of display to cursor (inclusive)
+         *   2           = entire display
+         *
+         * Crucially, mode 0 must NOT erase characters to the LEFT of
+         * the cursor on the current row — only from g_cx onwards. We
+         * used to clear the cursor row in its entirety, which wiped
+         * the text busybox ash just printed during a history redraw
+         * (`\r <prompt+cmd> \x1b[J`). */
         int mode = (g_n_params > 0) ? p0 : 0;
-        int from_r = 0, to_r = ROWS;
-        if (mode == 0) { from_r = g_cy; }
-        else if (mode == 1) { to_r = g_cy + 1; }
-        for (int r = from_r; r < to_r; r++)
-            for (int c = 0; c < COLS; c++)
-                grid_clear_cell(&g_grid[r][c]);
-        if (mode == 2) { g_cx = 0; g_cy = 0; }
+        if (mode == 0) {
+            for (int c = g_cx; c < COLS; c++)
+                grid_clear_cell(&g_grid[g_cy][c]);
+            for (int r = g_cy + 1; r < ROWS; r++)
+                for (int c = 0; c < COLS; c++)
+                    grid_clear_cell(&g_grid[r][c]);
+        } else if (mode == 1) {
+            for (int r = 0; r < g_cy; r++)
+                for (int c = 0; c < COLS; c++)
+                    grid_clear_cell(&g_grid[r][c]);
+            for (int c = 0; c <= g_cx && c < COLS; c++)
+                grid_clear_cell(&g_grid[g_cy][c]);
+        } else if (mode == 2) {
+            for (int r = 0; r < ROWS; r++)
+                for (int c = 0; c < COLS; c++)
+                    grid_clear_cell(&g_grid[r][c]);
+            g_cx = 0; g_cy = 0;
+        }
         break;
     }
     case 'K': {

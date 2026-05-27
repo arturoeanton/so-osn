@@ -3444,9 +3444,13 @@ int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
             return 0;
         }
         case TTY_TIOCGWINSZ: {
-            /* PTY pair doesn't track winsize yet — return 0x0. A
-             * future TIOCSWINSZ + SIGWINCH would belong here. */
-            struct osnos_winsize ws = { 0, 0, 0, 0 };
+            /* Default to 80x25 (matches oxterm's grid). Without this,
+             * shells that ask the kernel for their winsize see 0x0
+             * and either disable line-editing (no arrow-key history)
+             * or compute redraws against a zero-width line — both
+             * misbehave. Future TIOCSWINSZ from oxterm (on resize)
+             * would override these per-pty. */
+            struct osnos_winsize ws = { 25, 80, 0, 0 };
             if (copy_to_user(arg, &ws, sizeof(ws)) != OSNOS_OK)
                 return err(OSNOS_EFAULT);
             return 0;
