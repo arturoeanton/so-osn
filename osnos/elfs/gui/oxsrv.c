@@ -240,6 +240,7 @@ static const menu_item_t g_menu[] = {
     { "Notepad",     "/bin/oxnotepad",   0, "notepad"  },
     { "HexEdit",     "/bin/oxhexedit",   0, "hex"      },
     { "Browser",     "/bin/oxbrowser",   0, "browser"  },
+    { "NetSurf",     "/bin/oxnetsurf",   0, "netsurf"  },
     { "SQLite",      "/bin/oxsqliteview",0, "sqlite"   },
     { "Calculator",  "/bin/oxcalc",      0, "calc"     },
     { "Terminal",    "/bin/oxterm",      0, "term"     },

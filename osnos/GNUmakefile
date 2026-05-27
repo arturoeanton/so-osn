@@ -1293,6 +1293,86 @@ $(NS_HUBBUB_A): $(NS_HUBBUB_OBJS)
 	rm -f $@
 	$(AR) rcs $@ $^
 
+# --- Stage 3: libdom (33K LOC, 94 .c). DOM tree + the hubbub
+# binding. We exclude bindings/xml (libxml2 + expat) since we have
+# neither — only hubbub feeds the DOM. -DBUILD_DOM_NO_XML=1 isn't a
+# real define; we just don't compile those .c files.
+NS_DOM_SRCS := $(shell find $(NS_DOM_DIR)/src -name '*.c') \
+               $(NS_DOM_DIR)/bindings/hubbub/parser.c
+NS_DOM_OBJS := $(patsubst $(NS_DOM_DIR)/%.c,\
+                            $(BUILD)/$(NS_DOM_DIR)/%.c.o,\
+                            $(NS_DOM_SRCS))
+
+$(NS_DOM_OBJS): $(BUILD)/$(NS_DOM_DIR)/%.c.o: $(NS_DOM_DIR)/%.c
+	mkdir -p "$(dir $@)"
+	$(CC) -I $(NS_DOM_DIR)/src -I $(NS_DOM_DIR)/bindings/hubbub \
+	    $(NETSURF_CFLAGS) -MMD -MP -c $< -o $@
+
+$(NS_DOM_A): $(NS_DOM_OBJS)
+	mkdir -p "$(dir $@)"
+	rm -f $@
+	$(AR) rcs $@ $^
+
+# --- Ox client shim against musl ---
+# The mini-libc version of ox.c / ox_font.c / etc. is in libosnos_c
+# and would pull mini-libc into oxnetsurf if we linked it directly.
+# Re-compile those source files against MUSL_CFLAGS into a separate
+# archive. They don't depend on mini-libc internals — only POSIX
+# (mmap, open, write, poll) which musl provides.
+NS_OX_SHIM_LIBC_SRCS := lib/libc/ox.c lib/libc/ox_font.c lib/libc/ox_icons.c \
+                        lib/libc/ox_text.c lib/libc/ox_ui.c lib/libc/ox_log.c
+NS_OX_SHIM_OBJS := $(patsubst lib/libc/%.c,\
+                                $(BUILD)/netsurf-ox-shim/%.c.o,\
+                                $(NS_OX_SHIM_LIBC_SRCS)) \
+                   $(BUILD)/netsurf-ox-shim/errno_shim.c.o
+NS_OX_SHIM_A    := $(BUILD)/netsurf-ox-shim/liboxshim.a
+
+$(BUILD)/netsurf-ox-shim/errno_shim.c.o: res/netsurf-shim/errno_shim.c
+	mkdir -p "$(dir $@)"
+	$(CC) $(MUSL_CFLAGS) -c $< -o $@
+
+$(patsubst lib/libc/%.c,$(BUILD)/netsurf-ox-shim/%.c.o,$(NS_OX_SHIM_LIBC_SRCS)): \
+        $(BUILD)/netsurf-ox-shim/%.c.o: lib/libc/%.c
+	mkdir -p "$(dir $@)"
+	$(CC) $(MUSL_CFLAGS) -w -I lib/libc/include -I src/include \
+	    -I vendor/stb -c $< -o $@
+
+$(NS_OX_SHIM_A): $(NS_OX_SHIM_OBJS)
+	mkdir -p "$(dir $@)"
+	rm -f $@
+	$(AR) rcs $@ $^
+
+# --- oxnetsurf ELF: musl-linked HTML browser using libhubbub +
+# libdom + BearSSL + the Ox shim. Skips libcss / netsurf-core for
+# v1 (no real layout — DOM walk to text + clickable links). ---
+NETSURF_V1_LIBS := $(NS_DOM_A) $(NS_HUBBUB_A) $(NS_PARSERUTILS_A) \
+                   $(NS_NSLOG_A) $(NS_NSUTILS_A) $(NS_WAPCAPLET_A)
+
+$(BUILD)/elfs/gui/oxnetsurf.elf: \
+        elfs/gui/oxnetsurf.c elfs/musl.lds \
+        $(MUSL_LIB) $(MUSL_CRT1) $(MUSL_CRTI) $(MUSL_CRTN) \
+        $(NETSURF_V1_LIBS) $(BEARSSL_A) $(NS_OX_SHIM_A)
+	mkdir -p "$(dir $@)"
+	$(CC) $(MUSL_CFLAGS) -w \
+	    -I $(NS_HUBBUB_DIR)/include \
+	    -I $(NS_DOM_DIR)/include \
+	    -I $(NS_DOM_DIR) \
+	    -I $(NS_PARSERUTILS_DIR)/include \
+	    -I $(NS_WAPCAPLET_DIR)/include \
+	    -I $(NS_NSUTILS_DIR)/include \
+	    -I $(NS_NSLOG_DIR)/include \
+	    -I $(BEARSSL_INC) \
+	    -I lib/libc/include \
+	    -I src/include \
+	    -c $< -o $@.tmp.o
+	$(LD) $(MUSL_LDFLAGS) -T elfs/musl.lds \
+	    $(MUSL_CRT1) $(MUSL_CRTI) $@.tmp.o \
+	    --start-group \
+	      $(NETSURF_V1_LIBS) $(BEARSSL_A) $(NS_OX_SHIM_A) $(MUSL_LIB) \
+	    --end-group \
+	    $(MUSL_CRTN) -o $@
+	rm $@.tmp.o
+
 # ------------------------------------------------------------------
 # TODO(stage 1): per-library .a build rules.
 #

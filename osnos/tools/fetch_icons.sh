@@ -23,6 +23,7 @@ FORCE=0
 MAPPING=(
     "notepad   accessories-text-editor.png"
     "browser   internet-web-browser.png"
+    "netsurf   org.gnome.Epiphany.png"
     "sqlite    applications-office.png"
     "hex       accessories-character-map.png"
     "files     system-file-manager.png"
