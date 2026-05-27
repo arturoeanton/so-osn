@@ -377,20 +377,13 @@ static void spawn_child(void) {
     int fl = fcntl(g_master, F_GETFL, 0);
     fcntl(g_master, F_SETFL, fl | O_NONBLOCK);
 
-    /* Put the PTY in raw mode so the kernel line discipline doesn't
-     * echo arrow keys / control sequences back to us — without this,
-     * sending "\033[A" to the slave bounces straight back via ECHO
-     * and our CSI parser interprets it as "cursor up" and visibly
-     * moves the grid cursor instead of letting the shell handle it
-     * as history navigation. The shell can re-cook the termios as
-     * needed; we just want the BASELINE to be raw + noecho. */
-    struct termios t;
-    if (tcgetattr(g_master, &t) == 0) {
-        t.c_lflag &= ~(ICANON | ECHO | ECHOE | ECHONL | ISIG);
-        t.c_iflag &= ~(INLCR | ICRNL | IXON);
-        t.c_oflag &= ~OPOST;
-        tcsetattr(g_master, TCSANOW, &t);
-    }
+    /* Leave the PTY at the default ICANON+ECHO termios so that the
+     * uxsh / minishell fallbacks (which don't run their own line
+     * editor) still echo and erase like a normal terminal. ash
+     * (busybox sh) reconfigures the termios itself on startup
+     * — its FEATURE_EDITING line editor wants raw mode + manual
+     * echo + arrow-key interpretation, all of which it sets via
+     * tcsetattr after seeing TERM=xterm. */
 
     char slave[32];
     if (ptsname_r(g_master, slave, sizeof(slave)) < 0) return;
@@ -444,6 +437,15 @@ int main(int argc, char **argv) {
         char buf[1024];
         ssize_t n;
         while ((n = read(g_master, buf, sizeof(buf))) > 0) {
+            /* One-line trace of the first 60 bytes the shell wrote
+             * back. Replaces non-printables with `.` so the log
+             * stays readable. */
+            char dbg[64];
+            int show = n < 60 ? (int)n : 60;
+            for (int j = 0; j < show; j++)
+                dbg[j] = (buf[j] >= 0x20 && buf[j] < 0x7f) ? buf[j] : '.';
+            dbg[show] = 0;
+            ox_log("oxterm: pty→app %zd bytes: \"%s\"\n", n, dbg);
             for (ssize_t i = 0; i < n; i++) feed_byte((unsigned char)buf[i]);
             g_dirty = 1;
         }
@@ -513,16 +515,25 @@ int main(int argc, char **argv) {
                 if (ev.ascii) {
                     char c = (char)ev.ascii;
                     if (c == '\r') c = '\n';
+                    ox_log("oxterm: app→pty 0x%02x ('%c')\n",
+                           (unsigned)(unsigned char)c,
+                           (c >= 0x20 && c < 0x7f) ? c : '.');
                     write(g_master, &c, 1);
                 } else if (ev.keycode == OX_KEY_ENTER) {
                     char c = '\n';
+                    ox_log("oxterm: app→pty ENTER\n");
                     write(g_master, &c, 1);
                 } else if (ev.keycode == OX_KEY_TAB) {
                     char c = '\t';
+                    ox_log("oxterm: app→pty TAB\n");
                     write(g_master, &c, 1);
                 } else if (ev.keycode == OX_KEY_ESC) {
                     char c = 0x1b;
+                    ox_log("oxterm: app→pty ESC\n");
                     write(g_master, &c, 1);
+                } else {
+                    ox_log("oxterm: ignored key ascii=0 code=%d\n",
+                           ev.keycode);
                 }
             }
         }

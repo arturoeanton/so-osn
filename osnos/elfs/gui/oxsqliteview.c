@@ -262,14 +262,20 @@ static int sqlite_run(const char *sql, int with_header) {
     fputs(".exit\n", qf);
     fclose(qf);
 
+    /* Use sqlite3's own `.read FILE` dot-command instead of a shell
+     * `< redir` — the redirect path through /bin/sh -c was returning
+     * zero bytes (popen succeeds, child runs, but the SQL never
+     * reaches sqlite3's stdin). `.read` bypasses the shell entirely
+     * by handing the file path directly to sqlite3, which then opens
+     * and processes it in-process. */
     char cmd[512];
     if (with_header) {
         snprintf(cmd, sizeof(cmd),
-            "sqlite3 -header -separator '|' '%s' < %s 2>&1",
+            "sqlite3 -batch -header -separator '|' '%s' '.read %s' 2>&1",
             g_db, tmp);
     } else {
         snprintf(cmd, sizeof(cmd),
-            "sqlite3 -separator '|' '%s' < %s 2>&1",
+            "sqlite3 -batch -separator '|' '%s' '.read %s' 2>&1",
             g_db, tmp);
     }
     oxlog( "oxsqliteview: cmd=%s\n", cmd);

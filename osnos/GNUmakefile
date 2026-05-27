@@ -282,11 +282,11 @@ QEMUFLAGS ?= -m 2G
 # expects.
 # ---------------------------------------------------------------------------
 SD_IMG       := sd.img
-# 32 MiB now (FASE 12 — wallpapers + GUI ELFs push past the old 16 MiB
-# limit). mformat with -c 8 (4 KiB clusters) keeps the cluster count
-# under 65525 so the volume stays FAT16, which is what our parser
-# understands.
-SD_SIZE_MB   ?= 64
+# 128 MiB now — 64 MiB filled silently (mcopy doesn't error on full
+# disk!) breaking everything that needs /bin/sh (popen, oxterm shell,
+# oxsqliteview sqlite3). FAT16 with -c 8 (4 KiB clusters) tops out
+# at 65524 clusters × 4 KiB = 256 MiB so 128 MiB stays well under.
+SD_SIZE_MB   ?= 128
 SD_TMP       := $(BUILD)/sd_seed
 SD_README_TXT = hola desde el disco
 SD_HELLO_TXT  = fat works!
@@ -467,6 +467,18 @@ $(SD_IMG): $(USER_ELF_LIST) $(LIBC_A) $(LIBC_CRT0) $$(LIBTCC1_A) $$(CRTI_O) $$(C
 	    mcopy -i $@ -o vendor/busybox/busybox_unstripped ::/bin/sh; \
 	    echo "  COPY    /bin/sh   (busybox dispatch)"; \
 	fi
+	@# Sanity check: critical binaries must be present on the FAT
+	@# image. mcopy silently truncates / fails when the volume is
+	@# full, leaving sd.img superficially OK but with /bin/sh and
+	@# /bin/sqlite3 missing — which breaks every popen() in osnos
+	@# and turns "ash" into "uxsh" in oxterm. Loud check up-front.
+	@for crit in sh busybox sqlite3 cat ls; do \
+	    if ! mdir -i $@ "::/bin/$$crit" >/dev/null 2>&1; then \
+	        echo "error: /bin/$$crit missing from $@ — FAT16 full?" >&2; \
+	        echo "       Bump SD_SIZE_MB in GNUmakefile." >&2; \
+	        exit 1; \
+	    fi; \
+	done
 	@# /etc — minimal passwd + group para que BusyBox getpwuid etc.
 	@# anden. Sin esto `ls -l` y otros applets se cuelgan en lookups.
 	mmd -i $@ ::/etc 2>/dev/null || true
