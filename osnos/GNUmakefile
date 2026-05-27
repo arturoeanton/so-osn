@@ -1119,7 +1119,9 @@ ifeq ($(OXNETSURF_ENABLED),1)
 # set; we don't own this code.
 NETSURF_CFLAGS := $(MUSL_CFLAGS) -w \
                   -I $(NS_WAPCAPLET_DIR)/include \
+                  -I $(NS_WAPCAPLET_DIR)/src \
                   -I $(NS_PARSERUTILS_DIR)/include \
+                  -I $(NS_PARSERUTILS_DIR)/src \
                   -I $(NS_NSUTILS_DIR)/include \
                   -I $(NS_HUBBUB_DIR)/include \
                   -I $(NS_DOM_DIR)/include \
@@ -1128,6 +1130,168 @@ NETSURF_CFLAGS := $(MUSL_CFLAGS) -w \
                   -I $(NS_CORE_DIR)/include \
                   -I $(NS_CORE_DIR) \
                   -DBUILD_TARGET_OSNOS=1
+
+# --- Stage 1a: libwapcaplet (string interning, 1 .c, ~290 LOC) ---
+# No NetSurf deps, no external deps beyond libc. Compiles in <1 sec.
+# Static pattern rule (with explicit target list) instead of a bare
+# pattern rule, same fix as LIBC_C_OBJS — the generic kernel
+# `$(BUILD)/%.c.o: %.c` higher up in the file would otherwise win the
+# pattern match and compile NetSurf files with kernel CFLAGS.
+NS_WAPCAPLET_SRCS := $(shell find $(NS_WAPCAPLET_DIR)/src -name '*.c')
+NS_WAPCAPLET_OBJS := $(patsubst $(NS_WAPCAPLET_DIR)/%.c,\
+                                  $(BUILD)/$(NS_WAPCAPLET_DIR)/%.c.o,\
+                                  $(NS_WAPCAPLET_SRCS))
+
+$(NS_WAPCAPLET_OBJS): $(BUILD)/$(NS_WAPCAPLET_DIR)/%.c.o: $(NS_WAPCAPLET_DIR)/%.c
+	mkdir -p "$(dir $@)"
+	$(CC) $(NETSURF_CFLAGS) -MMD -MP -c $< -o $@
+
+$(NS_WAPCAPLET_A): $(NS_WAPCAPLET_OBJS)
+	mkdir -p "$(dir $@)"
+	rm -f $@
+	$(AR) rcs $@ $^
+
+# --- Stage 1b: libparserutils (charset filters, 15 .c, ~5.4K LOC) ---
+# Depends on iconv (musl ships it). The .c list excludes nothing —
+# all files compile cleanly with musl's iconv.h.
+#
+# Pre-generated table src/charset/aliases.inc must exist on disk: it
+# is generated from build/Aliases by build/make-aliases.pl. We don't
+# track aliases.inc in git (it's autogen output) but the build rule
+# emits it on demand if perl is available.
+$(NS_PARSERUTILS_DIR)/src/charset/aliases.inc: \
+        $(NS_PARSERUTILS_DIR)/build/Aliases \
+        $(NS_PARSERUTILS_DIR)/build/make-aliases.pl
+	cd $(NS_PARSERUTILS_DIR) && perl build/make-aliases.pl
+
+NS_PARSERUTILS_SRCS := $(shell find $(NS_PARSERUTILS_DIR)/src -name '*.c')
+NS_PARSERUTILS_OBJS := $(patsubst $(NS_PARSERUTILS_DIR)/%.c,\
+                                    $(BUILD)/$(NS_PARSERUTILS_DIR)/%.c.o,\
+                                    $(NS_PARSERUTILS_SRCS))
+
+$(NS_PARSERUTILS_OBJS): $(BUILD)/$(NS_PARSERUTILS_DIR)/%.c.o: \
+        $(NS_PARSERUTILS_DIR)/%.c \
+        $(NS_PARSERUTILS_DIR)/src/charset/aliases.inc
+	mkdir -p "$(dir $@)"
+	$(CC) $(NETSURF_CFLAGS) -MMD -MP -c $< -o $@
+
+$(NS_PARSERUTILS_A): $(NS_PARSERUTILS_OBJS)
+	mkdir -p "$(dir $@)"
+	rm -f $@
+	$(AR) rcs $@ $^
+
+# --- Stage 2a: libnsutils (599 LOC). Tiny utility lib — base64,
+# time, unistd helpers. No NetSurf deps. ---
+NS_NSUTILS_SRCS := $(shell find $(NS_NSUTILS_DIR)/src -name '*.c')
+NS_NSUTILS_OBJS := $(patsubst $(NS_NSUTILS_DIR)/%.c,\
+                                $(BUILD)/$(NS_NSUTILS_DIR)/%.c.o,\
+                                $(NS_NSUTILS_SRCS))
+
+$(NS_NSUTILS_OBJS): $(BUILD)/$(NS_NSUTILS_DIR)/%.c.o: $(NS_NSUTILS_DIR)/%.c
+	mkdir -p "$(dir $@)"
+	$(CC) $(NETSURF_CFLAGS) -MMD -MP -c $< -o $@
+
+$(NS_NSUTILS_A): $(NS_NSUTILS_OBJS)
+	mkdir -p "$(dir $@)"
+	rm -f $@
+	$(AR) rcs $@ $^
+
+# --- Stage 2b: libnslog (596 LOC). The filter parser is generated
+# by bison/flex from src/filter-lexer.l + src/filter-parser.y. macOS
+# stock bison (2.3) is too old (libnslog uses bison-3+ syntax like
+# `%destructor`). We detect a brew-installed bison-3 and use it.
+NS_BISON := $(shell command -v /opt/homebrew/opt/bison/bin/bison \
+                              /usr/local/opt/bison/bin/bison 2>/dev/null \
+                    | head -1)
+NS_FLEX  := $(shell command -v flex)
+
+# Bison/flex prefix follows the upstream libnslog Makefile convention:
+# filename stem ("filter") + "_" — so the generated entry points are
+# filter_parse() and filter_lex(), which is what hand-written filter.c
+# in src/ expects to call. Anything else (e.g. nslog__filter_) gives
+# undefined references at link time.
+$(NS_NSLOG_DIR)/src/filter-parser.c $(NS_NSLOG_DIR)/src/filter-parser.h: \
+        $(NS_NSLOG_DIR)/src/filter-parser.y
+	@if [ -z "$(NS_BISON)" ]; then \
+	    echo "error: bison >= 3 not found. brew install bison." >&2; \
+	    exit 1; \
+	fi
+	cd $(NS_NSLOG_DIR) && $(NS_BISON) -d -t \
+	    --define=api.prefix={filter_} \
+	    -o src/filter-parser.c src/filter-parser.y
+
+$(NS_NSLOG_DIR)/src/filter-lexer.c $(NS_NSLOG_DIR)/src/filter-lexer.h: \
+        $(NS_NSLOG_DIR)/src/filter-lexer.l \
+        $(NS_NSLOG_DIR)/src/filter-parser.h
+	@if [ -z "$(NS_FLEX)" ]; then \
+	    echo "error: flex not found." >&2; \
+	    exit 1; \
+	fi
+	cd $(NS_NSLOG_DIR) && $(NS_FLEX) -P filter_ \
+	    --header-file=src/filter-lexer.h \
+	    -o src/filter-lexer.c src/filter-lexer.l
+
+NS_NSLOG_SRCS := $(NS_NSLOG_DIR)/src/core.c \
+                 $(NS_NSLOG_DIR)/src/filter.c \
+                 $(NS_NSLOG_DIR)/src/filter-parser.c \
+                 $(NS_NSLOG_DIR)/src/filter-lexer.c
+NS_NSLOG_OBJS := $(patsubst $(NS_NSLOG_DIR)/%.c,\
+                              $(BUILD)/$(NS_NSLOG_DIR)/%.c.o,\
+                              $(NS_NSLOG_SRCS))
+
+# filter.c #includes both filter-lexer.h and filter-parser.h, so the
+# bison/flex run must finish before any .o under libnslog/ compiles.
+# Declare the headers as order-only prereqs of every nslog .o.
+$(NS_NSLOG_OBJS): $(BUILD)/$(NS_NSLOG_DIR)/%.c.o: $(NS_NSLOG_DIR)/%.c \
+        | $(NS_NSLOG_DIR)/src/filter-lexer.h \
+          $(NS_NSLOG_DIR)/src/filter-parser.h
+	mkdir -p "$(dir $@)"
+	$(CC) $(NETSURF_CFLAGS) -I $(NS_NSLOG_DIR)/src -MMD -MP -c $< -o $@
+
+$(NS_NSLOG_A): $(NS_NSLOG_OBJS)
+	mkdir -p "$(dir $@)"
+	rm -f $@
+	$(AR) rcs $@ $^
+
+# --- Stage 2c: libhubbub (HTML5 tokeniser + tree-builder, 30 .c,
+# ~11.8K LOC). Depends on libparserutils + libwapcaplet.
+#
+# Two pre-build code-gen steps:
+#   1. src/tokeniser/entities.inc — HTML5 named entity table,
+#      generated by build/make-entities.pl from build/Entities.
+#   2. src/treebuilder/autogenerated-element-type.c — gperf hash
+#      lookup table for element names, generated from .gperf.
+NS_GPERF := $(shell command -v gperf)
+
+$(NS_HUBBUB_DIR)/src/tokeniser/entities.inc: \
+        $(NS_HUBBUB_DIR)/build/Entities \
+        $(NS_HUBBUB_DIR)/build/make-entities.pl
+	cd $(NS_HUBBUB_DIR) && perl build/make-entities.pl
+
+$(NS_HUBBUB_DIR)/src/treebuilder/autogenerated-element-type.c: \
+        $(NS_HUBBUB_DIR)/src/treebuilder/element-type.gperf
+	@if [ -z "$(NS_GPERF)" ]; then \
+	    echo "error: gperf not found." >&2; exit 1; fi
+	$(NS_GPERF) --output-file=$@.tmp $<
+	sed -e 's/^\(const struct element_type_map\)/static \1/' $@.tmp >$@
+	rm $@.tmp
+
+NS_HUBBUB_SRCS := $(shell find $(NS_HUBBUB_DIR)/src -name '*.c' \
+                         ! -name 'autogenerated-*')
+NS_HUBBUB_OBJS := $(patsubst $(NS_HUBBUB_DIR)/%.c,\
+                               $(BUILD)/$(NS_HUBBUB_DIR)/%.c.o,\
+                               $(NS_HUBBUB_SRCS))
+
+$(NS_HUBBUB_OBJS): $(BUILD)/$(NS_HUBBUB_DIR)/%.c.o: $(NS_HUBBUB_DIR)/%.c \
+        | $(NS_HUBBUB_DIR)/src/tokeniser/entities.inc \
+          $(NS_HUBBUB_DIR)/src/treebuilder/autogenerated-element-type.c
+	mkdir -p "$(dir $@)"
+	$(CC) -I $(NS_HUBBUB_DIR)/src $(NETSURF_CFLAGS) -MMD -MP -c $< -o $@
+
+$(NS_HUBBUB_A): $(NS_HUBBUB_OBJS)
+	mkdir -p "$(dir $@)"
+	rm -f $@
+	$(AR) rcs $@ $^
 
 # ------------------------------------------------------------------
 # TODO(stage 1): per-library .a build rules.
