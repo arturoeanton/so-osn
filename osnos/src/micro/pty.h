@@ -75,6 +75,15 @@ typedef struct pty_pair {
      * EOF semantics: only after slave_was_opened becomes true AND
      * slave_refs drops back to 0 do we report EOF on master_read. */
     bool                 slave_was_opened;
+
+    /* Foreground process group id on this PTY pair. Updated by
+     * tcsetpgrp(slave_fd, pgid) ioctl. Queried by tcgetpgrp(slave_fd).
+     * The kernel itself doesn't act on this (no SIGTTIN/TTOU enforcement
+     * here yet), but busybox ash's startup loop polls tcgetpgrp/getpgid
+     * and refuses to advance until they match — so we must reflect
+     * whatever the child set. Zero means "no fg pgid set" (treated as
+     * "matches the caller" by the GET path to keep ash happy). */
+    uint64_t             fg_pgid;
 } pty_pair_t;
 
 /* Boot-time pool init — zero all slots. Call once from kmain. */

@@ -94,6 +94,24 @@ typedef struct task {
     uint64_t pgid;
     uint64_t sid;
 
+    /* Controlling-tty bookkeeping.
+     *
+     *   has_ctty = 1 — task inherits a controlling terminal (the
+     *                  kernel /dev/tty backed by consrv). Default for
+     *                  every task created from kmain or fork()'d in
+     *                  the original session.
+     *   has_ctty = 0 — task is in a fresh session (post-setsid) with
+     *                  NO controlling terminal yet. POSIX requires
+     *                  open("/dev/tty") to fail with ENXIO until the
+     *                  task explicitly acquires one via TIOCSCTTY on
+     *                  a PTY slave. Without this, busybox ash inside
+     *                  oxterm calls open("/dev/tty"), gets the legacy
+     *                  /dev/tty (= shellsrv's console), tcgetpgrp on
+     *                  it returns the legacy `kernel_fg_pid` global,
+     *                  never matches ash's own getpgrp(), and ash
+     *                  loops on killpg(0,SIGTTIN) → default STOP. */
+    int      has_ctty;
+
     /*
      * Signal handling — sa_handler-only POSIX model.
      *

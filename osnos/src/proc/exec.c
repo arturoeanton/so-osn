@@ -846,6 +846,10 @@ static int64_t task_create_user_elf(
      * inheritance); see sys_fork. */
     t->pgid              = t->pid;
     t->sid               = t->pid;
+    /* New tasks created via proc_execve (sys_spawn / kmain bootstrap)
+     * inherit a controlling terminal by default — they're peers of
+     * the kernel TTY's session unless they explicitly call setsid(). */
+    t->has_ctty          = 1;
 
     /* Parent linkage: if there's a current user-mode caller (i.e.
      * proc_execve was invoked from sys_spawn / from a shell

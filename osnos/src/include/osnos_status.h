@@ -19,6 +19,7 @@ typedef enum {
     OSNOS_ESRCH          = 3,   /* no such process / target */
     OSNOS_EINTR          = 4,   /* interrupted system call */
     OSNOS_EIO            = 5,   /* i/o error */
+    OSNOS_ENXIO          = 6,   /* no such device / no ctty */
     OSNOS_E2BIG          = 7,   /* argument list too long */
     OSNOS_EBADF          = 9,   /* bad file descriptor */
     OSNOS_ECHILD         = 10,  /* no child processes (wait(2)) */

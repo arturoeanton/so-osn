@@ -14,6 +14,7 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -395,6 +396,16 @@ static void spawn_child(void) {
         if (s > 2) close(s);
         close(g_master);
         setsid();
+        /* Become the foreground process group on the slave PTY.
+         * Without this, busybox ash's interactive bootstrap loops on
+         *     while (tcgetpgrp(2) != getpgid(0))
+         *         kill(-getpgid(0), SIGTTIN);
+         * and SIGTTIN's default action stops the task — we'd see ash
+         * dispatch 3 times, print the banner, then STOP forever
+         * waiting for SIGCONT from a "parent shell" that doesn't
+         * exist (oxterm is a window manager, not a shell). */
+        int pgid = (int)getpid();
+        ioctl(0, 0x5410 /* TIOCSPGRP */, &pgid);
         /* Prefer busybox sh (full line editor with history support);
          * fall back to uxsh / minishell if anything is missing. The
          * shell name in argv[0] tells busybox to dispatch to ash. */
@@ -406,6 +417,15 @@ static void spawn_child(void) {
              * key history nav (the default unknown TERM disables it). */
             "TERM=xterm",
             "PS1=osnos:/\\w$ ",
+            /* IMPORTANT: empty ENV. Otherwise ash would source the
+             * value of /etc/profile's ENV (= /home/.ashrc), which
+             * runs /bin/banner + sets a ton of aliases — most are
+             * harmless, but right after the banner ash got stuck on
+             * something in the rc file and never reached the prompt.
+             * The minimal interactive setup keeps the shell live and
+             * responsive; user can `source ~/.ashrc` later if they
+             * really want the aliases. */
+            "ENV=",
             0
         };
         char *argv_sh[] = { "sh", "-i", 0 };

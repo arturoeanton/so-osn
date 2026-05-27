@@ -80,19 +80,24 @@ static int64_t try_open_pty(const char *path, int flags) {
     }
     if (os_streq(path, "/dev/tty")) {
         /* The controlling terminal — open returns a fresh OFD with
-         * is_special=true so the rest of the fd path (sys_read /
-         * sys_write / sys_ioctl) routes to the same kernel TTY layer
-         * that backs the default fd 0/1/2. Used by pipe-mode pagers
-         * (`cat foo | less` does `dup2(open("/dev/tty"), 0)` to get
-         * the keyboard back after stdin was redirected to a pipe).
+         * is_special=true so the rest of the fd path routes to the
+         * same kernel TTY layer that backs the default fd 0/1/2.
          *
-         * Each open allocates its own OFD (NOT shared with the
-         * default stdio OFDs) — they're all routing aliases of the
-         * same singleton kernel TTY ring, so the duplication is just
-         * bookkeeping with no real cost. */
-        int fd = fd_alloc(task_current());
+         * POSIX gate: only tasks that have a controlling terminal
+         * may open /dev/tty. A task that called setsid() is in a new
+         * session with NO ctty (see sys_setsid) — for it, this open
+         * must fail with ENXIO. This is the critical guard for
+         * oxterm-spawned shells: without it, busybox ash opens the
+         * legacy console /dev/tty and never matches its own pgrp on
+         * tcgetpgrp, looping on SIGTTIN until stopped. With the
+         * guard, ash's fallback path (`fd=2; while(!isatty(fd))…`)
+         * picks up the inherited PTY slave instead and job control
+         * works correctly against the per-pty fg_pgid. */
+        task_t *cur = task_current();
+        if (cur && !cur->has_ctty) return err(OSNOS_ENXIO);
+        int fd = fd_alloc(cur);
         if (fd < 0) return err(OSNOS_EMFILE);
-        osnos_fd_t *o = fd_get(task_current(), fd);
+        osnos_fd_t *o = fd_get(cur, fd);
         o->is_special = true;
         o->flags      = flags;
         os_strlcpy(o->path, path, OSNOS_PATH_MAX);
@@ -671,7 +676,15 @@ int64_t sys_fstat(int fd, osnos_stat_t *out) {
 int64_t sys_isatty(int fd) {
     osnos_fd_t *f = fd_get(task_current(), fd);
     if (!f) return err(OSNOS_EBADF);
-    return f->is_special ? 1 : 0;
+    /* `is_special` covers /dev/tty + console fds; `is_pty` covers
+     * /dev/ptmx + /dev/pts/N slave/master. Both are TTYs as far as
+     * userspace is concerned — without this, busybox ash gets
+     * isatty(0)=0 inside oxterm and silently falls into batch mode:
+     * line editor disabled, no prompt, fread stalls 4 KB at a time.
+     * Same problem would hit any program that uses isatty to switch
+     * interactive/non-interactive behavior (curses, readline, vi). */
+    if (f->is_special || f->is_pty) return 1;
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1099,6 +1112,14 @@ int64_t sys_setsid(void) {
     }
     t->sid  = t->pid;
     t->pgid = t->pid;
+    /* POSIX: setsid drops the controlling terminal. open("/dev/tty")
+     * must return ENXIO until the task acquires a new ctty (e.g. by
+     * opening a PTY slave with TIOCSCTTY). Critical for oxterm's
+     * spawned shell: without this, busybox ash would open the legacy
+     * console /dev/tty (consrv-backed), tcgetpgrp would return the
+     * global kernel_fg_pid (≠ ash's pgid), and ash would loop on
+     * SIGTTIN until stopped. */
+    t->has_ctty = 0;
     return (int64_t)t->sid;
 }
 
@@ -2085,6 +2106,9 @@ int64_t sys_fork(void) {
      * task_create_user_elf seeded. */
     child->pgid              = parent->pgid;
     child->sid               = parent->sid;
+    /* POSIX: fork inherits the controlling-terminal state. Both
+     * parent and child share the same ctty until child setsid()s. */
+    child->has_ctty          = parent->has_ctty;
     /* Child starts NOT waiting and with no inherited signal state.
      * POSIX says fd table inherited (done above) + sigactions
      * inherited (preserved across fork; CLOSED on execve). */
@@ -2317,6 +2341,7 @@ static int64_t sys_clone(uint64_t flags, uint64_t child_stack,
     child->parent_pid        = parent->pid;
     child->pgid              = parent->pgid;
     child->sid               = parent->sid;
+    child->has_ctty          = parent->has_ctty;
     child->waiting_for_pid   = 0;
     for (int i = 0; i < 32; i++) {
         child->sa_handler [i] = parent->sa_handler [i];
@@ -3424,6 +3449,33 @@ int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
             struct osnos_winsize ws = { 0, 0, 0, 0 };
             if (copy_to_user(arg, &ws, sizeof(ws)) != OSNOS_OK)
                 return err(OSNOS_EFAULT);
+            return 0;
+        }
+        case 0x540F /* TIOCGPGRP */: {
+            /* tcgetpgrp(fd) — returns the slave PTY's foreground
+             * process group id. Without this, busybox ash's startup
+             * `while (tcgetpgrp(2) != getpgid(0)) kill(-pg, SIGTTIN)`
+             * never exits the loop (default-handler SIGTTIN stops
+             * the shell forever after printing the banner). */
+            uint32_t pgid = (uint32_t)p->fg_pgid;
+            if (pgid == 0) {
+                /* No fg pgid yet: return the caller's pgid so the
+                 * shell-startup loop is a no-op the first time. */
+                pgid = (uint32_t)task_current()->pgid;
+            }
+            if (copy_to_user(arg, &pgid, sizeof(pgid)) != OSNOS_OK)
+                return err(OSNOS_EFAULT);
+            return 0;
+        }
+        case 0x5410 /* TIOCSPGRP */: {
+            /* tcsetpgrp(fd, pgid) — claim the slave as our group's
+             * foreground. We persist it per-pty so each PTY pair has
+             * its own fg pgid (vs the legacy global kernel_fg_pid
+             * shared with /dev/tty). */
+            uint32_t pgid;
+            if (copy_from_user(&pgid, arg, sizeof(pgid)) != OSNOS_OK)
+                return err(OSNOS_EFAULT);
+            p->fg_pgid = (uint64_t)pgid;
             return 0;
         }
         default:
