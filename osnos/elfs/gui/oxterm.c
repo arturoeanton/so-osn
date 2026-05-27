@@ -443,19 +443,20 @@ static void spawn_child(void) {
             /* TERM=xterm tells busybox line editor to enable arrow-
              * key history nav (the default unknown TERM disables it). */
             "TERM=xterm",
-            "PS1=osnos:/\\w$ ",
-            /* IMPORTANT: empty ENV. Otherwise ash would source the
-             * value of /etc/profile's ENV (= /home/.ashrc), which
-             * runs /bin/banner + sets a ton of aliases — most are
-             * harmless, but right after the banner ash got stuck on
-             * something in the rc file and never reached the prompt.
-             * The minimal interactive setup keeps the shell live and
-             * responsive; user can `source ~/.ashrc` later if they
-             * really want the aliases. */
-            "ENV=",
+            /* ENV points at /home/.ashrc — the rc file that registers
+             * all the `vi → busybox vi`, `sed → busybox sed`, etc.
+             * aliases plus the PS1 prompt. ash sources it on every
+             * interactive session, matching what shellsrv's ash sees
+             * on the kernel console. /etc/profile is sourced ONCE
+             * (login), so we set ENV directly to keep behaviour the
+             * same whether or not /etc/profile ran for this child. */
+            "ENV=/home/.ashrc",
             0
         };
-        char *argv_sh[] = { "sh", "-i", 0 };
+        /* Login interactive shell: `-l -i`. The -l makes ash source
+         * /etc/profile (PATH/HISTFILE), -i marks the session as
+         * interactive so $ENV (.ashrc) is also sourced. */
+        char *argv_sh[] = { "sh", "-l", "-i", 0 };
         execve("/bin/sh", argv_sh, envp);
         char *argv_uxsh[] = { "uxsh", 0 };
         execve("/bin/uxsh", argv_uxsh, environ);
