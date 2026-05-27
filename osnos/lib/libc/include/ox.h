@@ -34,6 +34,7 @@ typedef int ox_win_t;
 #define OX_EV_MOUSE  2
 #define OX_EV_EXPOSE 3
 #define OX_EV_CLOSE  4
+#define OX_EV_RESIZE 5    /* window size changed — re-render at new w,h */
 
 /* Mouse event sub-type. */
 #define OX_MOUSE_MOVE  0
@@ -79,6 +80,8 @@ typedef struct {
     int      wheel_delta; /* +1 up, -1 down (only OX_MOUSE_WHEEL)     */
     /* EXPOSE:                                                        */
     int      ex, ey, ew, eh;
+    /* RESIZE: new dimensions (also valid on EXPOSE after resize). */
+    int      new_w, new_h;
 } ox_event_t;
 
 /* Connect to the running oxsrv. Returns 0 on success, -1 on error
@@ -92,6 +95,13 @@ ox_win_t ox_window_create(int w, int h, const char *title);
 
 void ox_window_destroy(ox_win_t win);
 void ox_window_set_title(ox_win_t win, const char *title);
+
+/* Current window dimensions. Updated by ox_poll_event / ox_wait_event
+ * when an OX_EV_RESIZE arrives (the libc side handles the SHM remap
+ * transparently; apps just need to re-render at the new w/h). Either
+ * pointer may be NULL. Returns 0 on success, -1 if the window id is
+ * unknown. */
+int  ox_window_dims(ox_win_t win, int *out_w, int *out_h);
 
 /* Drawing primitives — all act on the window's backing buffer.
  * The result becomes visible after ox_present(). */

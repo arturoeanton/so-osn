@@ -167,6 +167,7 @@ static int is_event_type(int t) {
     return t == IPC_OX_EVENT_KEY  ||
            t == IPC_OX_EVENT_MOUSE ||
            t == IPC_OX_EVENT_EXPOSE ||
+           t == IPC_OX_EVENT_RESIZE ||
            t == IPC_OX_EVENT_CLOSE;
 }
 
@@ -371,6 +372,7 @@ static int decode_event(const ipc_msg_t *m, ox_event_t *out) {
     out->buttons = 0;
     out->mouse_kind = 0;
     out->ex = out->ey = out->ew = out->eh = 0;
+    out->new_w = out->new_h = 0;
     switch (m->type) {
     case IPC_OX_EVENT_KEY:
         out->type    = OX_EV_KEY;
@@ -402,9 +404,60 @@ static int decode_event(const ipc_msg_t *m, ox_event_t *out) {
     case IPC_OX_EVENT_CLOSE:
         out->type = OX_EV_CLOSE;
         return 1;
+    case IPC_OX_EVENT_RESIZE: {
+        out->type  = OX_EV_RESIZE;
+        out->new_w = (int)((m->arg1 >> 32) & 0xffffffffu);
+        out->new_h = (int)( m->arg1        & 0xffffffffu);
+        /* data[] is a NUL-terminated SHM name from oxsrv. Swap our
+         * backing buffer to that SHM in-place — every subsequent
+         * ox_draw_* writes the new buffer, and the next ox_present
+         * implicitly ACKs the resize to the server (which then
+         * unlinks the old SHM). The app sees an OX_EV_RESIZE event
+         * with new_w/new_h and is expected to re-render. */
+        ox_local_win_t *lw = local_lookup((int)out->win);
+        if (lw && out->new_w > 0 && out->new_h > 0) {
+            char shm_name[64];
+            int n = (int)sizeof(shm_name) - 1;
+            int i = 0;
+            while (i < n && m->data[i]) {
+                shm_name[i] = m->data[i];
+                i++;
+            }
+            shm_name[i] = 0;
+            int fd = shm_open(shm_name, O_RDWR, 0);
+            if (fd >= 0) {
+                size_t new_bsz = (size_t)out->new_w *
+                                 (size_t)out->new_h * 4;
+                size_t mmap_bsz = (new_bsz + 4095) & ~(size_t)4095;
+                void *p = mmap(0, mmap_bsz,
+                               PROT_READ | PROT_WRITE,
+                               MAP_SHARED, fd, 0);
+                close(fd);
+                if (p != (void *)-1) {
+                    /* Old backing — release before swapping pointers
+                     * so we never have two mappings of the same SHM
+                     * alive simultaneously. */
+                    if (lw->back) munmap(lw->back, lw->bytes);
+                    lw->back  = (uint32_t *)p;
+                    lw->bytes = mmap_bsz;
+                    lw->w     = out->new_w;
+                    lw->h     = out->new_h;
+                }
+            }
+        }
+        return 1;
+    }
     default:
         return 0;
     }
+}
+
+int ox_window_dims(ox_win_t win, int *out_w, int *out_h) {
+    ox_local_win_t *lw = local_lookup((int)win);
+    if (!lw) return -1;
+    if (out_w) *out_w = lw->w;
+    if (out_h) *out_h = lw->h;
+    return 0;
 }
 
 int ox_poll_event(ox_event_t *out) {

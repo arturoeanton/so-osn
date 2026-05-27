@@ -125,7 +125,13 @@ typedef enum {
     IPC_OX_CLIPBOARD_SET  = 0x6d,  /* C→S: arg1=size, data=bytes (<= 1023) */
                                    /*      Replaces global clipboard.      */
     IPC_OX_CLIPBOARD_GET  = 0x6e,  /* C→S: → RESPONSE arg1=size, data=bytes*/
-    IPC_OX_RESPONSE       = 0x6f   /* S→C: arg0=status arg1=value          */
+    IPC_OX_RESPONSE       = 0x6f,  /* S→C: arg0=status arg1=value          */
+    IPC_OX_EVENT_RESIZE   = 0x70   /* S→C: arg0=win_id,                    */
+                                   /*      arg1=((u64)new_w<<32)|new_h,    */
+                                   /*      data=new SHM name (NUL-term).   */
+                                   /* Client munmaps the old backing and   */
+                                   /* mmaps the SHM named in `data` — new  */
+                                   /* buffer is exactly new_w*new_h*4 ARGB.*/
 } ipc_type_t;
 
 /*

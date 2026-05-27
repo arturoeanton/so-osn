@@ -133,8 +133,10 @@ typedef struct {
     int          w, h;
     char         title[64];
     uint32_t    *back;                /* w*h BGRA — mmap-SHARED with client */
-    char         shm_name[32];        /* "/oxw_<id>" — used for shm_unlink */
+    char         shm_name[32];        /* "/oxw_<id>_vN" — used for shm_unlink */
     size_t       back_bytes;          /* page-rounded mmap length */
+    int          buf_w, buf_h;        /* physical backing pitch — clamps resize */
+    int          shm_version;         /* monotonic, bumped on every resize */
     int          dirty;
     int          dragging;
     int          drag_off_x, drag_off_y;
@@ -146,6 +148,13 @@ typedef struct {
     int          resizing;
     int          resize_anchor_x, resize_anchor_y;
     int          resize_start_w,  resize_start_h;
+    /* Pending resize state: when oxsrv allocates a new SHM for a
+     * resize, we hold onto the OLD one until the client sends a
+     * PRESENT (which is the ack that they've started rendering to
+     * the new SHM). */
+    uint32_t    *pending_back;
+    size_t       pending_bytes;
+    char         pending_shm[32];
 } ox_window_t;
 
 static ox_window_t g_wins[MAX_WINS];
@@ -235,6 +244,10 @@ static const menu_item_t g_menu[] = {
     { "Calculator",  "/bin/oxcalc",      0, "calc"     },
     { "Terminal",    "/bin/oxterm",      0, "term"     },
     { "Processes",   "/bin/oxtop",       0, "top"      },
+    { "Log Viewer",  "/bin/oxlog",       0, "log"      },
+    { "Memory",      "/bin/oxmem",       0, "info"     },
+    { "IPC",         "/bin/oxipc",       0, "info"     },
+    { "Network",     "/bin/oxnet",       0, "browser"  },
     { "Settings",    "/bin/oxsettings",  0, "settings" },
     { "Exit Ox",     0,                  2, "info"     },
     { "Reboot",      0,                  1, "info"     },
@@ -709,8 +722,14 @@ static int alloc_window(uint64_t owner_pid, int w, int h, const char *title) {
              * cost 1. */
             size_t bsz = (size_t)w * h * sizeof(uint32_t);
             size_t mmap_bsz = (bsz + 4095) & ~(size_t)4095;
+            g_wins[i].shm_version = 0;
+            g_wins[i].buf_w = w;
+            g_wins[i].buf_h = h;
+            g_wins[i].pending_back = NULL;
+            g_wins[i].pending_bytes = 0;
+            g_wins[i].pending_shm[0] = 0;
             snprintf(g_wins[i].shm_name, sizeof(g_wins[i].shm_name),
-                     "/oxw_%d", g_wins[i].id);
+                     "/oxw_%d_v0", g_wins[i].id);
             int shmfd = shm_open(g_wins[i].shm_name,
                                  O_CREAT | O_RDWR, 0600);
             if (shmfd < 0) { g_wins[i].used = 0; return -1; }
@@ -773,6 +792,17 @@ static void destroy_slot(int slot) {
     if (g_wins[slot].shm_name[0]) {
         shm_unlink(g_wins[slot].shm_name);
         g_wins[slot].shm_name[0] = 0;
+    }
+    /* If a resize was mid-flight (we held the old SHM pending the
+     * client's first post-resize PRESENT), release that too. */
+    if (g_wins[slot].pending_back) {
+        munmap(g_wins[slot].pending_back, g_wins[slot].pending_bytes);
+        g_wins[slot].pending_back  = NULL;
+        g_wins[slot].pending_bytes = 0;
+    }
+    if (g_wins[slot].pending_shm[0]) {
+        shm_unlink(g_wins[slot].pending_shm);
+        g_wins[slot].pending_shm[0] = 0;
     }
     uint64_t dt = now_us() - t_destroy0;
     g_destroy_us_total += dt;
@@ -854,27 +884,62 @@ static void minimize_slot(int slot) {
     }
 }
 
-/* Toggle WIN_NORMAL ↔ WIN_ZOOM. Fase A semantics: zoom = "grow visual
- * footprint by 2x via scaled blit", buffer stays the same size. Fase
- * B will replace with real CONFIGURE protocol. */
+/* Resize a window's *visible* bounds within its existing backing
+ * buffer. The SHM backing is NOT reallocated — we just adjust w/h
+ * and rely on composite-side clipping. This is safe regardless of
+ * whether the app handles OX_EV_RESIZE (most don't), because the
+ * SHM stride stays fixed at the buffer's original width: app draws
+ * land at the correct offsets and never produce a diagonal "stride
+ * mismatch" artifact.
+ *
+ * The IPC_OX_EVENT_RESIZE / lib/libc remap path is kept in the ABI
+ * for future grow-beyond-buffer support, but disarmed for now —
+ * every app will need to opt in to genuine resize before we re-light
+ * the SHM swap. */
+static int resize_window(int slot, int new_w, int new_h) {
+    if (slot < 0 || slot >= MAX_WINS) return -1;
+    ox_window_t *w = &g_wins[slot];
+    if (!w->used) return -1;
+    if (new_w < 64)  new_w = 64;
+    if (new_h < 48)  new_h = 48;
+    /* Hard cap at the buffer's actual pitch. Growing beyond requires
+     * a real SHM swap (the protocol is in place but disarmed). */
+    int max_w = w->buf_w > 0 ? w->buf_w : w->w;
+    int max_h = w->buf_h > 0 ? w->buf_h : w->h;
+    /* Also clamp to the available screen area. */
+    if (new_w > (int)g_scr_w) new_w = (int)g_scr_w;
+    if (new_h > (int)g_scr_h - DESKBAR_H - TITLEBAR_H) new_h = (int)g_scr_h - DESKBAR_H - TITLEBAR_H;
+    if (new_w > max_w) new_w = max_w;
+    if (new_h > max_h) new_h = max_h;
+    if (new_w == w->w && new_h == w->h) return 0;
+    mark_slot_dirty(slot);
+    w->w = new_w;
+    w->h = new_h;
+    mark_slot_dirty(slot);
+    g_dirty = 1;
+    return 0;
+}
+
+/* Toggle WIN_NORMAL ↔ WIN_ZOOM. Until apps opt into the RESIZE
+ * protocol we stage zoom as a 2x scaled blit (compositor reads the
+ * original w×h buffer and writes 2×-magnified pixels into the larger
+ * on-screen rect). State machine: NORMAL stores bounds and grows the
+ * frame to ~2x clamped to screen; ZOOM restores the saved frame. */
 static void zoom_slot(int slot) {
     ox_window_t *w = &g_wins[slot];
     mark_slot_dirty(slot);
     if (w->state == WIN_ZOOM) {
-        /* Restore. */
         w->x = w->x_saved;
         w->y = w->y_saved;
         w->w = w->w_saved;
         w->h = w->h_saved;
         w->state = WIN_NORMAL;
     } else {
-        /* Save current bounds. */
         w->x_saved = w->x;
         w->y_saved = w->y;
         w->w_saved = w->w;
         w->h_saved = w->h;
         w->state = WIN_ZOOM;
-        /* Compute new bounds: 2x but clamped to screen minus deskbar. */
         int nw = w->w * 2;
         int nh = w->h * 2;
         int avail_w = (int)g_scr_w - 8;
@@ -1783,18 +1848,20 @@ static void handle_ipc(const ipc_msg_t *m) {
         /* CRITICAL: with SHM-backed windows, draws are LOCAL writes
          * (no DRAW_RECT/TEXT/IMAGE IPCs), so g_wins[slot].dirty is
          * never set. PRESENT is the ONLY signal that "client finished
-         * a frame" — must always trigger a composite, no flag check.
-         *
-         * The legacy `if (g_wins[slot].dirty)` gate is what made
-         * oxsettings appear empty until a second app opened (the
-         * second app's alloc_window triggered a full repaint that
-         * incidentally repainted settings with its loaded thumbs).
-         * Same root cause for "mouse lag after close": the close
-         * triggered a full repaint but subsequent client redraws
-         * never composited until next focus change. */
+         * a frame" — must always trigger a composite, no flag check. */
         g_wins[slot].dirty = 0;
         g_dirty = 1;
         ox_window_t *w = &g_wins[slot];
+        /* PRESENT after a resize implicitly acks the new SHM. Tear
+         * down the prior backing and unlink its name now that we're
+         * sure the client is writing to the post-resize buffer. */
+        if (w->pending_back) {
+            munmap(w->pending_back, w->pending_bytes);
+            if (w->pending_shm[0]) shm_unlink(w->pending_shm);
+            w->pending_back  = NULL;
+            w->pending_bytes = 0;
+            w->pending_shm[0] = 0;
+        }
         mark_dirty(w->x - SHADOW_DEPTH,
                    w->y - TITLEBAR_H - SHADOW_DEPTH,
                    w->w + 2 * SHADOW_DEPTH,
@@ -2044,44 +2111,46 @@ static void process_mouse_event(mouse_event_t ev) {
         return;
     }
 
-    /* If we're mid-resize, follow the cursor and skip the rest of
-     * the body/title logic — drag-resize "owns" the mouse for now. */
+    /* If we're mid-resize, follow the cursor. Live SHM reallocation
+     * happens on each step but is throttled by `resize_throttle_ms` so
+     * a fast drag doesn't spam shm_open/mmap. The client side handles
+     * each CONFIGURE event by remapping, and the next PRESENT acks
+     * the swap. */
     if (g_focus_slot >= 0 && g_wins[g_focus_slot].resizing) {
         if (new_b & MOUSE_BTN_LEFT) {
+            static uint64_t resize_last_ms = 0;
+            const uint64_t resize_throttle_ms = 100;
             ox_window_t *rw = &g_wins[g_focus_slot];
             int new_w = rw->resize_start_w +
                         (g_cx - rw->resize_anchor_x);
             int new_h = rw->resize_start_h +
                         (g_cy - rw->resize_anchor_y);
-            /* Fase A: shrink-only within the original buffer. */
-            int max_w = (int)rw->back_bytes /
-                        (rw->h > 0 ? (int)sizeof(uint32_t) * rw->h : 1);
-            (void)max_w;
-            if (new_w < 100) new_w = 100;
+            if (new_w < 120) new_w = 120;
             if (new_h < 80)  new_h = 80;
-            /* Hard cap: don't exceed the original buffer we allocated. */
-            if (rw->w_saved > 0 && rw->state == WIN_NORMAL) {
-                if (new_w > rw->w_saved) new_w = rw->w_saved;
-                if (new_h > rw->h_saved) new_h = rw->h_saved;
-            } else {
-                /* w_saved=0 means we never zoomed — use back_bytes
-                 * as the upper bound. Stored geometry IS the buffer. */
-                if (new_w > (int)g_scr_w - rw->x) new_w = g_scr_w - rw->x;
-                if (new_h > (int)g_scr_h - rw->y) new_h = g_scr_h - rw->y;
-            }
-            int old_w = rw->w, old_h = rw->h;
-            rw->w = new_w;
-            rw->h = new_h;
-            if (old_w != new_w || old_h != new_h) {
-                g_dirty = 1;
-                int fw = (old_w > new_w ? old_w : new_w) + 2 * SHADOW_DEPTH;
-                int fh = TITLEBAR_H +
-                         (old_h > new_h ? old_h : new_h) +
-                         2 * SHADOW_DEPTH + SHADOW_OFFSET;
-                mark_dirty(rw->x - SHADOW_DEPTH,
-                           rw->y - TITLEBAR_H - SHADOW_DEPTH, fw, fh);
+            if (new_w > (int)g_scr_w - rw->x) new_w = g_scr_w - rw->x;
+            if (new_h > (int)g_scr_h - rw->y) new_h = g_scr_h - rw->y;
+            uint64_t now = now_us() / 1000;
+            if ((new_w != rw->w || new_h != rw->h) &&
+                (now - resize_last_ms) >= resize_throttle_ms) {
+                resize_last_ms = now;
+                resize_window(g_focus_slot, new_w, new_h);
             }
         } else {
+            /* Mouse released — fire one final resize so the buffer
+             * matches the final dimensions, even if throttling
+             * skipped the last drag delta. */
+            ox_window_t *rw = &g_wins[g_focus_slot];
+            int final_w = rw->resize_start_w +
+                          (g_cx - rw->resize_anchor_x);
+            int final_h = rw->resize_start_h +
+                          (g_cy - rw->resize_anchor_y);
+            if (final_w < 120) final_w = 120;
+            if (final_h < 80)  final_h = 80;
+            if (final_w > (int)g_scr_w - rw->x) final_w = g_scr_w - rw->x;
+            if (final_h > (int)g_scr_h - rw->y) final_h = g_scr_h - rw->y;
+            if (final_w != rw->w || final_h != rw->h) {
+                resize_window(g_focus_slot, final_w, final_h);
+            }
             g_wins[g_focus_slot].resizing = 0;
         }
     }

@@ -27,6 +27,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ox.h>
+#include <ox_ui.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,13 +91,21 @@
 /* ---------------- state ----------------------------------------- */
 static ox_win_t g_win;
 static char     g_db[DBPATH_MAX] = "/home/demo.db";
+static int      g_db_cur = 0;     /* cursor inside g_db when focused */
+static int      g_open_hover = 0; /* Open button hover state */
+static int      g_browse_hover = 0;
+static ox_filepicker_t g_fp;
+static int      g_fp_active = 0;
 
 /* Query buffer + cursor (notepad-lite). */
 static char g_query[QUERY_MAX];
 static int  g_qlen = 0;
 static int  g_qcur = 0;
 static int  g_q_scroll = 0;
-static int  g_focus_query = 1;   /* keyboard focus: query=1, none=0 */
+/* Keyboard focus target. 1=query editor, 2=db path bar, 0=none. */
+#define FOCUS_QUERY 1
+#define FOCUS_DBBAR 2
+static int  g_focus_query = FOCUS_QUERY;
 
 /* Table list. */
 static char g_tables[TABLES_MAX][TABNAME_MAX];
@@ -394,25 +403,152 @@ static void run_query(void) {
 }
 
 /* ---------------- toolbar layout helpers --------------------------- */
-#define RUN_W   80
-#define RUN_H   24
-#define RUN_X  (WIN_W - RUN_W - 10)
-#define RUN_Y    6
+#define RUN_W       80
+#define RUN_H       24
+#define RUN_X      (WIN_W - RUN_W - 10)
+#define RUN_Y       6
+
+/* DB path bar — editable input + Open button. Sits between the "DB:"
+ * label on the left and the Run button on the right. */
+#define DB_LABEL_X   8
+#define DB_LABEL_W  (3 * CHAR_W)     /* "DB:" */
+#define DB_BAR_X    (DB_LABEL_X + DB_LABEL_W + 4)
+#define DB_BAR_Y     6
+#define DB_BAR_H    24
+#define OPEN_W      72
+#define OPEN_H      DB_BAR_H
+#define OPEN_X      (RUN_X - OPEN_W - 8)
+#define OPEN_Y      DB_BAR_Y
+#define BROWSE_W    28
+#define BROWSE_H    DB_BAR_H
+#define BROWSE_X    (OPEN_X - BROWSE_W - 4)
+#define BROWSE_Y    DB_BAR_Y
+#define DB_BAR_W    (BROWSE_X - DB_BAR_X - 4)
+#define COL_DB_BG      OX_RGB(255, 255, 255)
+#define COL_DB_FG      OX_RGB( 20,  20,  25)
+#define COL_DB_BORDER  OX_RGB(150, 150, 160)
+#define COL_DB_BORDER_F OX_RGB( 53, 132, 228)
+#define COL_OPEN_BTN     OX_RGB( 70,  72,  80)
+#define COL_OPEN_BTN_HOV OX_RGB(100, 102, 114)
+#define COL_OPEN_BTN_FG  OX_RGB(255, 255, 255)
+
+/* --- DB path editing helpers ------------------------------------- */
+
+static int db_visible_cols(void) {
+    return (DB_BAR_W - 12) / CHAR_W;
+}
+
+static void db_insert(char c) {
+    int n = (int)strlen(g_db);
+    if (n + 1 >= DBPATH_MAX) return;
+    if (g_db_cur < 0) g_db_cur = 0;
+    if (g_db_cur > n) g_db_cur = n;
+    memmove(g_db + g_db_cur + 1, g_db + g_db_cur,
+            (size_t)(n - g_db_cur + 1));
+    g_db[g_db_cur++] = c;
+}
+
+static void db_backspace(void) {
+    if (g_db_cur <= 0) return;
+    int n = (int)strlen(g_db);
+    memmove(g_db + g_db_cur - 1, g_db + g_db_cur,
+            (size_t)(n - g_db_cur + 1));
+    g_db_cur--;
+}
+
+static void db_delete(void) {
+    int n = (int)strlen(g_db);
+    if (g_db_cur >= n) return;
+    memmove(g_db + g_db_cur, g_db + g_db_cur + 1,
+            (size_t)(n - g_db_cur));
+}
+
+/* Try to load tables from g_db. Returns 0 on success, -1 on file
+ * error. Result is reflected in g_status and g_status_err. */
+static int reopen_db(void) {
+    if (access(g_db, R_OK) != 0) {
+        snprintf(g_status, sizeof(g_status),
+                 "cannot read %s (errno=%d)", g_db, errno);
+        g_status_err = 1;
+        g_ntables = 0;
+        g_sel_table = -1;
+        g_nrows = 0; g_ncols = 0;
+        return -1;
+    }
+    g_sel_table = -1;
+    g_nrows = 0; g_ncols = 0;
+    g_grid_scroll = 0;
+    g_grid_xscroll = 0;
+    load_tables();
+    if (!g_status_err) {
+        snprintf(g_status, sizeof(g_status),
+                 "%d table%s in %s",
+                 g_ntables, g_ntables == 1 ? "" : "s", g_db);
+    }
+    /* Refresh window title too. */
+    char title[256];
+    snprintf(title, sizeof(title), "SQLite Viewer — %s", g_db);
+    ox_window_set_title(g_win, title);
+    return 0;
+}
 
 /* ---------------- render ------------------------------------------ */
 
 static void render(void) {
     /* Toolbar. */
     ox_draw_rect(g_win, 0, 0, WIN_W, TOOLBAR_H, COL_TOOLBAR);
-    char title[256];
-    snprintf(title, sizeof(title), "DB: %s", g_db);
-    ox_draw_text(g_win, 10, 10, title, COL_TOOLBAR_FG);
+
+    /* "DB:" label. */
+    ox_draw_text(g_win, DB_LABEL_X, DB_BAR_Y + 8, "DB:", COL_TOOLBAR_FG);
+
+    /* DB path bar — editable input box. White background, blue
+     * outline when focused so the user knows it accepts typing. */
+    ox_draw_rect(g_win, DB_BAR_X, DB_BAR_Y, DB_BAR_W, DB_BAR_H,
+                 g_focus_query == FOCUS_DBBAR ? COL_DB_BORDER_F
+                                              : COL_DB_BORDER);
+    ox_draw_rect(g_win, DB_BAR_X + 1, DB_BAR_Y + 1,
+                 DB_BAR_W - 2, DB_BAR_H - 2, COL_DB_BG);
+    {
+        /* Horizontal scroll the path so cursor stays visible. */
+        int vis = db_visible_cols();
+        int dlen = (int)strlen(g_db);
+        int start = 0;
+        if (g_db_cur > vis) start = g_db_cur - vis + 1;
+        if (start < 0) start = 0;
+        if (start > dlen) start = dlen;
+        char view[DBPATH_MAX];
+        int n = dlen - start;
+        if (n > vis) n = vis;
+        if (n > 0) memcpy(view, g_db + start, (size_t)n);
+        view[n] = 0;
+        ox_draw_text(g_win, DB_BAR_X + 6, DB_BAR_Y + 8,
+                     view, COL_DB_FG);
+        if (g_focus_query == FOCUS_DBBAR) {
+            int cx = DB_BAR_X + 6 + (g_db_cur - start) * CHAR_W;
+            ox_draw_rect(g_win, cx, DB_BAR_Y + 4, 2, DB_BAR_H - 8,
+                         COL_CARET);
+        }
+    }
+
+    /* Browse "…" button — opens a file picker. */
+    ox_draw_rect(g_win, BROWSE_X, BROWSE_Y, BROWSE_W, BROWSE_H,
+                 g_browse_hover ? COL_OPEN_BTN_HOV : COL_OPEN_BTN);
+    ox_draw_text(g_win, BROWSE_X + (BROWSE_W - 3 * CHAR_W) / 2,
+                 BROWSE_Y + 8, "...", COL_OPEN_BTN_FG);
+
+    /* Open button. */
+    ox_draw_rect(g_win, OPEN_X, OPEN_Y, OPEN_W, OPEN_H,
+                 g_open_hover ? COL_OPEN_BTN_HOV : COL_OPEN_BTN);
+    ox_draw_text(g_win, OPEN_X + (OPEN_W - 4 * CHAR_W) / 2,
+                 OPEN_Y + 8, "Open", COL_OPEN_BTN_FG);
 
     /* Run button. */
     ox_draw_rect(g_win, RUN_X, RUN_Y, RUN_W, RUN_H,
                  g_run_hover ? COL_RUN_BTN_HOV : COL_RUN_BTN);
-    ox_draw_text(g_win, RUN_X + (RUN_W - 5 * CHAR_W) / 2,
+    ox_draw_text(g_win, RUN_X + (RUN_W - 6 * CHAR_W) / 2,
                  RUN_Y + 8, "Run F5", COL_RUN_BTN_FG);
+
+    if (g_fp_active) ox_filepicker_draw(g_win, &g_fp);
 
     /* Left panel — table list. */
     ox_draw_rect(g_win, 0, BODY_Y, LEFT_W, WIN_H - BODY_Y - STATUS_H,
@@ -460,7 +596,7 @@ static void render(void) {
                 col++;
                 i++;
             }
-            if (line == cur_line && g_focus_query) {
+            if (line == cur_line && g_focus_query == FOCUS_QUERY) {
                 int cx = QUERY_X + 6 + cur_col * CHAR_W;
                 if (cur_col > vis_cols) cx = QUERY_X + 6 + vis_cols * CHAR_W;
                 ox_draw_rect(g_win, cx, y, 2, LINE_H - 2, COL_CARET);
@@ -592,10 +728,73 @@ int main(int argc, char **argv) {
 
         if (ev.type == OX_EV_CLOSE) break;
 
+        /* File picker drains all events while active. */
+        if (g_fp_active) {
+            ox_filepicker_event(&g_fp, &ev);
+            if (g_fp.result == OX_DLG_CHOSEN) {
+                size_t L = strlen(g_fp.chosen);
+                if (L >= sizeof(g_db)) L = sizeof(g_db) - 1;
+                memcpy(g_db, g_fp.chosen, L);
+                g_db[L] = 0;
+                g_db_cur = (int)L;
+                g_fp_active = 0;
+                reopen_db();
+                render();
+                continue;
+            }
+            if (g_fp.result == OX_DLG_CANCEL) {
+                g_fp_active = 0;
+                render();
+                continue;
+            }
+            render();
+            continue;
+        }
+
         if (ev.type == OX_EV_MOUSE) {
             if (ev.mouse_kind == OX_MOUSE_DOWN && (ev.buttons & 0x01)) {
                 if (hit(ev.x, ev.y, RUN_X, RUN_Y, RUN_W, RUN_H)) {
                     run_query();
+                    render();
+                    continue;
+                }
+                if (hit(ev.x, ev.y, BROWSE_X, BROWSE_Y, BROWSE_W, BROWSE_H)) {
+                    /* Seed the picker at the directory of g_db so the
+                     * user lands close to their current DB. */
+                    char start[DBPATH_MAX];
+                    size_t L = strlen(g_db);
+                    if (L >= sizeof(start)) L = sizeof(start) - 1;
+                    memcpy(start, g_db, L);
+                    start[L] = 0;
+                    /* Strip the filename to get the directory. */
+                    for (int k = (int)L - 1; k >= 0; k--) {
+                        if (start[k] == '/') { start[k > 0 ? k : 1] = 0; break; }
+                    }
+                    if (!start[0]) { start[0] = '/'; start[1] = 0; }
+                    ox_filepicker_open(&g_fp, 0, 0, WIN_W, WIN_H, start);
+                    g_fp_active = 1;
+                    render();
+                    continue;
+                }
+                if (hit(ev.x, ev.y, OPEN_X, OPEN_Y, OPEN_W, OPEN_H)) {
+                    reopen_db();
+                    render();
+                    continue;
+                }
+                if (hit(ev.x, ev.y, DB_BAR_X, DB_BAR_Y, DB_BAR_W, DB_BAR_H)) {
+                    g_focus_query = FOCUS_DBBAR;
+                    /* Position cursor at click column (accounting for
+                     * horizontal scroll done in render). */
+                    int dlen = (int)strlen(g_db);
+                    int vis = db_visible_cols();
+                    int start = 0;
+                    if (g_db_cur > vis) start = g_db_cur - vis + 1;
+                    if (start < 0) start = 0;
+                    if (start > dlen) start = dlen;
+                    int col = (ev.x - DB_BAR_X - 6) / CHAR_W;
+                    if (col < 0) col = 0;
+                    g_db_cur = start + col;
+                    if (g_db_cur > dlen) g_db_cur = dlen;
                     render();
                     continue;
                 }
@@ -614,7 +813,7 @@ int main(int argc, char **argv) {
                     continue;
                 }
                 if (hit(ev.x, ev.y, QUERY_X, QUERY_Y, RIGHT_W, QUERY_H)) {
-                    g_focus_query = 1;
+                    g_focus_query = FOCUS_QUERY;
                     cursor_from_click_query(ev.x, ev.y);
                     render();
                     continue;
@@ -624,12 +823,18 @@ int main(int argc, char **argv) {
                 continue;
             }
             if (ev.mouse_kind == OX_MOUSE_MOVE) {
-                int new_hover_run  = hit(ev.x, ev.y, RUN_X, RUN_Y, RUN_W, RUN_H);
-                int new_hover_tab  = hit_table_at(ev.x, ev.y);
-                if (new_hover_run != g_run_hover ||
-                    new_hover_tab != g_hover_table) {
-                    g_run_hover   = new_hover_run;
-                    g_hover_table = new_hover_tab;
+                int new_hover_run    = hit(ev.x, ev.y, RUN_X, RUN_Y, RUN_W, RUN_H);
+                int new_hover_open   = hit(ev.x, ev.y, OPEN_X, OPEN_Y, OPEN_W, OPEN_H);
+                int new_hover_browse = hit(ev.x, ev.y, BROWSE_X, BROWSE_Y, BROWSE_W, BROWSE_H);
+                int new_hover_tab    = hit_table_at(ev.x, ev.y);
+                if (new_hover_run    != g_run_hover ||
+                    new_hover_open   != g_open_hover ||
+                    new_hover_browse != g_browse_hover ||
+                    new_hover_tab    != g_hover_table) {
+                    g_run_hover    = new_hover_run;
+                    g_open_hover   = new_hover_open;
+                    g_browse_hover = new_hover_browse;
+                    g_hover_table  = new_hover_tab;
                     render();
                 }
                 continue;
@@ -662,7 +867,35 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        if (g_focus_query) {
+        if (g_focus_query == FOCUS_DBBAR) {
+            int dlen = (int)strlen(g_db);
+            if (ev.ascii == '\b' || ev.keycode == OX_KEY_BACKSPACE) {
+                db_backspace(); render(); continue;
+            }
+            if (ev.keycode == OX_KEY_DELETE) {
+                db_delete(); render(); continue;
+            }
+            if (ev.keycode == OX_KEY_LEFT)  { if (g_db_cur > 0)    g_db_cur--; render(); continue; }
+            if (ev.keycode == OX_KEY_RIGHT) { if (g_db_cur < dlen) g_db_cur++; render(); continue; }
+            if (ev.keycode == OX_KEY_HOME)  { g_db_cur = 0;        render(); continue; }
+            if (ev.keycode == OX_KEY_END)   { g_db_cur = dlen;     render(); continue; }
+            int ch = ev.ascii;
+            if (ch == '\r' || ch == '\n') {
+                /* Enter in the DB bar acts as "Open". */
+                reopen_db();
+                render();
+                continue;
+            }
+            if (ev.keycode == OX_KEY_TAB) {
+                g_focus_query = FOCUS_QUERY; render(); continue;
+            }
+            if (ch >= 0x20 && ch < 0x7f) {
+                db_insert((char)ch); render(); continue;
+            }
+            continue;
+        }
+
+        if (g_focus_query == FOCUS_QUERY) {
             if (ev.ascii == '\b' || ev.keycode == OX_KEY_BACKSPACE) {
                 q_backspace(); q_ensure_visible(); render(); continue;
             }

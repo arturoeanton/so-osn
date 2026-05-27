@@ -20,11 +20,11 @@ extern char **environ;
 
 #define COLS 80
 #define ROWS 25
-#define CELL_W 8
-#define CELL_H 12
-#define WIN_W (COLS * CELL_W + 8)
-#define WIN_H (ROWS * CELL_H + 8)
-#define MARGIN 4
+#define CELL_W  8
+#define CELL_H  14            /* extra 2px line-height for breathing room */
+#define MARGIN  8
+#define WIN_W (COLS * CELL_W + 2 * MARGIN)
+#define WIN_H (ROWS * CELL_H + 2 * MARGIN + 20)  /* +20 = bottom status hint */
 
 static ox_win_t g_win;
 static int      g_master = -1;
@@ -42,9 +42,26 @@ static cell_t g_grid[ROWS][COLS];
 static int      g_cx = 0, g_cy = 0;
 static int      g_dirty = 1;
 
+/* Scrollback ring buffer. Each row that falls off the top of the
+ * live grid via grid_scroll() is pushed here. g_sb_count rises until
+ * SCROLLBACK_ROWS, then we keep overwriting g_sb_head (oldest entry).
+ * g_scroll_off counts how many rows up from the live top the user
+ * has scrolled (0 = live, SCROLLBACK_ROWS = oldest). */
+#define SCROLLBACK_ROWS 256
+static cell_t g_sb[SCROLLBACK_ROWS][COLS];
+static int    g_sb_head  = 0;          /* index of oldest entry */
+static int    g_sb_count = 0;          /* 0..SCROLLBACK_ROWS    */
+static int    g_scroll_off = 0;        /* rows above live top */
+
+/* Ghostty-inspired "Adwaita Dark" palette — comfortable cream-on-
+ * charcoal foreground/background and the standard ANSI 16 below. */
+#define COL_TERM_BG     OX_RGB( 30,  30,  46)
+#define COL_TERM_FG     OX_RGB(224, 222, 244)
+#define COL_TERM_CURSOR OX_RGB(245, 194, 231)
+
 /* Current SGR pen state — applied to every printed cell. */
-static uint32_t g_pen_fg = OX_RGB(200, 230, 200);
-static uint32_t g_pen_bg = OX_RGB( 15,  15,  25);
+static uint32_t g_pen_fg = COL_TERM_FG;
+static uint32_t g_pen_bg = COL_TERM_BG;
 static int      g_reverse = 0;
 
 /* ANSI parser state. */
@@ -55,12 +72,14 @@ static int  g_n_params = 0;
 static int  g_cur_param = 0;
 static int  g_have_cur_param = 0;
 
-/* xterm-256 inspired basic palette (8 base + 8 bright). */
+/* Catppuccin Mocha palette — modern Ghostty-style ANSI 16. Reads
+ * comfortably on the dark Adwaita-style background and matches the
+ * pink cursor we set above. */
 static const uint32_t g_palette[16] = {
-    OX_RGB(  0,  0,  0), OX_RGB(178,24,44), OX_RGB( 64,160,43), OX_RGB(178,148,21),
-    OX_RGB( 41, 79,184), OX_RGB(157,52,158), OX_RGB( 36,165,165), OX_RGB(200,200,200),
-    OX_RGB(120,120,120), OX_RGB(255,90,90), OX_RGB(128,255,128), OX_RGB(255,255,80),
-    OX_RGB(100,140,255), OX_RGB(255,120,255), OX_RGB(120,255,255), OX_RGB(255,255,255),
+    OX_RGB( 69, 71,  90), OX_RGB(243,139,168), OX_RGB(166,227,161), OX_RGB(249,226,175),
+    OX_RGB(137,180,250), OX_RGB(245,194,231), OX_RGB(148,226,213), OX_RGB(186,194,222),
+    OX_RGB(108,112,134), OX_RGB(243,139,168), OX_RGB(166,227,161), OX_RGB(249,226,175),
+    OX_RGB(137,180,250), OX_RGB(245,194,231), OX_RGB(148,226,213), OX_RGB(205,214,244),
 };
 
 static void grid_clear_cell(cell_t *c) {
@@ -77,10 +96,39 @@ static void grid_clear_all(void) {
 }
 
 static void grid_scroll(void) {
+    /* Push the row about to scroll off into the scrollback ring. */
+    int slot = (g_sb_head + g_sb_count) % SCROLLBACK_ROWS;
+    if (g_sb_count == SCROLLBACK_ROWS) {
+        /* Ring full — overwrite oldest, advance head. */
+        slot = g_sb_head;
+        g_sb_head = (g_sb_head + 1) % SCROLLBACK_ROWS;
+    } else {
+        g_sb_count++;
+    }
+    memcpy(g_sb[slot], g_grid[0], sizeof(g_grid[0]));
     for (int r = 1; r < ROWS; r++)
         memcpy(g_grid[r - 1], g_grid[r], sizeof(g_grid[0]));
     for (int c = 0; c < COLS; c++) grid_clear_cell(&g_grid[ROWS - 1][c]);
     if (g_cy > 0) g_cy--;
+    /* Live activity always returns the user to the bottom. */
+    g_scroll_off = 0;
+}
+
+/* Look up the (row r in [0..ROWS-1])-th visible row, accounting for
+ * scrollback offset. Returns the cell array for that row. */
+static const cell_t *visible_row(int r) {
+    int off = g_scroll_off;
+    if (off <= 0) return g_grid[r];
+    /* When off > 0, the top `off` rows of the screen show the
+     * latest `off` rows of the scrollback ring; below that comes
+     * the live grid. */
+    if (r < off) {
+        if (r >= g_sb_count) return g_grid[0]; /* shouldn't happen */
+        int sb_idx = g_sb_count - off + r;
+        int slot = (g_sb_head + sb_idx) % SCROLLBACK_ROWS;
+        return g_sb[slot];
+    }
+    return g_grid[r - off];
 }
 
 static void grid_putc(char c) {
@@ -250,49 +298,73 @@ static void feed_byte(unsigned char b) {
 }
 
 static void render(void) {
-    /* Group consecutive cells with identical bg into rect runs; emit
-     * one draw_rect per run + one draw_text per row. Much cheaper
-     * than per-cell rendering. */
+    /* Outer frame: full window background. */
+    ox_draw_rect(g_win, 0, 0, WIN_W, WIN_H, COL_TERM_BG);
+
+    /* Background runs first — group consecutive cells with same bg
+     * and emit one rect per run. */
     for (int r = 0; r < ROWS; r++) {
+        const cell_t *row = visible_row(r);
         int run_start = 0;
         for (int c = 1; c <= COLS; c++) {
-            if (c < COLS && g_grid[r][c].bg == g_grid[r][run_start].bg) continue;
+            if (c < COLS && row[c].bg == row[run_start].bg) continue;
             int run_len = c - run_start;
             ox_draw_rect(g_win,
                           MARGIN + run_start * CELL_W,
                           MARGIN + r * CELL_H,
                           run_len * CELL_W, CELL_H,
-                          g_grid[r][run_start].bg);
+                          row[run_start].bg);
             run_start = c;
         }
     }
-    /* Now glyphs — group consecutive cells with same fg into runs. */
+    /* Glyphs — group consecutive cells with same fg into runs. */
     char rowbuf[COLS + 1];
     for (int r = 0; r < ROWS; r++) {
+        const cell_t *row = visible_row(r);
         int run_start = 0;
         while (run_start < COLS) {
-            uint32_t fg = g_grid[r][run_start].fg;
+            uint32_t fg = row[run_start].fg;
             int run_len = 1;
             while (run_start + run_len < COLS &&
-                   g_grid[r][run_start + run_len].fg == fg) {
+                   row[run_start + run_len].fg == fg) {
                 run_len++;
             }
             for (int i = 0; i < run_len; i++)
-                rowbuf[i] = g_grid[r][run_start + i].ch;
+                rowbuf[i] = row[run_start + i].ch;
             rowbuf[run_len] = 0;
             ox_draw_text(g_win,
                           MARGIN + run_start * CELL_W,
-                          MARGIN + r * CELL_H + 2,
+                          MARGIN + r * CELL_H + (CELL_H - 8) / 2,
                           rowbuf, fg);
             run_start += run_len;
         }
     }
-    /* Cursor block on top. */
-    ox_draw_rect(g_win,
-                  MARGIN + g_cx * CELL_W,
-                  MARGIN + g_cy * CELL_H + CELL_H - 2,
-                  CELL_W, 2,
-                  OX_RGB(255, 255, 100));
+    /* Cursor: full Ghostty-style block. Only when at the live view —
+     * scrollback view shows just a thin outline so the user knows
+     * they're looking at history. */
+    if (g_scroll_off == 0) {
+        ox_draw_rect(g_win,
+                      MARGIN + g_cx * CELL_W,
+                      MARGIN + g_cy * CELL_H,
+                      CELL_W, CELL_H,
+                      COL_TERM_CURSOR);
+        /* Redraw the glyph under the cursor in the bg color so it
+         * reads as inverse — true Ghostty look. */
+        char ch[2] = { g_grid[g_cy][g_cx].ch ? g_grid[g_cy][g_cx].ch : ' ', 0 };
+        ox_draw_text(g_win,
+                      MARGIN + g_cx * CELL_W,
+                      MARGIN + g_cy * CELL_H + (CELL_H - 8) / 2,
+                      ch, COL_TERM_BG);
+    } else {
+        /* Indicate scrollback view via a status strip at the bottom. */
+        char hint[64];
+        snprintf(hint, sizeof(hint),
+                 "SCROLLBACK  -%d / %d   (Esc / End to return)",
+                 g_scroll_off, g_sb_count);
+        ox_draw_rect(g_win, 0, WIN_H - 20, WIN_W, 20,
+                      OX_RGB(45, 45, 60));
+        ox_draw_text(g_win, MARGIN, WIN_H - 14, hint, COL_TERM_CURSOR);
+    }
     ox_present(g_win);
     g_dirty = 0;
 }
@@ -345,7 +417,43 @@ int main(int argc, char **argv) {
         ox_event_t ev;
         while (ox_poll_event(&ev)) {
             if (ev.type == OX_EV_CLOSE) { running = 0; break; }
+            if (ev.type == OX_EV_MOUSE && ev.mouse_kind == OX_MOUSE_WHEEL) {
+                /* Wheel scrolls the scrollback when up, or jumps
+                 * back to live when scrolling down at the bottom. */
+                int prev = g_scroll_off;
+                g_scroll_off += ev.wheel_delta * 3;
+                if (g_scroll_off < 0)            g_scroll_off = 0;
+                if (g_scroll_off > g_sb_count)   g_scroll_off = g_sb_count;
+                if (g_scroll_off != prev) g_dirty = 1;
+                continue;
+            }
             if (ev.type == OX_EV_KEY) {
+                /* PageUp/PageDown navigate scrollback. Shift+arrows
+                 * could later page line-by-line; for now PageUp/Dn
+                 * is the canonical Ghostty motion. */
+                if (ev.keycode == OX_KEY_PGUP) {
+                    g_scroll_off += ROWS / 2;
+                    if (g_scroll_off > g_sb_count) g_scroll_off = g_sb_count;
+                    g_dirty = 1;
+                    continue;
+                }
+                if (ev.keycode == OX_KEY_PGDN) {
+                    g_scroll_off -= ROWS / 2;
+                    if (g_scroll_off < 0) g_scroll_off = 0;
+                    g_dirty = 1;
+                    continue;
+                }
+                if (ev.keycode == OX_KEY_END || ev.keycode == OX_KEY_ESC) {
+                    if (g_scroll_off > 0) { g_scroll_off = 0; g_dirty = 1; }
+                    if (ev.keycode == OX_KEY_END) continue;
+                    /* ESC falls through so the shell can also see it. */
+                }
+                /* If user types while scrolled up, snap back to live. */
+                if (g_scroll_off > 0 &&
+                    (ev.ascii || ev.keycode == OX_KEY_ENTER ||
+                     ev.keycode == OX_KEY_BACKSPACE)) {
+                    g_scroll_off = 0; g_dirty = 1;
+                }
                 /* Map ascii to bytes for the shell. */
                 if (ev.ascii) {
                     char c = (char)ev.ascii;
