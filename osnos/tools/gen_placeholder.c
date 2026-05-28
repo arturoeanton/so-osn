@@ -189,8 +189,19 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[1], "girl") == 0) {
         gen_girl();
     } else {
-        fprintf(stderr, "unknown theme: %s\n", argv[1]);
-        return 2;
+        /* Unknown wallpaper name — happens on hosts without ImageMagick
+         * (gen_wallpapers.sh falls back to placeholders for every name
+         * in res/wallpapers/source/). Pick one of the two themes based
+         * on a tiny hash of the name so the user sees some variety
+         * instead of every wallpaper looking identical, and so the
+         * build never fails just because the host lacks `convert`. */
+        unsigned h = 0;
+        for (const char *p = argv[1]; *p; p++) h = h * 31 + (unsigned char)*p;
+        if (h & 1) gen_samurai(); else gen_girl();
+        fprintf(stderr, "note: '%s' has no procedural theme — using %s "
+                        "placeholder (install ImageMagick to use the "
+                        "real source image)\n",
+                argv[1], (h & 1) ? "samurai" : "girl");
     }
     FILE *f = fopen(argv[2], "wb");
     if (!f) { perror(argv[2]); return 1; }

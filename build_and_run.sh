@@ -156,6 +156,12 @@ Notes:
     packaged by the distro (Fedora as of 2026). No manual install needed.
   - On Linux gcc/cc is needed by limine's host Makefile + musl configure.
   - kernel-deps + tinycc are cloned automatically on first run (need git).
+  - Optional: ImageMagick (\`convert\`) lets the build use the real JPG
+    wallpapers from res/wallpapers/source/. Without it, every wallpaper
+    falls back to a procedural samurai/girl placeholder.
+      Fedora: sudo dnf install ImageMagick
+      Debian: sudo apt install imagemagick
+      Arch:   sudo pacman -S imagemagick
 EOF
             exit 1
         fi
