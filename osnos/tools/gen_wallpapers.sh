@@ -58,6 +58,24 @@ if command -v convert >/dev/null 2>&1; then
     have_convert=1
 fi
 
+# Loud warning if convert is missing AND there are real source images
+# to convert. Without ImageMagick every wallpaper becomes one of two
+# procedural placeholders, which is confusing because the settings UI
+# still lists all 9 names — the user just sees them repeat.
+if [ "$have_convert" -eq 0 ] && [ -n "$names" ]; then
+    echo "" >&2
+    echo "  WARNING: ImageMagick (\`convert\`) not found." >&2
+    echo "           All wallpapers will be procedural placeholders" >&2
+    echo "           (every name in res/wallpapers/source/ ends up" >&2
+    echo "           looking like samurai or girl, not the real image)." >&2
+    echo "           Install it for the real wallpapers:" >&2
+    echo "             Fedora: sudo dnf install ImageMagick" >&2
+    echo "             Debian: sudo apt install imagemagick" >&2
+    echo "             Arch:   sudo pacman -S imagemagick" >&2
+    echo "             macOS:  brew install imagemagick" >&2
+    echo "" >&2
+fi
+
 for name in $names; do
     src=
     for ext in png jpg jpeg; do
