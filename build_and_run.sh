@@ -312,15 +312,30 @@ fi
 # us. PS/2 mouse is relative-deltas only, and the way QEMU translates host
 # motion to those deltas depends on the display backend:
 #   - cocoa (macOS): captures the cursor implicitly; motion feels smooth.
-#   - gtk   (Linux): without grab-on-hover the host cursor drifts away
-#     from the guest cursor on every move — feels broken. Forcing
-#     grab-on-hover=on gives the same behaviour as cocoa.
+#   - gtk   (Linux/X11): grab-on-hover=on gives the same behaviour.
+#   - gtk   (Linux/Wayland): Wayland doesn't allow the X11-style global
+#     cursor grab GTK uses for grab-on-hover, so the guest cursor drifts
+#     out of sync with the host. Workaround: force GTK to use XWayland
+#     via GDK_BACKEND=x11 — the window appears as a regular X11 client
+#     under XWayland and the grab works again.
 # Override the backend with QEMU_DISPLAY=sdl (or whatever) if gtk still
 # misbehaves on a particular host.
 DISPLAY_FLAG=""
 case "$(uname -s)" in
     Darwin) DISPLAY_FLAG="-display ${QEMU_DISPLAY:-cocoa,zoom-to-fit=on}" ;;
-    Linux)  DISPLAY_FLAG="-display ${QEMU_DISPLAY:-gtk,grab-on-hover=on}" ;;
+    Linux)
+        DISPLAY_FLAG="-display ${QEMU_DISPLAY:-gtk,grab-on-hover=on}"
+        # If we're on a Wayland session (labwc / sway / GNOME-Wayland /
+        # KDE-Wayland / Hyprland / ...), force GTK over XWayland so
+        # cursor grab semantics match X11. Users who explicitly want
+        # native Wayland can override with QEMU_DISPLAY=sdl or set
+        # GDK_BACKEND=wayland in their environment before running.
+        if [[ -z "${GDK_BACKEND:-}" ]] && \
+           [[ -n "${WAYLAND_DISPLAY:-}" || "${XDG_SESSION_TYPE:-}" == "wayland" ]]; then
+            echo "==> Wayland detected — forcing GDK_BACKEND=x11 for cursor grab"
+            export GDK_BACKEND=x11
+        fi
+        ;;
 esac
 
 # Serial routing:
