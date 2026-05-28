@@ -62,13 +62,20 @@ if [[ "$ACTION" != "clean" ]]; then
         fi
         echo "==> fetching limine (one-time bootstrap — distro lacks it)"
         rm -rf "$LIMINE_VENDOR"
-        # v9.x-binary is the upstream binary branch — ships the
+        # v12.x-binary is the upstream binary branch — ships the
         # pre-built BIOS / UEFI blobs (limine-bios-cd.bin, BOOTX64.EFI,
         # …) at the repo root; `make` only builds the small host `limine`
         # binary used for `limine bios-install`. Pinned to the binary
         # branch (not master) so we don't accidentally pick up the
         # unbuilt source tree.
-        if ! git clone --quiet --depth 1 --branch v9.x-binary \
+        #
+        # IMPORTANT: keep this in sync with the brew install on macOS.
+        # The kernel-deps/limine-protocol header (pinned by
+        # kernel-deps/get-deps) must match the major version of the
+        # bootloader. v12.x matches brew's `limine` formula as of 2026
+        # (Limine 12.3.x); bumping the kernel-deps protocol pin and the
+        # branch below should be done together.
+        if ! git clone --quiet --depth 1 --branch v12.x-binary \
             https://github.com/limine-bootloader/limine.git "$LIMINE_VENDOR"; then
             echo "error: git clone of limine failed (network / DNS?)." >&2
             exit 1
