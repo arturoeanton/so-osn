@@ -11,11 +11,13 @@ LINKER := $(DEPSDIR)/linker-scripts/$(ARCH).lds
 
 CC := clang
 LD := ld.lld
-# Use llvm-* binutils so we work cross-format on macOS. The native
-# `/usr/bin/ar` invokes BSD ranlib which rejects ELF members ("not a
-# mach-o file"); `objcopy` doesn't ship at all on macOS. llvm-ar and
-# llvm-objcopy are format-agnostic and produce valid GNU output.
-AR      := $(shell command -v llvm-ar      2>/dev/null || echo /opt/homebrew/opt/llvm/bin/llvm-ar)
+# Use llvm-* binutils on macOS because the native `/usr/bin/ar` invokes
+# BSD ranlib which rejects ELF members ("not a mach-o file"), and
+# `objcopy` doesn't ship at all. On Linux, GNU binutils' plain `ar` /
+# `objcopy` handle ELF correctly, so we prefer them as the second fallback
+# after llvm-*. The hardcoded brew path is the last resort for macOS
+# users whose llvm keg isn't symlinked onto PATH.
+AR      := $(shell command -v llvm-ar      2>/dev/null || command -v ar      2>/dev/null || echo /opt/homebrew/opt/llvm/bin/llvm-ar)
 OBJCOPY := $(shell command -v llvm-objcopy 2>/dev/null || command -v objcopy 2>/dev/null || echo /opt/homebrew/opt/llvm/bin/llvm-objcopy)
 
 CFLAGS := -g -O2 -pipe \
@@ -269,7 +271,8 @@ XORRISO ?= xorriso
 LIMINE  ?= limine
 
 LIMINE_DIR ?= $(shell \
-    if [ -d /opt/homebrew/share/limine ]; then echo /opt/homebrew/share/limine; \
+    if   [ -f $(CURDIR)/vendor/limine/limine-bios-cd.bin ]; then echo $(CURDIR)/vendor/limine; \
+    elif [ -d /opt/homebrew/share/limine ]; then echo /opt/homebrew/share/limine; \
     elif [ -d /usr/local/share/limine ]; then echo /usr/local/share/limine; \
     elif [ -d /usr/share/limine ]; then echo /usr/share/limine; \
     fi)
@@ -1199,9 +1202,13 @@ $(NS_NSUTILS_A): $(NS_NSUTILS_OBJS)
 # --- Stage 2b: libnslog (596 LOC). The filter parser is generated
 # by bison/flex from src/filter-lexer.l + src/filter-parser.y. macOS
 # stock bison (2.3) is too old (libnslog uses bison-3+ syntax like
-# `%destructor`). We detect a brew-installed bison-3 and use it.
+# `%destructor`). On Linux, the distro `bison` is already v3+; on
+# macOS we want brew's keg-only bison. Try brew paths first, then fall
+# back to whatever `bison` is in PATH (Linux case, or macOS users who
+# have brew bison linked).
 NS_BISON := $(shell command -v /opt/homebrew/opt/bison/bin/bison \
-                              /usr/local/opt/bison/bin/bison 2>/dev/null \
+                              /usr/local/opt/bison/bin/bison \
+                              bison 2>/dev/null \
                     | head -1)
 NS_FLEX  := $(shell command -v flex)
 
