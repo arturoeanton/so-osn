@@ -62,22 +62,44 @@ if [[ "$ACTION" != "clean" ]]; then
         fi
         echo "==> fetching limine (one-time bootstrap — distro lacks it)"
         rm -rf "$LIMINE_VENDOR"
-        # v12.x-binary is the upstream binary branch — ships the
-        # pre-built BIOS / UEFI blobs (limine-bios-cd.bin, BOOTX64.EFI,
-        # …) at the repo root; `make` only builds the small host `limine`
-        # binary used for `limine bios-install`. Pinned to the binary
-        # branch (not master) so we don't accidentally pick up the
-        # unbuilt source tree.
+        # The upstream `-binary` branches ship pre-built BIOS / UEFI
+        # blobs (limine-bios-cd.bin, BOOTX64.EFI, …) at the repo root;
+        # `make` only builds the small host `limine` tool used for
+        # `limine bios-install`. We never want the source/master branch
+        # because it ships unbuilt sources.
         #
-        # IMPORTANT: keep this in sync with the brew install on macOS.
-        # The kernel-deps/limine-protocol header (pinned by
-        # kernel-deps/get-deps) must match the major version of the
-        # bootloader. v12.x matches brew's `limine` formula as of 2026
-        # (Limine 12.3.x); bumping the kernel-deps protocol pin and the
-        # branch below should be done together.
-        if ! git clone --quiet --depth 1 --branch v12.x-binary \
+        # Branch naming is `v<MAJOR>.x-binary`. The major number tracks
+        # the bootloader's protocol version. The kernel-deps/limine-protocol
+        # header pinned by kernel-deps/get-deps must match the major;
+        # if you bump one, bump the other.
+        #
+        # To avoid hardcoding a major that might not exist upstream, we
+        # query the remote and pick the highest `v<N>.x-binary` branch.
+        # Override with LIMINE_BRANCH=v12.x-binary (or similar) if the
+        # discovered branch turns out to be too new for the pinned
+        # protocol header.
+        if [[ -n "${LIMINE_BRANCH:-}" ]]; then
+            limine_branch="$LIMINE_BRANCH"
+            echo "    using LIMINE_BRANCH=$limine_branch (override)"
+        else
+            echo "    discovering latest -binary branch on upstream..."
+            limine_branch="$(git ls-remote --heads \
+                https://github.com/limine-bootloader/limine.git 2>/dev/null \
+                | awk '{print $2}' \
+                | sed -n 's@^refs/heads/\(v[0-9]\{1,\}\.x-binary\)$@\1@p' \
+                | sort -V -r \
+                | head -1)"
+            if [[ -z "$limine_branch" ]]; then
+                echo "error: could not discover a v<N>.x-binary branch on limine upstream." >&2
+                echo "       Set LIMINE_BRANCH=<branch> to override." >&2
+                exit 1
+            fi
+            echo "    picked $limine_branch"
+        fi
+        if ! git clone --quiet --depth 1 --branch "$limine_branch" \
             https://github.com/limine-bootloader/limine.git "$LIMINE_VENDOR"; then
-            echo "error: git clone of limine failed (network / DNS?)." >&2
+            echo "error: git clone of limine ($limine_branch) failed." >&2
+            echo "       Try LIMINE_BRANCH=<other-branch> ./build_and_run.sh ..." >&2
             exit 1
         fi
         if ! make -C "$LIMINE_VENDOR"; then
