@@ -307,10 +307,20 @@ if [[ "$ACTION" != "clean" ]] && [[ ! -f osnos/vendor/musl/build-osnos/lib/libc.
 fi
 
 # --- pick a QEMU display backend that exists on this host -------------------
+# osnos only has a PS/2 AUX mouse driver (no USB, no virtio-input), so the
+# usual QEMU `-device usb-tablet` absolute-pointer trick does nothing for
+# us. PS/2 mouse is relative-deltas only, and the way QEMU translates host
+# motion to those deltas depends on the display backend:
+#   - cocoa (macOS): captures the cursor implicitly; motion feels smooth.
+#   - gtk   (Linux): without grab-on-hover the host cursor drifts away
+#     from the guest cursor on every move — feels broken. Forcing
+#     grab-on-hover=on gives the same behaviour as cocoa.
+# Override the backend with QEMU_DISPLAY=sdl (or whatever) if gtk still
+# misbehaves on a particular host.
 DISPLAY_FLAG=""
 case "$(uname -s)" in
-    Darwin) DISPLAY_FLAG="-display cocoa,zoom-to-fit=on" ;;
-    Linux)  DISPLAY_FLAG="-display gtk"   ;;
+    Darwin) DISPLAY_FLAG="-display ${QEMU_DISPLAY:-cocoa,zoom-to-fit=on}" ;;
+    Linux)  DISPLAY_FLAG="-display ${QEMU_DISPLAY:-gtk,grab-on-hover=on}" ;;
 esac
 
 # Serial routing:
