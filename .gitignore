@@ -1,6 +1,9 @@
 # Build artifacts
 osnos/build/
-osnos/**/build/
+# Note: don't use a wildcard like `osnos/**/build/` — netsurf vendor
+# dirs contain `build/` subdirs with code-gen scripts + data (Entities,
+# Aliases, *.pl) that ARE part of the source tree and must be present
+# on a fresh clone. Only the truly-generated build dirs go below.
 
 # Generated images
 *.iso
@@ -27,3 +30,7 @@ osnos/vendor/musl/build-osnos/lib/
 osnos/vendor/musl/build-osnos/config.mak
 osnos/vendor/tinycc/config.h
 osnos/vendor/tinycc/config.mak
+
+# Auto-vendored on Linux when the distro doesn't package limine.
+# It's a clone of the upstream binary branch, not source we maintain.
+osnos/vendor/limine/
