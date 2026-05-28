@@ -68,9 +68,16 @@ if [[ "$ACTION" != "clean" ]]; then
         # binary used for `limine bios-install`. Pinned to the binary
         # branch (not master) so we don't accidentally pick up the
         # unbuilt source tree.
-        git clone --quiet --depth 1 --branch v9.x-binary \
-            https://github.com/limine-bootloader/limine.git "$LIMINE_VENDOR"
-        make -C "$LIMINE_VENDOR"
+        if ! git clone --quiet --depth 1 --branch v9.x-binary \
+            https://github.com/limine-bootloader/limine.git "$LIMINE_VENDOR"; then
+            echo "error: git clone of limine failed (network / DNS?)." >&2
+            exit 1
+        fi
+        if ! make -C "$LIMINE_VENDOR"; then
+            echo "error: building limine host tool failed." >&2
+            echo "       Make sure gcc/cc is installed: sudo dnf install gcc" >&2
+            exit 1
+        fi
     fi
     # Prepend the vendored bin so the rest of the script + the
     # LIMINE_DIR auto-detection below pick it up automatically.
@@ -84,10 +91,15 @@ if [[ "$ACTION" != "clean" ]]; then
     maybe_need mformat            mtools
     maybe_need mcopy              mtools
     maybe_need objcopy            binutils
+    maybe_need ar                 binutils
     maybe_need bison              bison
     maybe_need flex               flex
     maybe_need limine             limine
     maybe_need qemu-system-x86_64 qemu
+    # Bootstraps below clone repos + run host make. On macOS brew always
+    # has these; on Linux distros the minimal install might not.
+    maybe_need git                git
+    maybe_need make               make
 
     # macOS ships GNU Make 3.81 (from 2006). It has a bug where
     # pattern rules with multi-component stems don't win over more
@@ -135,12 +147,15 @@ if [[ "$ACTION" != "clean" ]]; then
 
 Install the missing tools:
   macOS:    brew install ${UNIQ_BREW[*]}
-  Fedora:   sudo dnf install clang lld xorriso mtools qemu-system-x86 git make
-  Debian:   sudo apt install clang lld xorriso mtools qemu-system-x86 git make
-  Arch:     sudo pacman -S clang lld xorriso mtools qemu git make
+  Fedora:   sudo dnf install clang lld xorriso mtools binutils qemu-system-x86 git make gcc
+  Debian:   sudo apt install clang lld xorriso mtools binutils qemu-system-x86 git make gcc
+  Arch:     sudo pacman -S clang lld xorriso mtools binutils qemu git make gcc
 
-Note: limine is auto-vendored into osnos/vendor/limine on Linux when not
-packaged by the distro (Fedora as of 2026). No manual install needed.
+Notes:
+  - limine is auto-vendored into osnos/vendor/limine on Linux when not
+    packaged by the distro (Fedora as of 2026). No manual install needed.
+  - On Linux gcc/cc is needed by limine's host Makefile + musl configure.
+  - kernel-deps + tinycc are cloned automatically on first run (need git).
 EOF
             exit 1
         fi
@@ -182,19 +197,39 @@ else
 fi
 
 # --- bootstrap kernel-deps (cloned, not vendored) ---------------------------
+# osnos/kernel-deps/{cc-runtime,freestnd-c-hdrs,limine-protocol} are
+# cloned by the helper script; on a fresh repo clone only the linker
+# scripts + the helper itself are present in the working tree. The
+# `.deps-obtained` marker is created at the end of get-deps.
 if [[ "$ACTION" != "clean" ]] && [[ ! -f osnos/kernel-deps/.deps-obtained ]]; then
     echo "==> fetching kernel-deps (one-time bootstrap)"
-    (cd osnos/kernel-deps && ./get-deps)
+    if ! (cd osnos/kernel-deps && ./get-deps); then
+        echo "error: kernel-deps bootstrap failed (network / DNS?)." >&2
+        echo "       Re-run after fixing connectivity; .deps-obtained" >&2
+        echo "       was not written, so the next run will retry." >&2
+        exit 1
+    fi
 fi
 
-# --- bootstrap tinycc 0.9.27 source (vendor/tinycc/ is empty in fresh clones)
-if [[ "$ACTION" != "clean" ]] && [[ -z "$(ls -A osnos/vendor/tinycc 2>/dev/null)" ]]; then
+# --- bootstrap tinycc 0.9.27 source -----------------------------------------
+# osnos/vendor/tinycc is recorded in git as an orphan gitlink (160000 mode
+# pointing at upstream commit 1cd776bd..., but no .gitmodules entry), so a
+# fresh `git clone` of the parent repo creates an empty directory there
+# rather than populating any content. We detect that case (no `tcc.c` on
+# disk) and shallow-clone the release_0_9_27 tag into it directly.
+if [[ "$ACTION" != "clean" ]] && [[ ! -f osnos/vendor/tinycc/tcc.c ]]; then
     echo "==> fetching tinycc 0.9.27 (one-time)"
     tmpdir="$(mktemp -d)"
-    git clone --quiet --depth 1 -b release_0_9_27 \
-        https://repo.or.cz/tinycc.git "$tmpdir/tinycc"
+    if ! git clone --quiet --depth 1 -b release_0_9_27 \
+            https://repo.or.cz/tinycc.git "$tmpdir/tinycc"; then
+        echo "error: clone of tinycc from repo.or.cz failed." >&2
+        echo "       Check network access to https://repo.or.cz/" >&2
+        rm -rf "$tmpdir"
+        exit 1
+    fi
     rm -rf "$tmpdir/tinycc/.git"
-    # /. copies contents (incl. dotfiles) into the existing empty dir
+    mkdir -p osnos/vendor/tinycc
+    # /. copies contents (incl. dotfiles) into the (possibly empty) dest
     cp -R "$tmpdir/tinycc/." osnos/vendor/tinycc/
     rm -rf "$tmpdir"
 fi
