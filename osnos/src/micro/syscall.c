@@ -3444,15 +3444,36 @@ int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
             return 0;
         }
         case TTY_TIOCGWINSZ: {
-            /* Default to 80x25 (matches oxterm's grid). Without this,
-             * shells that ask the kernel for their winsize see 0x0
-             * and either disable line-editing (no arrow-key history)
-             * or compute redraws against a zero-width line — both
-             * misbehave. Future TIOCSWINSZ from oxterm (on resize)
-             * would override these per-pty. */
-            struct osnos_winsize ws = { 25, 80, 0, 0 };
-            if (copy_to_user(arg, &ws, sizeof(ws)) != OSNOS_OK)
+            /* Per-PTY winsize. Defaults to 25x80 (see pty_clear), but
+             * the master side can override via TIOCSWINSZ when the
+             * surrounding terminal (oxterm) is resized. */
+            if (copy_to_user(arg, &p->winsize,
+                             sizeof(p->winsize)) != OSNOS_OK)
                 return err(OSNOS_EFAULT);
+            return 0;
+        }
+        case TTY_TIOCSWINSZ: {
+            /* Master side calls this on visual resize. We store the new
+             * winsize and, if it actually changed, deliver SIGWINCH to
+             * the PTY's fg pgid so the slave (shell, editor) re-fetches
+             * via TIOCGWINSZ and reflows. */
+            struct osnos_winsize ws;
+            if (copy_from_user(&ws, arg, sizeof(ws)) != OSNOS_OK)
+                return err(OSNOS_EFAULT);
+            int changed = (ws.ws_row != p->winsize.ws_row) ||
+                          (ws.ws_col != p->winsize.ws_col) ||
+                          (ws.ws_xpixel != p->winsize.ws_xpixel) ||
+                          (ws.ws_ypixel != p->winsize.ws_ypixel);
+            p->winsize = ws;
+            if (changed && p->fg_pgid != 0) {
+                /* Linux kill(-pgid, sig) — broadcast to every task in
+                 * the foreground process group of this PTY. Negative
+                 * pid encodes "to pgid |pid|". SIGWINCH=28 has the
+                 * default "ignore" disposition, but processes that
+                 * install a handler (editors, shells with line edit)
+                 * will get notified. */
+                sys_kill((uint64_t)(int64_t)(-(int64_t)p->fg_pgid), 28);
+            }
             return 0;
         }
         case 0x540F /* TIOCGPGRP */: {

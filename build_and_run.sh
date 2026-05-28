@@ -47,6 +47,37 @@ if [[ "$ACTION" != "clean" ]]; then
         done
     fi
 
+    # On Linux distros that don't package limine (e.g. Fedora as of
+    # 2026), vendor it from the upstream binary branch BEFORE the
+    # toolchain check so `maybe_need limine` below finds it. macOS goes
+    # the brew route — its `limine` formula stays in place.
+    LIMINE_VENDOR="$(pwd)/osnos/vendor/limine"
+    if [[ "$(uname -s)" == "Linux" ]] && \
+       ! command -v limine >/dev/null 2>&1 && \
+       [[ ! -x "$LIMINE_VENDOR/limine" ]]; then
+        if ! command -v git >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
+            echo "error: limine bootstrap needs git + make on the host." >&2
+            echo "       sudo dnf install git make gcc" >&2
+            exit 1
+        fi
+        echo "==> fetching limine (one-time bootstrap — distro lacks it)"
+        rm -rf "$LIMINE_VENDOR"
+        # v9.x-binary is the upstream binary branch — ships the
+        # pre-built BIOS / UEFI blobs (limine-bios-cd.bin, BOOTX64.EFI,
+        # …) at the repo root; `make` only builds the small host `limine`
+        # binary used for `limine bios-install`. Pinned to the binary
+        # branch (not master) so we don't accidentally pick up the
+        # unbuilt source tree.
+        git clone --quiet --depth 1 --branch v9.x-binary \
+            https://github.com/limine-bootloader/limine.git "$LIMINE_VENDOR"
+        make -C "$LIMINE_VENDOR"
+    fi
+    # Prepend the vendored bin so the rest of the script + the
+    # LIMINE_DIR auto-detection below pick it up automatically.
+    if [[ -x "$LIMINE_VENDOR/limine" ]]; then
+        export PATH="$LIMINE_VENDOR:$PATH"
+    fi
+
     maybe_need clang              llvm
     maybe_need ld.lld             lld
     maybe_need xorriso            xorriso
@@ -104,18 +135,23 @@ if [[ "$ACTION" != "clean" ]]; then
 
 Install the missing tools:
   macOS:    brew install ${UNIQ_BREW[*]}
-  Fedora:   sudo dnf install clang lld xorriso mtools limine qemu-system-x86
-  Debian:   sudo apt install clang lld xorriso mtools limine qemu-system-x86
-  Arch:     sudo pacman -S clang lld xorriso mtools limine qemu
+  Fedora:   sudo dnf install clang lld xorriso mtools qemu-system-x86 git make
+  Debian:   sudo apt install clang lld xorriso mtools qemu-system-x86 git make
+  Arch:     sudo pacman -S clang lld xorriso mtools qemu git make
+
+Note: limine is auto-vendored into osnos/vendor/limine on Linux when not
+packaged by the distro (Fedora as of 2026). No manual install needed.
 EOF
             exit 1
         fi
     fi
 fi
 
-# --- locate Limine boot files (installed by `brew install limine` etc) ------
+# --- locate Limine boot files (installed by `brew install limine`, the
+# Linux distro package, or vendored at osnos/vendor/limine) ------------------
 if [[ -z "${LIMINE_DIR:-}" ]]; then
     for candidate in \
+        "$(pwd)/osnos/vendor/limine" \
         /opt/homebrew/share/limine \
         /usr/local/share/limine \
         /usr/share/limine
@@ -131,9 +167,9 @@ if [[ -z "${LIMINE_DIR:-}" ]] && [[ "$ACTION" != "clean" ]]; then
     cat >&2 <<EOF
 error: Limine boot files not found.
 
-The 'limine' binary is in PATH but its share/ directory wasn't located
-at /opt/homebrew/share/limine, /usr/local/share/limine, or /usr/share/limine.
-Set LIMINE_DIR=/path/to/limine/share manually.
+Looked at osnos/vendor/limine (auto-bootstrap), /opt/homebrew/share/limine,
+/usr/local/share/limine, /usr/share/limine. Set LIMINE_DIR=/path/to/limine
+manually if the binaries live elsewhere.
 EOF
     exit 1
 fi

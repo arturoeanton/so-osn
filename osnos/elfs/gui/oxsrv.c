@@ -155,6 +155,11 @@ typedef struct {
     uint32_t    *pending_back;
     size_t       pending_bytes;
     char         pending_shm[32];
+    /* Opt-in: 1 if the app handles OX_EV_RESIZE properly. On zoom we
+     * then allocate a fresh SHM at the maximized dimensions and send
+     * IPC_OX_EVENT_RESIZE instead of doing the legacy 2x scaled blit.
+     * Set at create time from IPC_OX_WINDOW_CREATE arg1 bit 0. */
+    int          resizable;
 } ox_window_t;
 
 static ox_window_t g_wins[MAX_WINS];
@@ -691,7 +696,8 @@ static void parse_oxrc(void) {
 
 /* ---------------- Window mgmt ----------------------------------- */
 
-static int alloc_window(uint64_t owner_pid, int w, int h, const char *title) {
+static int alloc_window(uint64_t owner_pid, int w, int h, const char *title,
+                        int resizable) {
     if (w <= 0 || h <= 0) return -1;
     if (w > MAX_WIN_W) w = MAX_WIN_W;
     if (h > MAX_WIN_H) h = MAX_WIN_H;
@@ -735,6 +741,7 @@ static int alloc_window(uint64_t owner_pid, int w, int h, const char *title) {
             g_wins[i].pending_back = NULL;
             g_wins[i].pending_bytes = 0;
             g_wins[i].pending_shm[0] = 0;
+            g_wins[i].resizable = resizable;
             snprintf(g_wins[i].shm_name, sizeof(g_wins[i].shm_name),
                      "/oxw_%d_v0", g_wins[i].id);
             int shmfd = shm_open(g_wins[i].shm_name,
@@ -927,15 +934,132 @@ static int resize_window(int slot, int new_w, int new_h) {
     return 0;
 }
 
-/* Toggle WIN_NORMAL ↔ WIN_ZOOM. Until apps opt into the RESIZE
- * protocol we stage zoom as a 2x scaled blit (compositor reads the
- * original w×h buffer and writes 2×-magnified pixels into the larger
- * on-screen rect). State machine: NORMAL stores bounds and grows the
- * frame to ~2x clamped to screen; ZOOM restores the saved frame. */
+/* Allocate a fresh SHM at (new_w, new_h), point the window's back
+ * pointer at it, and stash the old backing into pending_* so it can be
+ * released when the client ACKs by sending its first PRESENT against
+ * the new buffer (see IPC_OX_PRESENT handler).
+ *
+ * Returns 0 on success, -1 on alloc/mmap failure (in which case the
+ * window's backing is left untouched).
+ *
+ * Used by the real-resize path in zoom_slot for resizable apps. The
+ * client's lib/libc/ox.c side already auto-remaps when it sees the
+ * OX_EV_RESIZE event (with the new shm name in data[]), so the two
+ * sides converge after one event round-trip. */
+static int swap_window_shm(int slot, int new_w, int new_h) {
+    if (slot < 0 || slot >= MAX_WINS) return -1;
+    ox_window_t *w = &g_wins[slot];
+    if (!w->used) return -1;
+    if (new_w <= 0 || new_h <= 0) return -1;
+    if (new_w > MAX_WIN_W) new_w = MAX_WIN_W;
+    if (new_h > MAX_WIN_H) new_h = MAX_WIN_H;
+
+    /* New SHM name uses a monotonic version so a fast double-resize
+     * doesn't collide on the same /oxw_<id>_vN name. */
+    char new_name[32];
+    int next_version = w->shm_version + 1;
+    snprintf(new_name, sizeof(new_name), "/oxw_%d_v%d", w->id, next_version);
+
+    int shmfd = shm_open(new_name, O_CREAT | O_RDWR, 0600);
+    if (shmfd < 0) return -1;
+    size_t bsz = (size_t)new_w * new_h * sizeof(uint32_t);
+    size_t mmap_bsz = (bsz + 4095) & ~(size_t)4095;
+    if (ftruncate(shmfd, (off_t)mmap_bsz) < 0) {
+        close(shmfd); shm_unlink(new_name);
+        return -1;
+    }
+    void *p = mmap(0, mmap_bsz, PROT_READ | PROT_WRITE,
+                   MAP_SHARED, shmfd, 0);
+    close(shmfd);
+    if (!p || p == (void *)-1) { shm_unlink(new_name); return -1; }
+
+    /* Seed with the window body colour so any transient frame between
+     * our swap and the client's first render shows the body colour
+     * rather than uninitialised memory. */
+    for (size_t k = 0; k < (size_t)new_w * new_h; k++)
+        ((uint32_t *)p)[k] = COL_BODY_BG;
+
+    /* If a previous resize hadn't been ACKed yet (client hadn't sent
+     * a PRESENT against the previously-allocated new SHM), release
+     * THAT pending now — only one outstanding resize at a time. */
+    if (w->pending_back) {
+        munmap(w->pending_back, w->pending_bytes);
+        if (w->pending_shm[0]) shm_unlink(w->pending_shm);
+        w->pending_back = NULL;
+        w->pending_bytes = 0;
+        w->pending_shm[0] = 0;
+    }
+
+    /* Move current → pending (kept alive until client's next PRESENT).
+     * The client is still drawing into the OLD SHM right now; we must
+     * NOT munmap until they acknowledge they've switched. */
+    w->pending_back  = w->back;
+    w->pending_bytes = w->back_bytes;
+    memcpy(w->pending_shm, w->shm_name, sizeof(w->pending_shm));
+
+    /* Install new. */
+    w->back       = (uint32_t *)p;
+    w->back_bytes = mmap_bsz;
+    memcpy(w->shm_name, new_name, sizeof(w->shm_name));
+    w->shm_version = next_version;
+    w->w = new_w;
+    w->h = new_h;
+    w->buf_w = new_w;
+    w->buf_h = new_h;
+    return 0;
+}
+
+/* Send IPC_OX_EVENT_RESIZE to the window's owner. Tells the client the
+ * new (w,h) and packs the new shm name in data[] so lib/libc/ox.c can
+ * shm_open + mmap and swap its local backing pointer in one shot. */
+static void send_resize_event(int slot, int new_w, int new_h) {
+    if (slot < 0 || slot >= MAX_WINS) return;
+    ox_window_t *w = &g_wins[slot];
+    ipc_msg_t e;
+    memset(&e, 0, sizeof(e));
+    e.to   = w->owner_pid;
+    e.type = IPC_OX_EVENT_RESIZE;
+    e.arg0 = (uint64_t)w->id;
+    e.arg1 = ((uint64_t)(uint32_t)new_w << 32) | (uint32_t)new_h;
+    size_t nl = strnlen(w->shm_name, sizeof(w->shm_name));
+    if (nl >= sizeof(e.data)) nl = sizeof(e.data) - 1;
+    memcpy(e.data, w->shm_name, nl);
+    e.data[nl] = 0;
+    /* Retry on EAGAIN — same backoff style as send_response. */
+    for (int attempt = 0; attempt < 100; attempt++) {
+        if (ipc_send(&e) == 0) break;
+        if (errno != EAGAIN) break;
+        struct timespec ts = { 0, 2 * 1000000 };
+        nanosleep(&ts, 0);
+    }
+}
+
+/* Toggle WIN_NORMAL ↔ WIN_ZOOM.
+ *
+ * For apps that opted in via ox_window_create_resizable, "zoom" really
+ * does maximize: a fresh SHM is allocated at the available screen
+ * area, OX_EV_RESIZE is sent so the client re-renders at the new
+ * dims, and the compositor's body-blit uses the 1:1 path (cells keep
+ * their pixel size — more rows/cols fit, the font doesn't grow).
+ *
+ * For legacy apps that did NOT opt in, we keep the old behaviour: the
+ * frame visually grows to ~2x clamped to screen, and the compositor
+ * scales the original w×h buffer pixel-by-pixel into the bigger
+ * on-screen rect. Looks pixelated but works without app cooperation.
+ *
+ * State machine in both cases stores the pre-zoom bounds in w/x/y/h_saved
+ * so unzoom returns precisely to the prior frame. */
 static void zoom_slot(int slot) {
     ox_window_t *w = &g_wins[slot];
     mark_slot_dirty(slot);
     if (w->state == WIN_ZOOM) {
+        /* Unzoom. */
+        if (w->resizable) {
+            /* Real resize back to the original buffer size. The pre-
+             * zoom x/y are also restored. */
+            swap_window_shm(slot, w->w_saved, w->h_saved);
+            send_resize_event(slot, w->w_saved, w->h_saved);
+        }
         w->x = w->x_saved;
         w->y = w->y_saved;
         w->w = w->w_saved;
@@ -947,16 +1071,35 @@ static void zoom_slot(int slot) {
         w->w_saved = w->w;
         w->h_saved = w->h;
         w->state = WIN_ZOOM;
-        int nw = w->w * 2;
-        int nh = w->h * 2;
         int avail_w = (int)g_scr_w - 8;
         int avail_h = (int)g_scr_h - DESKBAR_H - TITLEBAR_H - 8;
-        if (nw > avail_w) nw = avail_w;
-        if (nh > avail_h) nh = avail_h;
-        w->x = 4;
-        w->y = DESKBAR_H + TITLEBAR_H + 4;
-        w->w = nw;
-        w->h = nh;
+        if (w->resizable) {
+            /* Real maximize — fresh SHM at the full available area,
+             * tell the client, draw 1:1. swap_window_shm already sets
+             * w->w/h to the new size. */
+            int nw = avail_w, nh = avail_h;
+            if (swap_window_shm(slot, nw, nh) == 0) {
+                send_resize_event(slot, nw, nh);
+            } else {
+                /* Allocation failed — fall back to non-resizable
+                 * behaviour so the user at least sees something grow. */
+                w->w = nw;
+                w->h = nh;
+            }
+            w->x = 4;
+            w->y = DESKBAR_H + TITLEBAR_H + 4;
+        } else {
+            /* Legacy 2x scaled-blit path — no SHM realloc, compositor
+             * stretches the original buffer into the larger frame. */
+            int nw = w->w * 2;
+            int nh = w->h * 2;
+            if (nw > avail_w) nw = avail_w;
+            if (nh > avail_h) nh = avail_h;
+            w->x = 4;
+            w->y = DESKBAR_H + TITLEBAR_H + 4;
+            w->w = nw;
+            w->h = nh;
+        }
     }
     mark_slot_dirty(slot);
     g_dirty = 1;
@@ -1172,8 +1315,14 @@ static void draw_window_frame(int slot) {
     }
 
     /* Body blit. In WIN_NORMAL state the buffer is ww×wh (1:1). In
-     * WIN_ZOOM the buffer is the SAVED original dims (w_saved × h_saved)
-     * and we nearest-neighbor scale into ww×wh on screen. */
+     * WIN_ZOOM:
+     *   - For legacy apps (resizable==0) the buffer is still the
+     *     SAVED original dims (w_saved × h_saved) and we
+     *     nearest-neighbor scale into ww×wh on screen.
+     *   - For resizable apps the buffer was reallocated to the new
+     *     dims by zoom_slot/swap_window_shm and we use the same 1:1
+     *     path as WIN_NORMAL. */
+    int scale_zoom = (w->state == WIN_ZOOM) && !w->resizable;
     if (w->back) {
         /* CRITICAL: the source buffer's pitch is the BUFFER width
          * (`buf_w`), not the visible width `ww`. After the user
@@ -1182,21 +1331,19 @@ static void draw_window_frame(int slot) {
          * with the old `src_w = ww` produced a diagonal stride shear
          * — looked like the app got corrupted. Visible w/h still
          * govern WHAT we copy + clip; only the source-stride per
-         * row uses buf_w. For WIN_ZOOM we scale buf_w/buf_h up into
-         * ww/wh via nearest-neighbor. */
+         * row uses buf_w. For legacy WIN_ZOOM we scale buf_w/buf_h
+         * up into ww/wh via nearest-neighbor. */
         int buf_w = w->buf_w > 0 ? w->buf_w : ww;
         int buf_h = w->buf_h > 0 ? w->buf_h : wh;
-        int copy_w = (w->state == WIN_ZOOM) ? buf_w : (ww < buf_w ? ww : buf_w);
-        int copy_h = (w->state == WIN_ZOOM) ? buf_h : (wh < buf_h ? wh : buf_h);
+        int copy_w = scale_zoom ? buf_w : (ww < buf_w ? ww : buf_w);
+        int copy_h = scale_zoom ? buf_h : (wh < buf_h ? wh : buf_h);
         if (copy_w <= 0) copy_w = 1;
         if (copy_h <= 0) copy_h = 1;
         for (int row = 0; row < wh; row++) {
             int dy = wy + row;
             if (dy < 0 || dy >= (int)g_scr_h) continue;
-            /* For NORMAL: row 1:1; for ZOOM: scaled. */
-            int sy = (w->state == WIN_ZOOM)
-                       ? (int)((long)row * copy_h / wh)
-                       : row;
+            /* 1:1 row index unless we're in the legacy scaled-zoom path. */
+            int sy = scale_zoom ? (int)((long)row * copy_h / wh) : row;
             if (sy >= buf_h) sy = buf_h - 1;
             int xs = wx, xe = wx + ww;
             if (xs < 0) xs = 0;
@@ -1205,7 +1352,7 @@ static void draw_window_frame(int slot) {
             if (run <= 0) continue;
             uint32_t *src_row = w->back + (size_t)sy * buf_w;
             uint32_t *dst = g_back + (size_t)dy * g_scr_w + xs;
-            if (w->state == WIN_ZOOM) {
+            if (scale_zoom) {
                 for (int i = 0; i < run; i++) {
                     int col_on_screen = xs - wx + i;
                     int sx = (int)((long)col_on_screen * copy_w / ww);
@@ -1801,11 +1948,13 @@ static void handle_ipc(const ipc_msg_t *m) {
     case IPC_OX_WINDOW_CREATE: {
         int w = (int)((m->arg0 >> 16) & 0xffff);
         int h = (int)( m->arg0        & 0xffff);
+        /* arg1 bit 0 = "I handle OX_EV_RESIZE" — see ox_window_create_resizable. */
+        int resizable = (int)(m->arg1 & 1ULL);
         char title[64];
         size_t tl = strnlen(m->data, sizeof(title) - 1);
         memcpy(title, m->data, tl);
         title[tl] = 0;
-        int slot = alloc_window(from, w, h, title);
+        int slot = alloc_window(from, w, h, title, resizable);
         if (slot < 0) {
             send_response(from, ENOMEM, 0);
         } else {

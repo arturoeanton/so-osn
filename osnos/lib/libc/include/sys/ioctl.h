@@ -8,6 +8,7 @@
 #define TCSETSW    0x5403
 #define TCSETSF    0x5404
 #define TIOCGWINSZ 0x5413
+#define TIOCSWINSZ 0x5414
 
 struct winsize {
     unsigned short ws_row;

@@ -93,6 +93,15 @@ int  ox_init(void);
  * window at a default position; resize/move not yet supported. */
 ox_win_t ox_window_create(int w, int h, const char *title);
 
+/* Like ox_window_create but tells the server "I handle OX_EV_RESIZE
+ * properly — when the user zooms/unzooms, allocate a new SHM at the
+ * new dims and notify me via OX_EV_RESIZE instead of doing the legacy
+ * 2x scaled blit". For apps that don't opt in, the server keeps the
+ * old behaviour (visual zoom that magnifies pixels). Used by oxterm
+ * and any other app that wants more rows/cols at the same font size
+ * when maximized. */
+ox_win_t ox_window_create_resizable(int w, int h, const char *title);
+
 void ox_window_destroy(ox_win_t win);
 void ox_window_set_title(ox_win_t win, const char *title);
 

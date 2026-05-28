@@ -1078,7 +1078,7 @@ $(BUILD)/elfs/%.elf.o: $(BUILD)/elfs/%.elf
 # opens an Ox window saying "port pending".
 # --------------------------------------------------------------------------
 NETSURF_DIR        := vendor/netsurf
-OXNETSURF_ENABLED  ?= 0
+OXNETSURF_ENABLED  ?= 1
 
 # Per-lib source root + (eventual) archive paths. Populated only when
 # the gate flips, but declared unconditionally so other rules can

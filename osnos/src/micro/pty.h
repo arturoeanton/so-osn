@@ -84,6 +84,14 @@ typedef struct pty_pair {
      * whatever the child set. Zero means "no fg pgid set" (treated as
      * "matches the caller" by the GET path to keep ash happy). */
     uint64_t             fg_pgid;
+
+    /* Window size reported to the slave via TIOCGWINSZ. Updated by
+     * TIOCSWINSZ from the master side (e.g. oxterm on user resize),
+     * which also delivers SIGWINCH to fg_pgid so the slave (shell,
+     * editor) reflows. Defaults to 25x80 — matches Linux's default
+     * for a fresh PTY pair, so apps that never ask for a resize keep
+     * the legacy behaviour. */
+    struct osnos_winsize winsize;
 } pty_pair_t;
 
 /* Boot-time pool init — zero all slots. Call once from kmain. */

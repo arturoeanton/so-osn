@@ -2,8 +2,18 @@
  * /bin/oxterm — windowed terminal: PTY + minishell rendered in an Ox
  * window. Reuses the patterns from /bin/term but draws into a grid
  * instead of /dev/fb0.
+ *
+ * Resizable since FASE 12: opts into the Ox real-resize protocol
+ * (ox_window_create_resizable). On maximize/unmaximize the server
+ * reallocates the SHM at the new dims and sends OX_EV_RESIZE; we
+ * recompute rows/cols at the same cell size (CELL_W × CELL_H), realloc
+ * the grid + scrollback, and call TIOCSWINSZ on the master PTY so the
+ * kernel delivers SIGWINCH to the shell's process group — the shell
+ * re-fetches winsize via TIOCGWINSZ and reflows its prompt. Result:
+ * maximizing oxterm grows the usable text area, NOT the font.
  */
 
+#include <alloca.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <ox.h>
@@ -19,13 +29,15 @@
 
 extern char **environ;
 
-#define COLS 80
-#define ROWS 25
-#define CELL_W  8
-#define CELL_H  14            /* extra 2px line-height for breathing room */
-#define MARGIN  8
-#define WIN_W (COLS * CELL_W + 2 * MARGIN)
-#define WIN_H (ROWS * CELL_H + 2 * MARGIN + 20)  /* +20 = bottom status hint */
+#define INIT_COLS 80
+#define INIT_ROWS 25
+#define CELL_W    8
+#define CELL_H   14            /* extra 2px line-height for breathing room */
+#define MARGIN    8
+#define STATUS_H 20            /* bottom hint strip */
+#define MIN_COLS  20           /* clamp so the window stays usable */
+#define MIN_ROWS   3
+#define SCROLLBACK_ROWS 256
 
 static ox_win_t g_win;
 static int      g_master = -1;
@@ -39,33 +51,30 @@ typedef struct {
     uint32_t bg;
 } cell_t;
 
-static cell_t g_grid[ROWS][COLS];
-static int      g_cx = 0, g_cy = 0;
-static int      g_dirty = 1;
+/* Current grid + scrollback are now dynamically sized so the terminal
+ * can grow to whatever the window dims allow. Stored as flat
+ * row-major arrays; row r col c lives at g_grid[r*g_cols + c]. */
+static int     g_cols = INIT_COLS;
+static int     g_rows = INIT_ROWS;
+static int     g_win_w = 0;
+static int     g_win_h = 0;
+static cell_t *g_grid  = 0;          /* g_rows * g_cols cells */
+static cell_t *g_sb    = 0;          /* SCROLLBACK_ROWS * g_cols cells */
+static int     g_sb_head  = 0;
+static int     g_sb_count = 0;
+static int     g_scroll_off = 0;
+static int     g_cx = 0, g_cy = 0;
+static int     g_dirty = 1;
 
-/* Scrollback ring buffer. Each row that falls off the top of the
- * live grid via grid_scroll() is pushed here. g_sb_count rises until
- * SCROLLBACK_ROWS, then we keep overwriting g_sb_head (oldest entry).
- * g_scroll_off counts how many rows up from the live top the user
- * has scrolled (0 = live, SCROLLBACK_ROWS = oldest). */
-#define SCROLLBACK_ROWS 256
-static cell_t g_sb[SCROLLBACK_ROWS][COLS];
-static int    g_sb_head  = 0;          /* index of oldest entry */
-static int    g_sb_count = 0;          /* 0..SCROLLBACK_ROWS    */
-static int    g_scroll_off = 0;        /* rows above live top */
-
-/* Ghostty-inspired "Adwaita Dark" palette — comfortable cream-on-
- * charcoal foreground/background and the standard ANSI 16 below. */
+/* Ghostty-inspired "Adwaita Dark" palette. */
 #define COL_TERM_BG     OX_RGB( 30,  30,  46)
 #define COL_TERM_FG     OX_RGB(224, 222, 244)
 #define COL_TERM_CURSOR OX_RGB(245, 194, 231)
 
-/* Current SGR pen state — applied to every printed cell. */
 static uint32_t g_pen_fg = COL_TERM_FG;
 static uint32_t g_pen_bg = COL_TERM_BG;
 static int      g_reverse = 0;
 
-/* ANSI parser state. */
 enum { ST_NORMAL, ST_ESC, ST_CSI };
 static int  g_pstate = ST_NORMAL;
 static int  g_params[8];
@@ -73,15 +82,20 @@ static int  g_n_params = 0;
 static int  g_cur_param = 0;
 static int  g_have_cur_param = 0;
 
-/* Catppuccin Mocha palette — modern Ghostty-style ANSI 16. Reads
- * comfortably on the dark Adwaita-style background and matches the
- * pink cursor we set above. */
+/* Catppuccin Mocha palette — modern Ghostty-style ANSI 16. */
 static const uint32_t g_palette[16] = {
     OX_RGB( 69, 71,  90), OX_RGB(243,139,168), OX_RGB(166,227,161), OX_RGB(249,226,175),
     OX_RGB(137,180,250), OX_RGB(245,194,231), OX_RGB(148,226,213), OX_RGB(186,194,222),
     OX_RGB(108,112,134), OX_RGB(243,139,168), OX_RGB(166,227,161), OX_RGB(249,226,175),
     OX_RGB(137,180,250), OX_RGB(245,194,231), OX_RGB(148,226,213), OX_RGB(205,214,244),
 };
+
+/* Compute window pixel size for a given grid (cols × rows). */
+static int grid_pixel_w(int cols) { return cols * CELL_W + 2 * MARGIN; }
+static int grid_pixel_h(int rows) { return rows * CELL_H + 2 * MARGIN + STATUS_H; }
+
+static cell_t *grid_at(int r, int c)   { return &g_grid[r * g_cols + c]; }
+static cell_t *sb_at  (int slot, int c){ return &g_sb  [slot * g_cols + c]; }
 
 static void grid_clear_cell(cell_t *c) {
     c->ch = ' ';
@@ -90,9 +104,9 @@ static void grid_clear_cell(cell_t *c) {
 }
 
 static void grid_clear_all(void) {
-    for (int r = 0; r < ROWS; r++)
-        for (int c = 0; c < COLS; c++)
-            grid_clear_cell(&g_grid[r][c]);
+    for (int r = 0; r < g_rows; r++)
+        for (int c = 0; c < g_cols; c++)
+            grid_clear_cell(grid_at(r, c));
     g_cx = 0; g_cy = 0;
 }
 
@@ -100,77 +114,62 @@ static void grid_scroll(void) {
     /* Push the row about to scroll off into the scrollback ring. */
     int slot = (g_sb_head + g_sb_count) % SCROLLBACK_ROWS;
     if (g_sb_count == SCROLLBACK_ROWS) {
-        /* Ring full — overwrite oldest, advance head. */
         slot = g_sb_head;
         g_sb_head = (g_sb_head + 1) % SCROLLBACK_ROWS;
     } else {
         g_sb_count++;
     }
-    memcpy(g_sb[slot], g_grid[0], sizeof(g_grid[0]));
-    for (int r = 1; r < ROWS; r++)
-        memcpy(g_grid[r - 1], g_grid[r], sizeof(g_grid[0]));
-    for (int c = 0; c < COLS; c++) grid_clear_cell(&g_grid[ROWS - 1][c]);
+    memcpy(sb_at(slot, 0), grid_at(0, 0), sizeof(cell_t) * g_cols);
+    for (int r = 1; r < g_rows; r++)
+        memcpy(grid_at(r - 1, 0), grid_at(r, 0), sizeof(cell_t) * g_cols);
+    for (int c = 0; c < g_cols; c++) grid_clear_cell(grid_at(g_rows - 1, c));
     if (g_cy > 0) g_cy--;
-    /* Live activity always returns the user to the bottom. */
     g_scroll_off = 0;
 }
 
-/* Look up the (row r in [0..ROWS-1])-th visible row, accounting for
- * scrollback offset. Returns the cell array for that row. */
+/* Pointer to the cells of the r-th visible row, accounting for
+ * scrollback offset. Returns at least 1 row of cells. */
 static const cell_t *visible_row(int r) {
     int off = g_scroll_off;
-    if (off <= 0) return g_grid[r];
-    /* When off > 0, the top `off` rows of the screen show the
-     * latest `off` rows of the scrollback ring; below that comes
-     * the live grid. */
+    if (off <= 0) return grid_at(r, 0);
     if (r < off) {
-        if (r >= g_sb_count) return g_grid[0]; /* shouldn't happen */
+        if (r >= g_sb_count) return grid_at(0, 0);
         int sb_idx = g_sb_count - off + r;
         int slot = (g_sb_head + sb_idx) % SCROLLBACK_ROWS;
-        return g_sb[slot];
+        return sb_at(slot, 0);
     }
-    return g_grid[r - off];
+    return grid_at(r - off, 0);
 }
 
 static void grid_putc(char c) {
     if (c == '\r') { g_cx = 0; return; }
     if (c == '\n') {
         g_cx = 0; g_cy++;
-        if (g_cy >= ROWS) grid_scroll();
+        if (g_cy >= g_rows) grid_scroll();
         return;
     }
     if (c == '\b') {
-        /* Backspace per VT100/xterm: cursor moves one column left,
-         * the cell content is NOT erased. Erasure is the caller's
-         * responsibility — kernel line discipline ECHOE sends the
-         * standard "\b \b" three-byte trio, and shell line editors
-         * combine \b with \x1b[K or \x1b[J to repaint. If we cleared
-         * the cell here, ash's history redraw (which sends \b's to
-         * move the cursor over the previous line before printing the
-         * new one) would silently destroy adjacent characters. */
         if (g_cx > 0) g_cx--;
-        else if (g_cy > 0) { g_cy--; g_cx = COLS - 1; }
+        else if (g_cy > 0) { g_cy--; g_cx = g_cols - 1; }
         return;
     }
-    if (c == 0x07) return;                /* bell */
+    if (c == 0x07) return;
     if (c == '\t') {
         do { grid_putc(' '); } while (g_cx & 7);
         return;
     }
     if (c < 0x20 || c >= 0x7f) return;
-    if (g_cx >= COLS) {
+    if (g_cx >= g_cols) {
         g_cx = 0; g_cy++;
-        if (g_cy >= ROWS) grid_scroll();
+        if (g_cy >= g_rows) grid_scroll();
     }
-    g_grid[g_cy][g_cx].ch = c;
-    g_grid[g_cy][g_cx].fg = g_reverse ? g_pen_bg : g_pen_fg;
-    g_grid[g_cy][g_cx].bg = g_reverse ? g_pen_fg : g_pen_bg;
+    cell_t *cell = grid_at(g_cy, g_cx);
+    cell->ch = c;
+    cell->fg = g_reverse ? g_pen_bg : g_pen_fg;
+    cell->bg = g_reverse ? g_pen_fg : g_pen_bg;
     g_cx++;
 }
 
-/* CSI dispatch: invoked when we hit the final byte of an
- * ESC [ ... <final> sequence. Implements the SGR + cursor +
- * erase subset that 99% of TTY programs rely on. */
 static void csi_dispatch(char final) {
     int p0 = g_n_params > 0 ? g_params[0] : 0;
     int p1 = g_n_params > 1 ? g_params[1] : 0;
@@ -180,59 +179,47 @@ static void csi_dispatch(char final) {
         int col = g_n_params > 1 ? p1 - 1 : 0;
         if (row < 0) row = 0;
         if (col < 0) col = 0;
-        if (row >= ROWS) row = ROWS - 1;
-        if (col >= COLS) col = COLS - 1;
+        if (row >= g_rows) row = g_rows - 1;
+        if (col >= g_cols) col = g_cols - 1;
         g_cy = row; g_cx = col;
         break;
     }
     case 'A': g_cy -= (p0 ? p0 : 1); if (g_cy < 0) g_cy = 0; break;
-    case 'B': g_cy += (p0 ? p0 : 1); if (g_cy >= ROWS) g_cy = ROWS - 1; break;
-    case 'C': g_cx += (p0 ? p0 : 1); if (g_cx >= COLS) g_cx = COLS - 1; break;
+    case 'B': g_cy += (p0 ? p0 : 1); if (g_cy >= g_rows) g_cy = g_rows - 1; break;
+    case 'C': g_cx += (p0 ? p0 : 1); if (g_cx >= g_cols) g_cx = g_cols - 1; break;
     case 'D': g_cx -= (p0 ? p0 : 1); if (g_cx < 0) g_cx = 0; break;
     case 'J': {
-        /* Erase in display:
-         *   0 (default) = from cursor (INCLUSIVE) to end of display
-         *   1           = from start of display to cursor (inclusive)
-         *   2           = entire display
-         *
-         * Crucially, mode 0 must NOT erase characters to the LEFT of
-         * the cursor on the current row — only from g_cx onwards. We
-         * used to clear the cursor row in its entirety, which wiped
-         * the text busybox ash just printed during a history redraw
-         * (`\r <prompt+cmd> \x1b[J`). */
         int mode = (g_n_params > 0) ? p0 : 0;
         if (mode == 0) {
-            for (int c = g_cx; c < COLS; c++)
-                grid_clear_cell(&g_grid[g_cy][c]);
-            for (int r = g_cy + 1; r < ROWS; r++)
-                for (int c = 0; c < COLS; c++)
-                    grid_clear_cell(&g_grid[r][c]);
+            for (int c = g_cx; c < g_cols; c++)
+                grid_clear_cell(grid_at(g_cy, c));
+            for (int r = g_cy + 1; r < g_rows; r++)
+                for (int c = 0; c < g_cols; c++)
+                    grid_clear_cell(grid_at(r, c));
         } else if (mode == 1) {
             for (int r = 0; r < g_cy; r++)
-                for (int c = 0; c < COLS; c++)
-                    grid_clear_cell(&g_grid[r][c]);
-            for (int c = 0; c <= g_cx && c < COLS; c++)
-                grid_clear_cell(&g_grid[g_cy][c]);
+                for (int c = 0; c < g_cols; c++)
+                    grid_clear_cell(grid_at(r, c));
+            for (int c = 0; c <= g_cx && c < g_cols; c++)
+                grid_clear_cell(grid_at(g_cy, c));
         } else if (mode == 2) {
-            for (int r = 0; r < ROWS; r++)
-                for (int c = 0; c < COLS; c++)
-                    grid_clear_cell(&g_grid[r][c]);
+            for (int r = 0; r < g_rows; r++)
+                for (int c = 0; c < g_cols; c++)
+                    grid_clear_cell(grid_at(r, c));
             g_cx = 0; g_cy = 0;
         }
         break;
     }
     case 'K': {
-        /* Erase in line. */
         int mode = (g_n_params > 0) ? p0 : 0;
-        int from_c = 0, to_c = COLS;
+        int from_c = 0, to_c = g_cols;
         if (mode == 0) from_c = g_cx;
         else if (mode == 1) to_c = g_cx + 1;
         for (int c = from_c; c < to_c; c++)
-            grid_clear_cell(&g_grid[g_cy][c]);
+            grid_clear_cell(grid_at(g_cy, c));
         break;
     }
     case 'm': {
-        /* SGR — colours / attributes. */
         if (g_n_params == 0) {
             g_pen_fg = OX_RGB(200, 230, 200);
             g_pen_bg = OX_RGB(15, 15, 25);
@@ -246,7 +233,7 @@ static void csi_dispatch(char final) {
                 g_pen_bg = OX_RGB(15, 15, 25);
                 g_reverse = 0;
             } else if (p == 1) {
-                /* bold: approximate by promoting to bright base. */
+                /* bold */
             } else if (p == 7) {
                 g_reverse = 1;
             } else if (p == 22 || p == 27) {
@@ -264,7 +251,6 @@ static void csi_dispatch(char final) {
             } else if (p >= 100 && p <= 107) {
                 g_pen_bg = g_palette[8 + (p - 100)];
             } else if (p == 38 && i + 4 < g_n_params && g_params[i+1] == 2) {
-                /* 38;2;R;G;B truecolor */
                 g_pen_fg = OX_RGB(g_params[i+2] & 0xff,
                                    g_params[i+3] & 0xff,
                                    g_params[i+4] & 0xff);
@@ -285,10 +271,7 @@ static void csi_dispatch(char final) {
 static void feed_byte(unsigned char b) {
     switch (g_pstate) {
     case ST_NORMAL:
-        if (b == 0x1b) {
-            g_pstate = ST_ESC;
-            return;
-        }
+        if (b == 0x1b) { g_pstate = ST_ESC; return; }
         grid_putc((char)b);
         return;
     case ST_ESC:
@@ -299,7 +282,6 @@ static void feed_byte(unsigned char b) {
             g_have_cur_param = 0;
             return;
         }
-        /* Unsupported ESC <X> — drop and resume. */
         g_pstate = ST_NORMAL;
         return;
     case ST_CSI:
@@ -314,8 +296,7 @@ static void feed_byte(unsigned char b) {
             g_have_cur_param = 0;
             return;
         }
-        if (b == '?') return;  /* private-mode marker — ignore */
-        /* Final byte. */
+        if (b == '?') return;
         if (g_have_cur_param || g_n_params == 0) {
             if (g_n_params < 8) g_params[g_n_params++] = g_cur_param;
         }
@@ -325,17 +306,90 @@ static void feed_byte(unsigned char b) {
     }
 }
 
+/* Allocate / reallocate the grid + scrollback for new (cols, rows).
+ * Preserves content where possible by copying the overlap region from
+ * the old grid into the top-left of the new one. Scrollback is reset
+ * because its rows were sized to the OLD g_cols and don't trivially
+ * re-pack (real terminals reflow lines; we punt for v1). */
+static int grid_resize(int new_cols, int new_rows) {
+    if (new_cols < MIN_COLS) new_cols = MIN_COLS;
+    if (new_rows < MIN_ROWS) new_rows = MIN_ROWS;
+    if (new_cols == g_cols && new_rows == g_rows && g_grid) return 0;
+
+    cell_t *new_grid = (cell_t *)malloc((size_t)new_cols * new_rows *
+                                         sizeof(cell_t));
+    cell_t *new_sb   = (cell_t *)malloc((size_t)new_cols * SCROLLBACK_ROWS *
+                                         sizeof(cell_t));
+    if (!new_grid || !new_sb) {
+        free(new_grid); free(new_sb);
+        return -1;
+    }
+    /* Seed with cleared cells using current pen colours. */
+    for (int r = 0; r < new_rows; r++)
+        for (int c = 0; c < new_cols; c++) {
+            new_grid[r * new_cols + c].ch = ' ';
+            new_grid[r * new_cols + c].fg = g_pen_fg;
+            new_grid[r * new_cols + c].bg = g_pen_bg;
+        }
+    for (size_t i = 0; i < (size_t)new_cols * SCROLLBACK_ROWS; i++) {
+        new_sb[i].ch = ' ';
+        new_sb[i].fg = g_pen_fg;
+        new_sb[i].bg = g_pen_bg;
+    }
+
+    /* Copy overlap region top-left. If new_rows < g_rows, we keep the
+     * BOTTOM old_rows worth (where the cursor lives) so the prompt
+     * doesn't scroll off — same trick xterm uses on shrink. */
+    if (g_grid) {
+        int copy_rows = new_rows < g_rows ? new_rows : g_rows;
+        int copy_cols = new_cols < g_cols ? new_cols : g_cols;
+        int src_row_base = (new_rows < g_rows) ? (g_rows - new_rows) : 0;
+        for (int r = 0; r < copy_rows; r++) {
+            for (int c = 0; c < copy_cols; c++) {
+                new_grid[r * new_cols + c] =
+                    g_grid[(src_row_base + r) * g_cols + c];
+            }
+        }
+        g_cy -= src_row_base;
+        if (g_cy < 0) g_cy = 0;
+    }
+
+    free(g_grid);
+    free(g_sb);
+    g_grid = new_grid;
+    g_sb   = new_sb;
+    g_cols = new_cols;
+    g_rows = new_rows;
+    if (g_cx >= g_cols) g_cx = g_cols - 1;
+    if (g_cy >= g_rows) g_cy = g_rows - 1;
+    /* Drop scrollback view — old offsets refer to a buffer that's gone. */
+    g_sb_head = 0; g_sb_count = 0; g_scroll_off = 0;
+    return 0;
+}
+
+/* Tell the kernel about the new winsize so the shell gets SIGWINCH
+ * via TIOCSWINSZ → sys_kill(-fg_pgid, SIGWINCH). Silently ignored if
+ * the master fd isn't open yet. */
+static void notify_pty_winsize(void) {
+    if (g_master < 0) return;
+    struct winsize ws;
+    ws.ws_row    = (unsigned short)g_rows;
+    ws.ws_col    = (unsigned short)g_cols;
+    ws.ws_xpixel = 0;
+    ws.ws_ypixel = 0;
+    ioctl(g_master, TIOCSWINSZ, &ws);
+}
+
 static void render(void) {
     /* Outer frame: full window background. */
-    ox_draw_rect(g_win, 0, 0, WIN_W, WIN_H, COL_TERM_BG);
+    ox_draw_rect(g_win, 0, 0, g_win_w, g_win_h, COL_TERM_BG);
 
-    /* Background runs first — group consecutive cells with same bg
-     * and emit one rect per run. */
-    for (int r = 0; r < ROWS; r++) {
+    /* Background runs first. */
+    for (int r = 0; r < g_rows; r++) {
         const cell_t *row = visible_row(r);
         int run_start = 0;
-        for (int c = 1; c <= COLS; c++) {
-            if (c < COLS && row[c].bg == row[run_start].bg) continue;
+        for (int c = 1; c <= g_cols; c++) {
+            if (c < g_cols && row[c].bg == row[run_start].bg) continue;
             int run_len = c - run_start;
             ox_draw_rect(g_win,
                           MARGIN + run_start * CELL_W,
@@ -345,15 +399,15 @@ static void render(void) {
             run_start = c;
         }
     }
-    /* Glyphs — group consecutive cells with same fg into runs. */
-    char rowbuf[COLS + 1];
-    for (int r = 0; r < ROWS; r++) {
+    /* Glyphs. */
+    char *rowbuf = (char *)alloca((size_t)g_cols + 1);
+    for (int r = 0; r < g_rows; r++) {
         const cell_t *row = visible_row(r);
         int run_start = 0;
-        while (run_start < COLS) {
+        while (run_start < g_cols) {
             uint32_t fg = row[run_start].fg;
             int run_len = 1;
-            while (run_start + run_len < COLS &&
+            while (run_start + run_len < g_cols &&
                    row[run_start + run_len].fg == fg) {
                 run_len++;
             }
@@ -367,31 +421,27 @@ static void render(void) {
             run_start += run_len;
         }
     }
-    /* Cursor: full Ghostty-style block. Only when at the live view —
-     * scrollback view shows just a thin outline so the user knows
-     * they're looking at history. */
+    /* Cursor. */
     if (g_scroll_off == 0) {
         ox_draw_rect(g_win,
                       MARGIN + g_cx * CELL_W,
                       MARGIN + g_cy * CELL_H,
                       CELL_W, CELL_H,
                       COL_TERM_CURSOR);
-        /* Redraw the glyph under the cursor in the bg color so it
-         * reads as inverse — true Ghostty look. */
-        char ch[2] = { g_grid[g_cy][g_cx].ch ? g_grid[g_cy][g_cx].ch : ' ', 0 };
+        char under = grid_at(g_cy, g_cx)->ch;
+        char ch[2] = { under ? under : ' ', 0 };
         ox_draw_text(g_win,
                       MARGIN + g_cx * CELL_W,
                       MARGIN + g_cy * CELL_H + (CELL_H - 8) / 2,
                       ch, COL_TERM_BG);
     } else {
-        /* Indicate scrollback view via a status strip at the bottom. */
         char hint[64];
         snprintf(hint, sizeof(hint),
                  "SCROLLBACK  -%d / %d   (Esc / End to return)",
                  g_scroll_off, g_sb_count);
-        ox_draw_rect(g_win, 0, WIN_H - 20, WIN_W, 20,
+        ox_draw_rect(g_win, 0, g_win_h - STATUS_H, g_win_w, STATUS_H,
                       OX_RGB(45, 45, 60));
-        ox_draw_text(g_win, MARGIN, WIN_H - 14, hint, COL_TERM_CURSOR);
+        ox_draw_text(g_win, MARGIN, g_win_h - STATUS_H + 6, hint, COL_TERM_CURSOR);
     }
     ox_present(g_win);
     g_dirty = 0;
@@ -401,17 +451,12 @@ static void spawn_child(void) {
     g_master = posix_openpt(O_RDWR);
     if (g_master < 0) return;
     unlockpt(g_master);
-    /* Non-blocking master so we can drain in the event loop. */
     int fl = fcntl(g_master, F_GETFL, 0);
     fcntl(g_master, F_SETFL, fl | O_NONBLOCK);
 
-    /* Leave the PTY at the default ICANON+ECHO termios so that the
-     * uxsh / minishell fallbacks (which don't run their own line
-     * editor) still echo and erase like a normal terminal. ash
-     * (busybox sh) reconfigures the termios itself on startup
-     * — its FEATURE_EDITING line editor wants raw mode + manual
-     * echo + arrow-key interpretation, all of which it sets via
-     * tcsetattr after seeing TERM=xterm. */
+    /* Seed the PTY's winsize so the very first TIOCGWINSZ the shell
+     * issues already sees our current grid. */
+    notify_pty_winsize();
 
     char slave[32];
     if (ptsname_r(g_master, slave, sizeof(slave)) < 0) return;
@@ -423,39 +468,16 @@ static void spawn_child(void) {
         if (s > 2) close(s);
         close(g_master);
         setsid();
-        /* Become the foreground process group on the slave PTY.
-         * Without this, busybox ash's interactive bootstrap loops on
-         *     while (tcgetpgrp(2) != getpgid(0))
-         *         kill(-getpgid(0), SIGTTIN);
-         * and SIGTTIN's default action stops the task — we'd see ash
-         * dispatch 3 times, print the banner, then STOP forever
-         * waiting for SIGCONT from a "parent shell" that doesn't
-         * exist (oxterm is a window manager, not a shell). */
         int pgid = (int)getpid();
         ioctl(0, 0x5410 /* TIOCSPGRP */, &pgid);
-        /* Prefer busybox sh (full line editor with history support);
-         * fall back to uxsh / minishell if anything is missing. The
-         * shell name in argv[0] tells busybox to dispatch to ash. */
         char *envp[] = {
             "PATH=/bin",
             "HOME=/home",
             "SHELL=/bin/sh",
-            /* TERM=xterm tells busybox line editor to enable arrow-
-             * key history nav (the default unknown TERM disables it). */
             "TERM=xterm",
-            /* ENV points at /home/.ashrc — the rc file that registers
-             * all the `vi → busybox vi`, `sed → busybox sed`, etc.
-             * aliases plus the PS1 prompt. ash sources it on every
-             * interactive session, matching what shellsrv's ash sees
-             * on the kernel console. /etc/profile is sourced ONCE
-             * (login), so we set ENV directly to keep behaviour the
-             * same whether or not /etc/profile ran for this child. */
             "ENV=/home/.ashrc",
             0
         };
-        /* Login interactive shell: `-l -i`. The -l makes ash source
-         * /etc/profile (PATH/HISTFILE), -i marks the session as
-         * interactive so $ENV (.ashrc) is also sourced. */
         char *argv_sh[] = { "sh", "-l", "-i", 0 };
         execve("/bin/sh", argv_sh, envp);
         char *argv_uxsh[] = { "uxsh", 0 };
@@ -470,9 +492,20 @@ int main(int argc, char **argv) {
     (void)argc; (void)argv;
     ox_log("oxterm: starting\n");
     if (ox_init() < 0) { ox_log("oxterm: ox_init failed\n"); return 1; }
-    g_win = ox_window_create(WIN_W, WIN_H, "Terminal");
+
+    g_win_w = grid_pixel_w(INIT_COLS);
+    g_win_h = grid_pixel_h(INIT_ROWS);
+    /* Opt into the real-resize protocol: when the user zooms the
+     * window, oxsrv reallocates the SHM and sends OX_EV_RESIZE
+     * instead of doing the legacy 2x scaled blit. */
+    g_win = ox_window_create_resizable(g_win_w, g_win_h, "Terminal");
     if (g_win < 0) { ox_log("oxterm: window_create failed\n"); return 1; }
-    ox_log("oxterm: win=%d %dx%d\n", (int)g_win, WIN_W, WIN_H);
+    ox_log("oxterm: win=%d %dx%d\n", (int)g_win, g_win_w, g_win_h);
+
+    if (grid_resize(INIT_COLS, INIT_ROWS) < 0) {
+        ox_log("oxterm: grid alloc failed\n");
+        return 1;
+    }
     grid_clear_all();
     spawn_child();
     ox_log("oxterm: spawned child pid=%d shell=/bin/sh (ash)\n",
@@ -485,9 +518,6 @@ int main(int argc, char **argv) {
         char buf[1024];
         ssize_t n;
         while ((n = read(g_master, buf, sizeof(buf))) > 0) {
-            /* One-line trace of the first 60 bytes the shell wrote
-             * back. Replaces non-printables with `.` so the log
-             * stays readable. */
             char dbg[64];
             int show = n < 60 ? (int)n : 60;
             for (int j = 0; j < show; j++)
@@ -501,9 +531,22 @@ int main(int argc, char **argv) {
         ox_event_t ev;
         while (ox_poll_event(&ev)) {
             if (ev.type == OX_EV_CLOSE) { running = 0; break; }
+            if (ev.type == OX_EV_RESIZE) {
+                /* lib/libc/ox.c already remapped the SHM and updated
+                 * its local w/h. We just need to recompute the grid
+                 * shape for the new pixel area and tell the shell. */
+                g_win_w = ev.new_w;
+                g_win_h = ev.new_h;
+                int new_cols = (g_win_w - 2 * MARGIN) / CELL_W;
+                int new_rows = (g_win_h - 2 * MARGIN - STATUS_H) / CELL_H;
+                grid_resize(new_cols, new_rows);
+                notify_pty_winsize();
+                ox_log("oxterm: resize → %dx%d (%dx%d cells)\n",
+                       g_win_w, g_win_h, g_cols, g_rows);
+                g_dirty = 1;
+                continue;
+            }
             if (ev.type == OX_EV_MOUSE && ev.mouse_kind == OX_MOUSE_WHEEL) {
-                /* Wheel scrolls the scrollback when up, or jumps
-                 * back to live when scrolling down at the bottom. */
                 int prev = g_scroll_off;
                 g_scroll_off += ev.wheel_delta * 3;
                 if (g_scroll_off < 0)            g_scroll_off = 0;
@@ -512,20 +555,18 @@ int main(int argc, char **argv) {
                 continue;
             }
             if (ev.type == OX_EV_KEY) {
-                /* PageUp/PageDown navigate the scrollback. */
                 if (ev.keycode == OX_KEY_PGUP) {
-                    g_scroll_off += ROWS / 2;
+                    g_scroll_off += g_rows / 2;
                     if (g_scroll_off > g_sb_count) g_scroll_off = g_sb_count;
                     g_dirty = 1;
                     continue;
                 }
                 if (ev.keycode == OX_KEY_PGDN) {
-                    g_scroll_off -= ROWS / 2;
+                    g_scroll_off -= g_rows / 2;
                     if (g_scroll_off < 0) g_scroll_off = 0;
                     g_dirty = 1;
                     continue;
                 }
-                /* If user types while scrolled up, snap back to live. */
                 if (g_scroll_off > 0 &&
                     (ev.ascii || ev.keycode == OX_KEY_ENTER ||
                      ev.keycode == OX_KEY_BACKSPACE ||
@@ -535,21 +576,12 @@ int main(int argc, char **argv) {
                      ev.keycode == OX_KEY_RIGHT)) {
                     g_scroll_off = 0; g_dirty = 1;
                 }
-                /* Backspace — the line discipline expects 0x7F (DEL) as
-                 * its ERASE character. Some keyboards emit ascii=0x08
-                 * for the Backspace key; remap so the shell actually
-                 * erases instead of leaving "BS, space, BS" echoed
-                 * with the original chars still in the read buffer. */
                 if (ev.keycode == OX_KEY_BACKSPACE ||
                     ev.ascii == 0x08 || ev.ascii == 0x7f) {
                     char c = 0x7f;
                     write(g_master, &c, 1);
                     continue;
                 }
-                /* Arrow keys, Home/End, Delete — emit the standard
-                 * xterm-style ESC sequences so ash's line editor can
-                 * navigate history (Up/Down) and move within the
-                 * current line (Left/Right/Home/End/Delete). */
                 if (ev.keycode == OX_KEY_UP)    { write(g_master, "\033[A", 3); continue; }
                 if (ev.keycode == OX_KEY_DOWN)  { write(g_master, "\033[B", 3); continue; }
                 if (ev.keycode == OX_KEY_RIGHT) { write(g_master, "\033[C", 3); continue; }
@@ -557,9 +589,6 @@ int main(int argc, char **argv) {
                 if (ev.keycode == OX_KEY_HOME)  { write(g_master, "\033[H", 3); continue; }
                 if (ev.keycode == OX_KEY_END)   { write(g_master, "\033[F", 3); continue; }
                 if (ev.keycode == OX_KEY_DELETE){ write(g_master, "\033[3~",4); continue; }
-                /* Map ascii to bytes for the shell. Includes Tab (0x09),
-                 * Enter (0x0a after the \r → \n translation below), and
-                 * every Ctrl+letter (control chars 0x01..0x1f). */
                 if (ev.ascii) {
                     char c = (char)ev.ascii;
                     if (c == '\r') c = '\n';
@@ -588,16 +617,14 @@ int main(int argc, char **argv) {
         if (g_dirty) render();
         struct timespec ts = { 0, 16 * 1000000 };
         nanosleep(&ts, 0);
-        /* Reap child if it exited. */
         int st;
         if (waitpid(g_child_pid, &st, WNOHANG) > 0) {
-            /* Respawn — the user might "exit" minishell and want a
-             * fresh one in the same window, but for V1 we just close. */
             running = 0;
         }
     }
     if (g_child_pid > 0) kill(g_child_pid, 15);
     if (g_master >= 0) close(g_master);
     ox_window_destroy(g_win);
+    free(g_grid); free(g_sb);
     return 0;
 }

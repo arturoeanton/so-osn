@@ -30,6 +30,11 @@ static void pty_clear(pty_pair_t *p) {
     p->termios.c_cc[TTY_VKILL]  = 0x15;   /* Ctrl+U */
     p->termios.c_cc[TTY_VEOF]   = 0x04;   /* Ctrl+D */
     p->termios.c_cc[TTY_VSUSP]  = 0x1a;   /* Ctrl+Z */
+
+    p->winsize.ws_row    = 25;
+    p->winsize.ws_col    = 80;
+    p->winsize.ws_xpixel = 0;
+    p->winsize.ws_ypixel = 0;
 }
 
 void pty_init(void) {

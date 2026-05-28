@@ -87,6 +87,7 @@ struct osnos_termios {
 #define TTY_TCSETSW   0x5403u
 #define TTY_TCSETSF   0x5404u
 #define TTY_TIOCGWINSZ 0x5413u
+#define TTY_TIOCSWINSZ 0x5414u
 
 /* struct winsize — Linux layout. Used by TIOCGWINSZ to expose
  * terminal dimensions to TUI programs (e.g. /bin/ovi). */

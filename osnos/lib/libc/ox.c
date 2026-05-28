@@ -230,12 +230,14 @@ static long send_and_wait_resp(ipc_msg_t *req, char *resp_data, size_t cap) {
     }
 }
 
-ox_win_t ox_window_create(int w, int h, const char *title) {
+static ox_win_t window_create_impl(int w, int h, const char *title,
+                                    int resizable) {
     if (g_server_pid == 0 && ox_init() < 0) return -1;
     ipc_msg_t m;
     memset(&m, 0, sizeof(m));
     m.type = IPC_OX_WINDOW_CREATE;
     m.arg0 = ((uint64_t)(uint16_t)w << 16) | (uint16_t)h;
+    m.arg1 = resizable ? 1ULL : 0ULL;
     if (title) {
         size_t n = strlen(title);
         if (n > sizeof(m.data) - 1) n = sizeof(m.data) - 1;
@@ -262,6 +264,14 @@ ox_win_t ox_window_create(int w, int h, const char *title) {
         }
     }
     return (ox_win_t)id;
+}
+
+ox_win_t ox_window_create(int w, int h, const char *title) {
+    return window_create_impl(w, h, title, 0);
+}
+
+ox_win_t ox_window_create_resizable(int w, int h, const char *title) {
+    return window_create_impl(w, h, title, 1);
 }
 
 void ox_window_destroy(ox_win_t win) {
