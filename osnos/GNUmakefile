@@ -208,6 +208,7 @@ USER_ELF_LIBC_SRCS := \
     elfs/gui/oxipc.c \
     elfs/gui/oxnet.c \
     elfs/gui/oxjs.c \
+    elfs/gui/oxstudio.c \
     elfs/gui/oxnetsurf.c \
     elfs/tools/uxsh.c
 

@@ -258,6 +258,7 @@ static const menu_item_t g_menu[] = {
      * resolves bare names against /home/apps/<name>.js).
      * Only "showcase" apps in the menu — the rest stay in /home/apps/
      * and can be launched from the file browser by clicking them. */
+    { "JS Studio",   "/bin/oxstudio",    0, "notepad"  },
     { "JS: Notes",      "notes",      3, "notepad"  },
     { "JS: Snake",      "snake",      3, "paint"    },
     { "Settings",    "/bin/oxsettings",  0, "settings" },
