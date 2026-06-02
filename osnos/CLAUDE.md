@@ -114,9 +114,10 @@ on IRQ 0.
 
 See `ARCH.md` for a full layered diagram + IPC and syscall
 walkthroughs. See `STATUS.md` for the running history of what works
-today (current phase: FASE 11.4 — PS/2 mouse + `/dev/mouse0`; FASE
-11.0–11.3 added TCC/Lua/jq self-hosting). Both are in Spanish and
-much more current than this file.
+today (current phase: FASE 14.x — POSIX make + AF_UNIX + SHM +
+dynamic linking; FASE 11.0-11.3 added TCC/Lua/jq self-hosting;
+FASE 13.3 added SQLite). Both have Spanish counterparts at
+`ARCH.es.md` / `STATUS.es.md`.
 
 Boot path (`src/kernel/main.c`, `kmain`):
 
@@ -472,11 +473,11 @@ ELFs. For libc-linked programs, the pattern is `int main(int, char**)`
 - `STATUS.md` — running log of what works today, ordered newest-first
   by phase, with sections by subsystem. **The most up-to-date source
   of truth**; consult before proposing where new features slot in.
-  Current phase: **FASE 12.0** — Ox mini-X window system.
+  Current phase: **FASE 14.x** — POSIX make, AF_UNIX, SHM, dynamic
+  linking, lighttpd port. Spanish counterpart at `STATUS.es.md`.
 - `ARCH.md` — architecture diagram + IPC / syscall flow walkthroughs.
+  Spanish counterpart at `ARCH.es.md`.
 - `ROADMAP_APENDICE.md` — multi-phase plan appendix.
 - `PLAN_FASE10.md` — detailed plan for FASE 10 (ring-3 servers).
 - `CREATE_BUILTINS.es.md` / `CREATE_ELF.es.md` — tutorials for adding
-  kernel builtins / hand-rolled ELFs.
-
-These are written in Spanish.
+  kernel builtins / hand-rolled ELFs (Spanish only for now).
