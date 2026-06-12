@@ -118,6 +118,13 @@ void ox_draw_rect (ox_win_t win, int x, int y, int w, int h,
                     uint32_t color);
 void ox_draw_text (ox_win_t win, int x, int y, const char *s,
                     uint32_t color);
+
+/* Proportional anti-aliased text (TTF when staged, 8x8 fallback).
+ * Lazily loads /home/.fonts/default.ttf on first call. Metrics via
+ * ox_text_width / ox_text_height below. Don't use where layout math
+ * assumes the fixed 8-px glyph grid. */
+void ox_draw_text_pretty(ox_win_t win, int x, int y, const char *s,
+                          uint32_t color);
 void ox_draw_image(ox_win_t win, int x, int y, int w, int h,
                     const uint32_t *bgra, int src_pitch_px);
 
@@ -125,12 +132,28 @@ void ox_draw_image(ox_win_t win, int x, int y, int w, int h,
  * changed since the last present. */
 void ox_present(ox_win_t win);
 
+/* Damage-rect present (FASE 15.0): only `x,y,w,h` (window-relative)
+ * changed since the last present — the compositor recomposes + blits
+ * just that region. Pass your dirty bbox unconditionally: degenerate
+ * rects fall back to a full-window present. */
+void ox_present_rect(ox_win_t win, int x, int y, int w, int h);
+
 /* Non-blocking event pop. Returns 1 if an event was filled in, 0
  * otherwise. */
 int  ox_poll_event(ox_event_t *out);
 
 /* Blocking event pop. Sleeps via nanosleep until something arrives. */
 int  ox_wait_event(ox_event_t *out);
+
+/* Global pointer query (FASE 15.3) — screen coords of the cursor +
+ * current button mask, regardless of which window (if any) it is
+ * over, plus the screen origin of `win`'s body so callers can derive
+ * window-relative coords. Backs tinyX XQueryPointer (xeyes tracks
+ * the pointer across the whole desktop). Returns 0 on success. Any
+ * out pointer may be NULL; pass win=0 to skip the origin lookup. */
+int  ox_query_pointer(ox_win_t win, int *out_x, int *out_y,
+                      int *out_win_ox, int *out_win_oy,
+                      int *out_buttons);
 
 /* System clipboard — shared across all Ox apps via oxsrv. Cap is
  * ~1000 bytes; SET truncates silently if longer. GET fills `buf` with

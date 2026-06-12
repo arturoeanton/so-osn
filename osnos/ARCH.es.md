@@ -339,10 +339,10 @@ printf chain: stdio buffer → write(1, buf, n)
 - Cualquier comando NO en COMMANDS[] es tratado como nombre de ELF y
   resuelto via $PATH (default `/bin`).
 
-## Flujo de un GET HTTP entrante (`curl http://localhost:8080/`)
+## Flujo de un GET HTTP entrante (`curl http://localhost:8088/`)
 
 ```
-host curl: TCP SYN -> 10.0.2.2:8080 (slirp gateway from guest's POV)
+host curl: TCP SYN -> 10.0.2.2:8088 (slirp gateway from guest's POV)
    |
    |  slirp NATs and bridges packet to guest @ 10.0.2.15:80
    v

@@ -189,6 +189,18 @@ typedef struct task {
     uint64_t  wakeup_at_ms;
 
     /*
+     * poll(2) deadline that survives block_restart_syscall. The
+     * restart mechanism RE-EXECUTES the whole syscall from userland,
+     * so a deadline computed inside sys_poll would spring forward on
+     * every wake and a finite timeout never expired (poll(50) behaved
+     * like poll(-1) unless an fd became ready — froze the Deskbar
+     * clock and any poll-timeout-paced loop). sys_poll arms this on
+     * first entry, reuses it on re-entry, clears it on every return.
+     */
+    uint64_t  poll_deadline_ms;
+    int       poll_deadline_armed;
+
+    /*
      * Sticky "kill me" flag set by the shell when the user presses
      * Ctrl+C while a foreground task is running. Checked on every
      * return-to-user path (syscall handler, timer IRQ, fault recovery)
@@ -370,7 +382,13 @@ void task_set_state(
 
 task_t *task_current(void);
 
-void task_run_next(void);
+/* Dispatch the next READY task. Returns 1 if a task ran, 0 if the
+ * table had nothing READY (scheduler may HLT until the next IRQ). */
+int task_run_next(void);
+
+/* 1 if any slot is READY. Used by the idle path to recheck (with IF
+ * masked) that no IRQ woke somebody between dispatch and HLT. */
+int task_any_ready(void);
 void task_unblock(uint64_t pid);
 
 /* Wake every BLOCKED task. Used by device drivers (mouse/kbd) when new

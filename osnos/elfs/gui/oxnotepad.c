@@ -54,6 +54,7 @@ static int      g_dirty = 0;      /* unsaved changes flag */
 static int      g_dragging = 0;   /* mouse drag-selecting flag */
 static char     g_path[256] = DEFAULT_PATH;
 static ox_win_t g_win;
+static int      g_w = WIN_W, g_h = WIN_H;   /* live dims (resizable) */
 
 /* Find / Replace modal state.
  *   g_find_mode 0 = no dialog
@@ -82,14 +83,13 @@ static void sel_clear(void) { g_anchor = -1; }
  * Call BEFORE moving the cursor. */
 static void sel_begin_if_needed(void) { if (g_anchor < 0) g_anchor = g_cur; }
 
-/* Layout-derived constants (computed once in main once we know WIN_W).
- * Gutter width = digits-for-max-line * CHAR_W + padding; visible cols
- * accounts for it. For simplicity we use a fixed gutter of 5 chars. */
+/* Layout-derived values — track the live window size (g_w/g_h) so
+ * the editor reflows on OX_EV_RESIZE. Gutter is a fixed 5 chars. */
 #define GUTTER_W   (5 * CHAR_W + 4)
 #define BODY_X     (MARGIN_X + GUTTER_W)
-#define BODY_W     (WIN_W - BODY_X - MARGIN_X)
+#define BODY_W     (g_w - BODY_X - MARGIN_X)
 #define BODY_Y     MARGIN_Y
-#define BODY_H     (WIN_H - STATUS_H - BODY_Y)
+#define BODY_H     (g_h - STATUS_H - BODY_Y)
 #define VIS_LINES  (BODY_H / LINE_H)
 #define VIS_COLS   (BODY_W / CHAR_W)
 
@@ -571,9 +571,9 @@ static int save_file(void) {
 
 static void render(void) {
     /* Background. */
-    ox_draw_rect(g_win, 0, 0, WIN_W, WIN_H - STATUS_H, COL_BG);
+    ox_draw_rect(g_win, 0, 0, g_w, g_h - STATUS_H, COL_BG);
     /* Gutter strip. */
-    ox_draw_rect(g_win, 0, 0, GUTTER_W + MARGIN_X, WIN_H - STATUS_H, COL_GUTTER);
+    ox_draw_rect(g_win, 0, 0, GUTTER_W + MARGIN_X, g_h - STATUS_H, COL_GUTTER);
 
     /* Body — render visible lines. Walk to first visible line, then
      * stream chars line by line until we run out of vis lines or buf. */
@@ -640,7 +640,7 @@ static void render(void) {
     }
 
     /* Status bar. */
-    ox_draw_rect(g_win, 0, WIN_H - STATUS_H, WIN_W, STATUS_H, COL_STATUS_BG);
+    ox_draw_rect(g_win, 0, g_h - STATUS_H, g_w, STATUS_H, COL_STATUS_BG);
     char status[160];
     if (sel_active()) {
         int n = sel_hi() - sel_lo();
@@ -654,18 +654,18 @@ static void render(void) {
                  g_dirty ? "* " : "  ",
                  g_path, cur_line + 1, cur_col + 1, g_len);
     }
-    ox_draw_text(g_win, MARGIN_X, WIN_H - 12, status,
+    ox_draw_text(g_win, MARGIN_X, g_h - 12, status,
                  g_dirty ? COL_STATUS_DIRTY : COL_STATUS_FG);
 
     /* Find/Replace modal — fixed strip above the status bar. */
     if (g_find_mode) {
         int rows = (g_find_mode == 2) ? 2 : 1;
         int dlg_h = rows * LINE_H + 8;
-        int dlg_y = WIN_H - STATUS_H - dlg_h - 2;
-        ox_draw_rect(g_win, 0, dlg_y, WIN_W, dlg_h,
+        int dlg_y = g_h - STATUS_H - dlg_h - 2;
+        ox_draw_rect(g_win, 0, dlg_y, g_w, dlg_h,
                      OX_RGB(238, 232, 200));    /* pale yellow */
-        ox_draw_rect(g_win, 0, dlg_y, WIN_W, 1, OX_RGB(0, 0, 0));
-        ox_draw_rect(g_win, 0, dlg_y + dlg_h - 1, WIN_W, 1, OX_RGB(0, 0, 0));
+        ox_draw_rect(g_win, 0, dlg_y, g_w, 1, OX_RGB(0, 0, 0));
+        ox_draw_rect(g_win, 0, dlg_y + dlg_h - 1, g_w, 1, OX_RGB(0, 0, 0));
         /* Find: label + text */
         const char *flbl = "Find:";
         ox_draw_text(g_win, 8, dlg_y + 3, flbl, OX_RGB(0, 0, 0));
@@ -697,7 +697,7 @@ static void render(void) {
             ? "Enter=replace+next  Tab=field  ^Enter=all  Esc"
             : "Enter=next  F3=next  Esc";
         int hlen = (int)strlen(hint);
-        ox_draw_text(g_win, WIN_W - 8 - hlen * CHAR_W,
+        ox_draw_text(g_win, g_w - 8 - hlen * CHAR_W,
                      dlg_y + 3, hint, OX_RGB(80, 80, 80));
     }
 
@@ -718,7 +718,7 @@ int main(int argc, char **argv) {
 
     char title[80];
     snprintf(title, sizeof(title), "Notepad — %s", g_path);
-    g_win = ox_window_create(WIN_W, WIN_H, title);
+    g_win = ox_window_create_resizable(WIN_W, WIN_H, title);
     if (g_win < 0) return 1;
 
     load_file();
@@ -732,6 +732,17 @@ int main(int argc, char **argv) {
         if (ev.type == OX_EV_CLOSE) {
             if (g_dirty) save_file();
             break;
+        }
+
+        if (ev.type == OX_EV_RESIZE) {
+            g_w = ev.new_w;
+            g_h = ev.new_h;
+            int max_scroll = total_lines() - VIS_LINES;
+            if (max_scroll < 0) max_scroll = 0;
+            if (g_scroll > max_scroll) g_scroll = max_scroll;
+            ensure_cursor_visible();
+            render();
+            continue;
         }
 
         if (ev.type == OX_EV_MOUSE) {

@@ -328,6 +328,18 @@ void framebuffer_draw_string(
  * driver). Keeps the tee a one-line opt-in here. */
 extern void serial_puts(const char *s, size_t n);
 
+/* FASE 15.1 — while a GUI server (oxsrv) owns the framebuffer, the
+ * cooked-text path must not paint over the composited screen: every
+ * tty echo / app printf used to flash text on top of the GUI until
+ * the next composite overpainted it ("screen vibrates"). The GUI
+ * server toggles this via the OSNOS_FBIO_TEXT_SUPPRESS ioctl; the
+ * serial tee below stays active so nothing is lost for logging. */
+static int fb_text_suppressed = 0;
+
+void framebuffer_set_text_suppressed(int on) {
+    fb_text_suppressed = on ? 1 : 0;
+}
+
 void framebuffer_write_bytes(
     const char *buf,
     size_t n,
@@ -338,6 +350,8 @@ void framebuffer_write_bytes(
      * verbatim — host terminals interpret them, log scrapers strip
      * with `tr -d '\033'`. */
     if (buf && n > 0) serial_puts(buf, n);
+
+    if (fb_text_suppressed) return;   /* GUI owns the screen */
 
     /* draw_string is NUL-terminated and parses ESC[...] sequences in
      * order. We copy into a NUL-terminated chunk and dispatch. The
@@ -399,6 +413,7 @@ void framebuffer_write_bytes(
 }
 
 void framebuffer_backspace(void) {
+    if (fb_text_suppressed) return;   /* GUI owns the screen */
     if (cursor_x <= TERM_MARGIN_X) {
         if (cursor_y <= TERM_MARGIN_Y) {
             return;

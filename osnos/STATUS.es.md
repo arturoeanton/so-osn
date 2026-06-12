@@ -47,7 +47,8 @@ Limine, corre en QEMU, y trae:
 - **🆕 NetSurf v1 port** (FASE 12.4): `libwapcaplet + libparserutils + libnsutils + libnslog + libhubbub + libdom` compiladas como `.a` (Stage 1-3). `oxnetsurf.elf` 3.1 MB linkeado con musl + BearSSL + DOM real → navega HTTP/HTTPS, parseo HTML5, walk DOM con links clicables, render Ox scrollable. Saltea libcss + netsurf-core (sin layout box-model real todavía).
 - **🆕 liboxshim** (FASE 12.4): mini-libc `ox.c/ox_font.c/ox_icons.c/ox_text.c/ox_ui.c` recompilado contra musl + overrides explícitos de `shm_open`/`shm_unlink`/`connect` (los wrappers de musl asumen `/dev/shm/` y bloqueo POSIX; osnos es syscall-directo + non-blocking con EINPROGRESS-retry). Sin este shim, oxnetsurf pintaba sólo el chrome y abortaba el primer fetch.
 - **🎉 lighttpd 1.4.76** (FASE 14.5) — webserver real sirviendo
-  HTTP/1.1 sobre `/home`; `curl http://localhost:8080/` → 200 OK.
+  HTTP/1.1 sobre `/home`; `curl http://localhost:8088/` → 200 OK
+  (puerto hostfwd default desde FASE 15.1; se overridea con `make run HTTP_PORT=…`).
 - **Networking real** (FASE 14-misc-3): `nslookup google.com → 142.251.x.x`
   (DNS UDP resolver vía musl `getaddrinfo`) y `ping 8.8.8.8 → 64 bytes
   ttl=255` (SOCK_RAW + ICMP echo). Nuevas syscalls: `recvmsg`/`sendmsg`,
@@ -154,7 +155,7 @@ microkernel escrito desde cero.
 | **`sys_recvfrom` UDP path preserva `src_ip/src_port`** | ✅ | Antes routeaba via `sock_recv` que descartaba el peer → musl resolver rechazaba el reply (FASE 14.6) |
 | **`SOCK_RAW` + ICMP echo (ping)** | ✅ | `socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)`; ip_handle mirror al raw socket pool; `ping 8.8.8.8 → "64 bytes from 8.8.8.8 ttl=255"` (FASE 14.6) |
 | DNS resolver + getaddrinfo (vía slirp 10.0.2.3) | ✅ | `nslookup google.com → 142.251.128.46` (FASE 14.6) |
-| `/bin/httpd` sirviendo FAT16 sobre HTTP | ✅ | hostfwd 8080 |
+| `/bin/httpd` sirviendo FAT16 sobre HTTP | ✅ | hostfwd 8088 (default, overrideable) |
 | **`/bin/lighttpd` 1.4.76 webserver real** | ✅ | poll-based, 10 builtin mods, sirve `/home` (FASE 14.5) |
 | **`SIOCGIFCONF` + 7 ioctls SIOC*** | ✅ | `ifconfig` muestra eth0 (10.0.2.15 + MAC 52:54:00:12:34:56) + lo |
 | Demos (`/bin/tcpclient`, `udptest`, `echotcp`, `selectserver`, `udp_send`, `udp_connect`) | ✅ | |
@@ -510,6 +511,263 @@ Tres bugs encadenados rompían el resolver de musl, más SOCK_RAW que no existí
 - ✅ **`resolve_script` en oxjs**: argv[1] acepta abs path, bare name, "name.js", o integer N (Nth `.js` en /home/apps alfabético).
 
 **Sin pendientes funcionales — la única limitación actual es performance**: ox.http.get bloquea el event loop completo durante el fetch, no hay async/promises. Esto está OK para apps simples ("press reload"), pero un browser-like app necesitaría un mainloop integrado.
+
+### FASE 15.0 — Fluidez premium: input por IRQ + HLT idle + compositor regional — **CERRADA**
+
+Salto de calidad en latencia interactiva y eficiencia del compositor.
+Buildeada + verificada en host macOS (ver notas de build abajo).
+
+**Kernel — input por IRQ + idle:**
+- ✅ **Teclado + mouse PS/2 por IRQ 1 / IRQ 12** (`src/drivers/ps2_irq.c`).
+  El command byte del 8042 habilita ambos bits de interrupción; los
+  handlers reusan las máquinas de estado de `keyboard_poll`/`mouse_poll`
+  y empujan a los mismos rings `/dev/input0` + `/dev/mouse0`. Los
+  feeders polling siempre-READY desaparecen; los eventos llegan en
+  microsegundos.
+- ✅ **RX serial por IRQ 4 + ring de software de 1 KiB** (`serial.c`).
+  La FIFO HW de 16 bytes se desbordaba cuando ring-0 quedaba ocupado
+  (con GUI activa la consola serial perdía ~la mitad de los bytes —
+  `oxterm &` llegaba como `xem&`). El feeder `serial-in` ahora se pacea
+  solo (wakeup_at_ms + 10 ms).
+- ✅ **HLT en idle del scheduler** (`scheduler_tick`): sin tareas READY,
+  `sti; hlt` hasta el próximo IRQ en vez de busy-spin (con recheck
+  `task_any_ready()` bajo cli para cerrar la ventana de lost-wakeup).
+  CPU del host con GUI idle: ~1.4%.
+- ✅ **Los timeouts finitos de `sys_poll` ahora expiran**. El mecanismo
+  `block_restart_syscall` re-ejecuta el syscall completo al despertar,
+  así que el deadline se recomputaba en cada restart y `poll(50)` se
+  comportaba como `poll(-1)` (congelaba el reloj del Deskbar). El
+  deadline ahora persiste en `task_t.poll_deadline_ms`.
+
+**Compositor Ox — repaints regionales + frame pacing:**
+- ✅ **LISTA de dirty rects (8 entradas)** reemplaza el bounding box
+  único global (que unía daños lejanos — reloj del Deskbar arriba a la
+  derecha + cursor abajo a la izquierda recomponían ~toda la pantalla).
+- ✅ **Create / destroy / raise / restore / minimize regionales** —
+  antes forzaban repaint completo (8-12 ms c/u). Verificado en vivo:
+  una sesión de abrir + tipear + cerrar muestra `full=1` (sólo el
+  paint inicial) en el heartbeat.
+- ✅ **Cursor totalmente desacoplado** (`g_cursor_dirty`): restore
+  desde el clean cache + redraw + blit de la unión; nunca recompone.
+- ✅ **Clipping del body-blit** (`g_clip_*`): replay de ventana para un
+  rect chico copia sólo las filas/columnas dañadas.
+- ✅ **Frame pacing ~66 Hz** (`FRAME_MS 15`): los eventos drenan en cada
+  iteración; composite+blit a lo sumo una vez por presupuesto de frame.
+- ✅ **Damage rects del cliente en PRESENT** (ABI FASE 15.0):
+  `IPC_OX_PRESENT arg1=1` + `data={x,y,w,h}` relativo a la ventana.
+  Nueva API libc `ox_present_rect()`. `oxterm` adoptado (presents
+  body-only).
+- ✅ Bugfixes: bounds check de `g_wins[g_focus_slot]` en pending-move;
+  tiles del Deskbar se encogen (piso 14 px) para que las 16 ventanas
+  tengan tile clickeable (antes desaparecían en silencio pasadas ~8).
+
+**Build en macOS (gmake + llvm):**
+- ✅ Guard contra GNU make 3.81 (el `/usr/bin/make` de Apple) — su
+  selección first-match de pattern rules compilaba vendor/ con CFLAGS
+  de kernel. Usar `gmake` de Homebrew.
+- ✅ Detección de `AR` prueba `/opt/homebrew/opt/llvm/bin/llvm-ar`
+  ANTES que `ar` a secas (el ar BSD emite índice vacío para miembros
+  ELF — todos los símbolos de libc salían undefined).
+
+**Tests:** `alltest` 18/21 tras la fase (expectativa de kerntest
+actualizada: el feeder "keyboard" ya no existe por diseño). Los 3
+fails restantes son staging del sd.img ajenos a esta fase (sysroot de
+tcc incompleto en imágenes buildeadas en macOS; `hello_dyn` linkeado
+contra un nombre de libc.so con path de host; serialtest flaky sólo
+bajo alltest) — trackeados para FASE 15.1.
+
+### FASE 15.1 — Resize interactivo armado + tinyX (subset de Xlib sobre Ox) — **CERRADA**
+
+Track Premium-UI (resize real de ventanas en toda la flota) + primera
+tajada del track de compatibilidad X de Linux. Verificado en vivo en
+QEMU headless (screendump + heartbeat serial + mouse PS/2 manejado
+desde el monitor de QEMU).
+
+**Servidor Ox — protocolo de drag-resize armado (`elfs/gui/oxsrv.c`):**
+- ✅ **`commit_resize()`** — la contraparte armada del viejo
+  `resize_window()` (que sólo recortaba). Para ventanas que optaron
+  con `ox_window_create_resizable`, arrastrar el handle inferior
+  derecho ahora hace lo genuino: `swap_window_shm()` (SHM nuevo a las
+  dimensiones nuevas) + `IPC_OX_EVENT_RESIZE` para que el cliente
+  re-layoutee. En vivo durante el drag (throttle 100 ms) + un commit
+  final al soltar. Las ventanas legacy mantienen el clip-only seguro.
+- ✅ **Swaps que preservan contenido**: `swap_window_shm` siembra el
+  buffer nuevo con el color de fondo y copia la región solapada del
+  backing viejo — el live resize muestra el contenido existente en
+  vez de un flash en blanco hasta que el cliente repinta. Seguro
+  frente a eventos viejos encolados: el SHM del kernel refcuenta el
+  unlink (los mappings del cliente sobreviven) y el lado libc saltea
+  remaps cuyo SHM ya no existe — siempre gana el resize más nuevo.
+- ✅ Verificado: arrastrar oxnotepad/xdemo por el handle → la ventana
+  crece de verdad (más área útil, sin escalado de píxeles), la app
+  refluye, sin artefactos de stride, `full=` queda en 1 (los repaints
+  de resize son regionales).
+
+**Apps — opt-in de resize + reflow:**
+- ✅ Opt-ins triviales (ya tenían handler de `OX_EV_RESIZE`):
+  `oxlog`, `oxmem`, `oxipc`, `oxnet` — ahora se crean resizables.
+- ✅ `oxfiles`: layout dinámico `g_w/g_h` (toolbar / sidebar / lista /
+  tamaños alineados a la derecha), el handler de RESIZE mantiene la
+  selección visible, y **scroll con rueda del mouse** (3 filas por
+  muesca) que faltaba por completo.
+- ✅ `oxnotepad`: las macros de layout (`BODY_W/BODY_H/VIS_LINES/...`)
+  ahora derivan de `g_w/g_h` vivos; el handler de RESIZE clampea el
+  scroll y mantiene el cursor visible. Editor, strip de find/replace
+  y status bar refluyen todos.
+- Flota resizable ahora: oxterm, oxstudio, oxnotepad, oxfiles,
+  oxlog, oxmem, oxipc, oxnet (8 de 16).
+
+**tinyX — subset de Xlib sobre Ox (compat X, tajada 1):**
+- ✅ Headers nuevos `lib/libc/include/X11/{X.h, Xlib.h, Xutil.h,
+  keysym.h}` — constantes y tipos matchean X11 real numéricamente
+  (códigos de evento, masks, Button*, XK_*; la misma regla de
+  fidelidad ABI que errno/keycodes). Nuevo `lib/libc/xlib.c`
+  (~500 LOC) dentro de libosnos_c.a.
+- ✅ Implementado: XOpenDisplay/XCloseDisplay, XCreateSimpleWindow
+  (→ ventana Ox resizable), XStoreName, XMapWindow (sintetiza el
+  primer Expose), XSelectInput (entrega filtrada por mask),
+  XCreateGC/XFreeGC/XSetForeground/XSetBackground,
+  XFillRectangle/XDrawRectangle/XDrawLine (Bresenham)/XDrawPoint/
+  XDrawString (anclado a baseline, fuente 8x8)/XClearWindow/
+  XClearArea, XFlush/XSync/XPending/XNextEvent (flushea antes de
+  bloquear, como Xlib real), XInternAtom/XSetWMProtocols (handshake
+  WM_DELETE_WINDOW), XLookupString (keysyms desde keycodes del
+  kernel; keycode X = keycode kernel + 8, regla evdev).
+- ✅ Mapeo de eventos: KeyPress, ButtonPress/Release (rueda =
+  Button4/5), MotionNotify, Expose, **ConfigureNotify** (desde
+  OX_EV_RESIZE — el drag-resize llega a los clientes X),
+  ClientMessage (WM_DELETE_WINDOW) / DestroyNotify al cerrar.
+- ✅ **`/bin/xdemo`** (`elfs/gui/xdemo.c`): un programa Xlib
+  deliberadamente estándar (buildea en Linux con `cc xdemo.c -lX11`)
+  que actúa de test de aceptación. Verificado en vivo: ventana +
+  decoración BeOS, redraw por Expose, stamps con click (ButtonPress),
+  teclas r/g/b de color (XLookupString), drag-resize →
+  ConfigureNotify → re-render al tamaño nuevo (la línea de hint
+  muestra WxH en vivo), `q` sale limpio (wins baja a 0).
+- ⚠️ No implementado (deliberado, ver comentario del header):
+  pixmaps, fuentes reales, colormaps, wire protocol. Los píxeles son
+  TrueColor 0xRRGGBB. Próximas tajadas: blits estilo XPutImage, más
+  keysyms, XSizeHints honrados por oxsrv, mmap file-backed → tinyX
+  real.
+
+### FASE 15.2 — Polish premium: 1080p + TTF en todos lados + RTC + HTTPS en NetSurf — **CERRADA**
+
+Respuesta directa al feedback del usuario ("se ve antiguo e indie",
+"píxeles gordos, falta suavidad"): matar el look de píxel grueso y
+los widgets planos de borde 1px. Verificado en vivo con screendumps
+de QEMU.
+
+**Resolución (la causa raíz de los "píxeles gordos"):**
+- ✅ `limine.conf` ahora pide **1920x1080x32** (antes caía en
+  1280x800 y el display del host lo estiraba nearest-neighbor). El
+  compositor + damage regional absorben el 2x de píxeles sin lag
+  medible (heartbeat sin cambios).
+
+**Tipografía:**
+- ✅ Nueva API de libc **`ox_draw_text_pretty()`** (lib/libc/ox.c):
+  texto TTF proporcional antialiased al backing de la ventana, con
+  lazy-load de `/home/.fonts/default.ttf` y fallback 8x8
+  transparente. Las apps mantienen `ox_draw_text` donde el layout
+  asume la grilla de 8px (celdas de oxterm, cuerpo de oxnotepad).
+- ✅ Fuente UI default 12 → **14 px** (decoraciones oxsrv, ox_ui,
+  path pretty) acorde a la densidad 1080p.
+- ✅ Adoptado: **oxfiles** (path del toolbar / sidebar / nombres /
+  tamaños alineados con métricas reales), **oxlog** (header +
+  status), labels de todos los widgets ox_ui.
+
+**Pasada de biseles BeOS R5 (ox_ui + decoraciones oxsrv):**
+- ✅ ox_ui ganó vocabulario de bisel/gradiente (OX_UI_COL_BEVEL_*,
+  ui_vgrad/ui_bevel_raised/ui_bevel_sunken): botones = bisel
+  elevado + cara con gradiente + estado pressed hundido con label
+  corrido; listas = pozos hundidos con barra de selección en
+  gradiente + hover sutil; scrollbars = track hundido + thumb
+  elevado con grip lines BeOS; diálogos = marco elevado + barra de
+  título en gradiente.
+- ✅ oxsrv: tab enfocado = gradiente amarillo vertical + highlight
+  interno; botones del tab = gradiente + bisel dentro del contorno
+  negro; hover del menú raíz = barra en gradiente; Deskbar = franja
+  con gradiente oscuro + tiles elevados; botón "Ox" = cara en
+  gradiente. Todo el texto centrado al alto de línea TTF real.
+
+**Kernel — RTC CMOS (`src/drivers/rtc.c`, nuevo):**
+- ✅ Lectura única del MC146818 al boot (baile de update-in-progress,
+  BCD + 12h, registro de siglo con sanity checks).
+  `rtc_boot_epoch()` ancla el reloj de pared; `sys_time` y
+  `sys_clock_gettime(CLOCK_REALTIME)` devuelven **epoch UNIX real**
+  (MONOTONIC sigue relativo al boot). El reloj del Deskbar ahora
+  muestra UTC real.
+
+**HTTPS en NetSurf (antes: nunca funcionó):**
+- ✅ Causa raíz (vs. oxbrowser que sí andaba): `https_fetch` no
+  llamaba `br_x509_minimal_set_time()` — el motor X.509 de BearSSL
+  abortaba con TIME_UNKNOWN *antes* de extraer la pkey del server, y
+  el handshake moría después por la key faltante — y tampoco
+  inyectaba entropía al DRBG. Ambos portados del do_tls_fetch de
+  oxbrowser; el seed de tiempo usa el epoch real del RTC, así que la
+  validación de expiración es genuina.
+- ✅ Verificado en vivo: `oxnetsurf https://example.com` → handshake
+  TLS 1.2 + 828 bytes + página renderizada. (El `parse_chunk
+  err=65547` restante reproduce idéntico sobre HTTP plano — es la
+  limitación conocida del parser v1, trackeada aparte.)
+
+**Puertos:** el hostfwd HTTP default de QEMU pasó de 8080 → **8088**
+(el 8080 suele estar tomado por Docker u otros proyectos); se
+overridea con `make run HTTP_PORT=…`.
+
+### FASE 15.3 — Port de xeyes + puntero global + fix del flicker del cursor + robustez HTTPS — **CERRADA**
+
+**xeyes — primera app X11 real PORTADA (no reescrita):**
+- ✅ `elfs/gui/xeyes.c`: las constantes de geometría del ojo, la
+  matemática de pupila (`computePupil`) y el render (eyeLiner /
+  eyeBall con la transformada espacio-de-ojo → píxel) vienen del
+  xeyes original del X Consortium (Eyes.c / Eyes.h / transform.c,
+  licencia MIT, Keith Packard). El shell Xt/Xaw se reemplaza por un
+  main loop Xlib plano (osnos aún no tiene Xt) que pollea el puntero
+  a 10 Hz como el timer original. Compila sin cambios en Linux con
+  `cc xeyes.c -lX11 -lm`. En el menú raíz como "XEyes". Verificado
+  en vivo: las pupilas siguen el cursor por todo el escritorio.
+- ✅ tinyX creció: **XFillArc / XDrawArc** (rasterizador entero de
+  elipses con clipping angular en 1/64 de grado, sin libm) y
+  **XQueryPointer** (posición global + coords relativas a la
+  ventana + máscara de botones).
+- ✅ Nuevo opcode Ox **IPC_OX_QUERY_POINTER (0x71)** + libc
+  `ox_query_pointer()`: posición del cursor en pantalla, botones y
+  el origen de la ventana consultante en un solo round-trip.
+
+**Flicker del cursor en movimiento (reporte "línea negra vibrante"):**
+- ✅ Causa raíz: sobre-invalidación durante el movimiento. El rect
+  del menú se marcaba dirty en CADA move con el menú abierto, el
+  Deskbar en cada move adentro, y cualquier titlebar bajo el cursor
+  en cada move — cada uno un recompose + re-blit a VRAM por frame,
+  y cada reescritura de VRAM es una chance de que el display del
+  host agarre un frame a medio escribir (se percibe como vibración
+  oscura en el camino del mouse; quieto era sólido). Ahora el
+  marcado de hover dispara solo en CAMBIOS de estado: cambio de
+  fila del menú, cambio de elemento del deskbar, enter/leave de
+  titlebar o cambio de botón hovereado.
+- ✅ Blit del cursor: la unión envolvente viejo∪nuevo se reemplazó
+  por dos rects chicos (merge solo si se solapan) — un movimiento
+  diagonal rápido ya no reescribe un rect gigante por frame.
+
+- ✅ Causa raíz host del flicker (la parte que el fix de hover no
+  alcanzaba): `build_and_run.sh` lanzaba QEMU con `-display
+  cocoa,zoom-to-fit=on` en macOS — la vista cocoa con zoom re-rinde
+  el frame escalado en cada update parcial del framebuffer, que se
+  percibe como vibración negra mientras el cursor del guest se mueve
+  (quieto = sin updates = sólido). Ahora: `cocoa` pelado (sin zoom)
+  + framebuffer default 1440x900x32, que entra 1:1 en puntos en las
+  pantallas de MacBook 13" → escala Retina entera, nítido y sin
+  flicker de updates. Override: variable `QEMU_DISPLAY=cocoa,zoom-to-fit=on`,
+  y subir limine.conf a 1920x1080x32 en monitores grandes.
+
+**Robustez HTTPS (reporte "sigue fallando"):**
+- ✅ Cuelgue con páginas grandes arreglado: cuando la respuesta
+  llenaba RESP_MAX (p.ej. google.com sin gzip > 256 KiB), el loop de
+  recepción de BearSSL llamaba `recvapp_ack(0)` para siempre — el
+  engine quedaba en RECVAPP sin consumir nada y el fetch nunca
+  volvía. Ahora buffer lleno termina la lectura (trunca y loguea).
+  Páginas tamaño example.com no se veían afectadas, por eso la
+  primera verificación pasó.
 
 ### FASE 15 — Drivers a ring 3 (item pendiente del FASE 11 original)
 - ❌ IRQ delegation por IPC desde kernel-side handlers

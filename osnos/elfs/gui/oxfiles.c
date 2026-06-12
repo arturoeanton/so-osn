@@ -73,6 +73,7 @@ extern char **environ;
 
 /* ---------------- state -------------------------------------------- */
 static ox_win_t g_win;
+static int      g_w = WIN_W, g_h = WIN_H;   /* live dims (resizable) */
 static char     g_cwd[256] = "/home";
 
 typedef struct {
@@ -111,7 +112,7 @@ static const sb_entry_t g_sidebar[] = {
 
 /* ---------------- helpers ------------------------------------------ */
 static int list_rows_per_page(void) {
-    return (WIN_H - TOOLBAR_H) / ROW_H;
+    return (g_h - TOOLBAR_H) / ROW_H;
 }
 
 static void format_size(uint64_t bytes, char *out, size_t out_sz) {
@@ -273,21 +274,21 @@ static void draw_button(int x, int y, const char *glyph, int hovered, int disabl
     uint32_t fg = disabled ? COL_TEXT_DIS : COL_TEXT;
     ox_draw_rect(g_win, x, y, BTN_W, BTN_H, bg);
     /* center the 8x8 glyph. */
-    int tx = x + (BTN_W - 8) / 2;
-    int ty = y + (BTN_H - 8) / 2;
-    ox_draw_text(g_win, tx, ty, glyph, fg);
+    int tx = x + (BTN_W - ox_text_width(glyph)) / 2;
+    int ty = y + (BTN_H - ox_text_height()) / 2;
+    ox_draw_text_pretty(g_win, tx, ty, glyph, fg);
 }
 
 /* ---------------- render ------------------------------------------- */
 static void render(void) {
     /* zone backgrounds */
-    ox_draw_rect(g_win, 0, 0, WIN_W, TOOLBAR_H, COL_TOOLBAR);
-    ox_draw_rect(g_win, 0, TOOLBAR_H, SIDEBAR_W, WIN_H - TOOLBAR_H, COL_SIDEBAR);
+    ox_draw_rect(g_win, 0, 0, g_w, TOOLBAR_H, COL_TOOLBAR);
+    ox_draw_rect(g_win, 0, TOOLBAR_H, SIDEBAR_W, g_h - TOOLBAR_H, COL_SIDEBAR);
     ox_draw_rect(g_win, SIDEBAR_W, TOOLBAR_H,
-                 WIN_W - SIDEBAR_W, WIN_H - TOOLBAR_H, COL_BODY);
+                 g_w - SIDEBAR_W, g_h - TOOLBAR_H, COL_BODY);
     /* dividers (1 px) */
-    ox_draw_rect(g_win, 0, TOOLBAR_H - 1, WIN_W, 1, COL_DIVIDER);
-    ox_draw_rect(g_win, SIDEBAR_W, TOOLBAR_H, 1, WIN_H - TOOLBAR_H, COL_DIVIDER);
+    ox_draw_rect(g_win, 0, TOOLBAR_H - 1, g_w, 1, COL_DIVIDER);
+    ox_draw_rect(g_win, SIDEBAR_W, TOOLBAR_H, 1, g_h - TOOLBAR_H, COL_DIVIDER);
 
     /* --- toolbar --- */
     /* Three nav buttons: back, forward, up. Use "<", ">", "^" glyphs. */
@@ -297,11 +298,11 @@ static void render(void) {
     draw_button(bx + (BTN_W + 4)*2, by, "^", g_btn_hover == 2, strcmp(g_cwd, "/") == 0);
     /* Path text (left-aligned after buttons). */
     int path_x = bx + (BTN_W + 4) * 3 + 12;
-    int path_y = (TOOLBAR_H - 8) / 2;
-    ox_draw_text(g_win, path_x, path_y, g_cwd, COL_TEXT);
+    int path_y = (TOOLBAR_H - ox_text_height()) / 2;
+    ox_draw_text_pretty(g_win, path_x, path_y, g_cwd, COL_TEXT);
 
     /* --- sidebar --- */
-    ox_draw_text(g_win, 14, TOOLBAR_H + 12, "PLACES", COL_SECTION);
+    ox_draw_text_pretty(g_win, 14, TOOLBAR_H + 12, "PLACES", COL_SECTION);
     for (int i = 0; i < SB_N; i++) {
         int y = TOOLBAR_H + 32 + i * 26;
         int active = (strcmp(g_cwd, g_sidebar[i].path) == 0);
@@ -310,14 +311,14 @@ static void render(void) {
             ox_draw_rect(g_win, 8, y - 2, SIDEBAR_W - 16, ROW_H,
                          active ? COL_ACCENT : COL_HOVER);
         }
-        ox_draw_text(g_win, 18, y + 3, g_sidebar[i].label,
+        ox_draw_text_pretty(g_win, 18, y + (ROW_H - ox_text_height()) / 2 - 2, g_sidebar[i].label,
                      active ? COL_TEXT : COL_TEXT);
     }
 
     /* --- file list --- */
     int list_x = SIDEBAR_W;
     int list_y = TOOLBAR_H;
-    int list_w = WIN_W - SIDEBAR_W;
+    int list_w = g_w - SIDEBAR_W;
     int rpp = list_rows_per_page();
     for (int i = 0; i < rpp && g_scroll + i < g_n_entries; i++) {
         int idx = g_scroll + i;
@@ -337,15 +338,14 @@ static void render(void) {
         else                       draw_file_icon(ix, iy - 1);
         /* name */
         int tx = ix + ICON_W + 8;
-        int ty = y + (ROW_H - 8) / 2;
-        ox_draw_text(g_win, tx, ty, g_entries[idx].name, COL_TEXT);
+        int ty = y + (ROW_H - ox_text_height()) / 2;
+        ox_draw_text_pretty(g_win, tx, ty, g_entries[idx].name, COL_TEXT);
         /* size (only for files) — right-aligned at list right edge. */
         if (!g_entries[idx].is_dir) {
             char sz[24];
             format_size(g_entries[idx].size, sz, sizeof(sz));
-            int sz_len = (int)strlen(sz);
-            int sz_x = WIN_W - 16 - sz_len * 8;
-            ox_draw_text(g_win, sz_x, ty, sz,
+            int sz_x = g_w - 16 - ox_text_width(sz);
+            ox_draw_text_pretty(g_win, sz_x, ty, sz,
                          is_sel ? COL_TEXT : COL_TEXT_DIM);
         }
     }
@@ -455,7 +455,10 @@ static int hit_row(int x, int y) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     if (ox_init() < 0) return 1;
-    g_win = ox_window_create(WIN_W, WIN_H, "Files");
+    /* Proportional UI text (FASE 15.2). Falls back to 8x8 silently
+     * when the TTF isn't staged. */
+    ox_text_init("/home/.fonts/default.ttf", 14);
+    g_win = ox_window_create_resizable(WIN_W, WIN_H, "Files");
     if (g_win < 0) return 1;
     rescan();
     render();
@@ -463,13 +466,31 @@ int main(int argc, char **argv) {
         ox_event_t ev;
         if (!ox_wait_event(&ev)) continue;
         if (ev.type == OX_EV_CLOSE) break;
+        if (ev.type == OX_EV_RESIZE) {
+            g_w = ev.new_w;
+            g_h = ev.new_h;
+            /* Keep the selection visible at the new row count. */
+            if (g_selected >= 0 &&
+                g_selected >= g_scroll + list_rows_per_page())
+                g_scroll = g_selected - list_rows_per_page() + 1;
+            if (g_scroll < 0) g_scroll = 0;
+            render();
+            continue;
+        }
 
         if (ev.type == OX_EV_MOUSE) {
             int btn = hit_button(ev.x, ev.y);
             int sb  = hit_sidebar(ev.x, ev.y);
             int row = hit_row(ev.x, ev.y);
 
-            if (ev.mouse_kind == OX_MOUSE_MOVE) {
+            if (ev.mouse_kind == OX_MOUSE_WHEEL) {
+                int max_scroll = g_n_entries - list_rows_per_page();
+                if (max_scroll < 0) max_scroll = 0;
+                g_scroll -= ev.wheel_delta * 3;
+                if (g_scroll < 0) g_scroll = 0;
+                if (g_scroll > max_scroll) g_scroll = max_scroll;
+                render();
+            } else if (ev.mouse_kind == OX_MOUSE_MOVE) {
                 int dirty = 0;
                 if (btn != g_btn_hover) { g_btn_hover = btn; dirty = 1; }
                 if (sb  != g_sb_hover)  { g_sb_hover  = sb;  dirty = 1; }

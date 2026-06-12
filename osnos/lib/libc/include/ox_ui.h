@@ -18,8 +18,8 @@
 
 /* ---- Theme tokens — keep in sync with oxsrv's BeOS palette ------- */
 #define OX_UI_COL_BG          OX_RGB(232, 232, 232)
-#define OX_UI_COL_BG_ALT      OX_RGB(244, 244, 244)
-#define OX_UI_COL_BORDER      OX_RGB( 80,  80,  80)
+#define OX_UI_COL_BG_ALT      OX_RGB(248, 248, 248)
+#define OX_UI_COL_BORDER      OX_RGB( 96,  96,  96)
 #define OX_UI_COL_BORDER_LITE OX_RGB(180, 180, 180)
 #define OX_UI_COL_FG          OX_RGB( 20,  20,  20)
 #define OX_UI_COL_FG_DIM      OX_RGB(110, 110, 110)
@@ -31,6 +31,20 @@
 #define OX_UI_COL_SCROLL_TR   OX_RGB(216, 216, 216)
 #define OX_UI_COL_SCROLL_THUMB OX_RGB(160, 160, 160)
 #define OX_UI_COL_SCROLL_THUMB_HOT OX_RGB(110, 130, 170)
+
+/* BeOS R5 bevel vocabulary (FASE 15.2 premium pass). Raised widgets
+ * get light top/left + dark bottom/right; sunken wells invert it. */
+#define OX_UI_COL_BEVEL_LITE  OX_RGB(252, 252, 252)
+#define OX_UI_COL_BEVEL_DARK  OX_RGB(152, 152, 152)
+#define OX_UI_COL_WELL_DARK   OX_RGB(136, 136, 136)   /* sunken top/left */
+#define OX_UI_COL_WELL_LITE   OX_RGB(255, 255, 255)   /* sunken bottom/right */
+#define OX_UI_COL_BTN_TOP     OX_RGB(243, 243, 243)   /* button face gradient */
+#define OX_UI_COL_BTN_BOT     OX_RGB(214, 214, 214)
+#define OX_UI_COL_BTN_TOP_HOT OX_RGB(250, 250, 250)
+#define OX_UI_COL_BTN_BOT_HOT OX_RGB(226, 226, 226)
+#define OX_UI_COL_HOVER_ROW   OX_RGB(229, 237, 246)   /* faint blue row hover */
+#define OX_UI_COL_HI_TOP      OX_RGB(120, 167, 214)   /* selection gradient */
+#define OX_UI_COL_HI_BOT      OX_RGB( 84, 134, 187)
 
 /* ---- ox_button_t -------------------------------------------------- */
 

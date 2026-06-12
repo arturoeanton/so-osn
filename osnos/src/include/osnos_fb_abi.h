@@ -21,6 +21,12 @@
  */
 #define OSNOS_FBIO_BLIT           0x4680
 
+/* arg (scalar, by value): 1 = suppress the cooked-text console path
+ * while a GUI server owns the framebuffer — kernel tty echo / app
+ * stdout no longer paint over the composited screen (they still tee
+ * to serial); 0 = restore text drawing. FASE 15.1. */
+#define OSNOS_FBIO_TEXT_SUPPRESS  0x4681
+
 /* Layout-compatible (size-truncated) subset of Linux struct
  * fb_var_screeninfo. Today we only fill the geometry + pixel format
  * fields a window system needs. */

@@ -80,7 +80,7 @@ task_t *task_current(void) {
     return &tasks[current_index];
 }
 
-void task_run_next(void) {
+int task_run_next(void) {
     /*
      * Snapshot the outgoing task's FP/SSE state BEFORE we start
      * looking for the next victim. The HW registers still hold
@@ -166,8 +166,16 @@ void task_run_next(void) {
             task->state = TASK_READY;
         }
 
-        return;
+        return 1;
     }
+    return 0;
+}
+
+int task_any_ready(void) {
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (tasks[i].state == TASK_READY) return 1;
+    }
+    return 0;
 }
 
 const task_t *task_slot(size_t idx) {

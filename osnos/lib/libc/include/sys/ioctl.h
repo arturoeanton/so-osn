@@ -23,6 +23,8 @@ struct winsize {
  * locked with src/include/osnos_fb_abi.h. */
 #define FBIOGET_VSCREENINFO  0x4600    /* Linux-compat               */
 #define FBIO_BLIT            0x4680    /* osnos-specific blit rect   */
+#define FBIO_TEXT_SUPPRESS   0x4681    /* arg 1/0: cooked text off/on
+                                        * while a GUI owns the screen */
 
 struct fb_var_screeninfo {
     uint32_t xres;

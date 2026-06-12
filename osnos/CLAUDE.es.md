@@ -92,7 +92,7 @@ Desde este directorio:
 QEMU se lanza con `-M pc` (NO `q35`) — el driver `block_ata` habla
 PIO a los puertos legacy 0x1F0; q35 attachea discos a AHCI y el
 driver no vería nada. La NIC es `rtl8139`, con slirp NAT hostfwds
-`tcp::8080-:80`, `tcp::9034-:9034`, `udp::1234-:1234` para que
+`tcp::8088-:80`, `tcp::9034-:9034`, `udp::1234-:1234` para que
 `httpd` y los demos `net/` sean alcanzables desde el host.
 
 Toolchain: `clang` + `ld.lld`. Los CFLAGS del kernel son

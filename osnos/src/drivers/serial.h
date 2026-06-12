@@ -14,8 +14,12 @@
  *   2. Optional headless input: serial_input_server (kernel task)
  *      polls serial_try_getc and feeds bytes to tty_input().
  *
- * Polling-only. No IRQ wiring (cooperative kernel task does the
- * polling at scheduler-tick frequency, ~10 ms — imperceptible).
+ * RX is IRQ-driven since FASE 15.0: IRQ4 drains the 16-byte HW FIFO
+ * into a 1 KiB software ring the moment bytes arrive, so ring-0 being
+ * busy past the FIFO depth no longer drops input (the GUI heartbeat /
+ * compositor used to cost ~half the serial console's characters).
+ * serial_try_getc consumes the ring first, then falls back to a
+ * direct LSR poll. TX stays polled (spin on THRE).
  */
 
 #define SERIAL_COM1     0x3F8
@@ -37,3 +41,10 @@ void serial_puts(const char *s, size_t n);
  * stored in *out; false if the UART had nothing ready. Called by
  * serial_input_server every tick. */
 bool serial_try_getc(uint8_t *out);
+
+/* Wire IRQ4 → RX ring. Call once after idt/pic init (IF may still be
+ * 0; the line just stays latched until sti). */
+void serial_enable_rx_irq(void);
+
+/* Diagnostics: bytes dropped because the software ring was full. */
+uint64_t serial_rx_overruns(void);

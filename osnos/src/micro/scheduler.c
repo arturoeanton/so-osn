@@ -43,7 +43,28 @@ void scheduler_tick(void) {
     task_check_wakeups(timer_ms());
 
     ticks++;
-    task_run_next();
+    if (!task_run_next()) {
+        /*
+         * Idle — nothing READY. Sleep until the next hardware IRQ
+         * instead of busy-spinning the loop at 100% host CPU. The
+         * PIT (100 Hz) bounds the nap at 10 ms; PS/2 + RTL8139 IRQs
+         * cut it short the moment input/packets arrive (FASE 15.0 —
+         * possible now that the PS/2 poll feeders are IRQ-driven and
+         * serial-in paces itself with wakeup_at_ms).
+         *
+         * Lost-wakeup guard: an IRQ landing between task_run_next's
+         * empty scan and the hlt could have just made a task READY
+         * (devfs push → task_unblock). Recheck with IF masked; the
+         * `sti; hlt` pair is atomic (sti takes effect after the next
+         * instruction), so no IRQ can slip into the gap.
+         */
+        __asm__ volatile ("cli" ::: "memory");
+        if (!task_any_ready()) {
+            __asm__ volatile ("sti; hlt" ::: "memory");
+        } else {
+            __asm__ volatile ("sti" ::: "memory");
+        }
+    }
 }
 
 uint64_t scheduler_get_ticks(void) {

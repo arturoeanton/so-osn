@@ -112,7 +112,10 @@ typedef enum {
                                    /* data = packed { x,y } uint32 ×2 + str */
     IPC_OX_DRAW_IMAGE     = 0x65,  /* C→S: arg0=win_id                     */
                                    /* data = { x,y,w,h, BGRA tile <=120px } */
-    IPC_OX_PRESENT        = 0x66,  /* C→S: arg0=win_id                     */
+    IPC_OX_PRESENT        = 0x66,  /* C→S: arg0=win_id. arg1=0 → whole     */
+                                   /* window damaged (legacy). arg1=1 →    */
+                                   /* data = packed {x,y,w,h} uint32 ×4    */
+                                   /* damage rect, window-relative (F15.0) */
     IPC_OX_SET_TITLE      = 0x67,  /* C→S: arg0=win_id, data=title         */
     IPC_OX_EVENT_KEY      = 0x68,  /* S→C: arg0=win_id, data[0]=ascii      */
                                    /*      data[1..2]=keycode LE, [3]=mods */
@@ -126,12 +129,19 @@ typedef enum {
                                    /*      Replaces global clipboard.      */
     IPC_OX_CLIPBOARD_GET  = 0x6e,  /* C→S: → RESPONSE arg1=size, data=bytes*/
     IPC_OX_RESPONSE       = 0x6f,  /* S→C: arg0=status arg1=value          */
-    IPC_OX_EVENT_RESIZE   = 0x70   /* S→C: arg0=win_id,                    */
+    IPC_OX_EVENT_RESIZE   = 0x70,  /* S→C: arg0=win_id,                    */
                                    /*      arg1=((u64)new_w<<32)|new_h,    */
                                    /*      data=new SHM name (NUL-term).   */
                                    /* Client munmaps the old backing and   */
                                    /* mmaps the SHM named in `data` — new  */
                                    /* buffer is exactly new_w*new_h*4 ARGB.*/
+    IPC_OX_QUERY_POINTER  = 0x71   /* C→S: arg0=win_id (for win-relative   */
+                                   /*      coords). → RESPONSE             */
+                                   /*      arg1=((u64)root_x<<32)|root_y,  */
+                                   /*      data[0]=button mask. FASE 15.3  */
+                                   /*      — backs tinyX XQueryPointer     */
+                                   /*      (xeyes tracks the pointer       */
+                                   /*      everywhere on screen).          */
 } ipc_type_t;
 
 /*

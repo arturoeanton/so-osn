@@ -114,7 +114,7 @@ static void render(void) {
     {
         char ttl[300];
         snprintf(ttl, sizeof(ttl), "Log: %s", g_path);
-        ox_draw_text(g_win, 10, 12, ttl, COL_HDR_FG);
+        ox_draw_text_pretty(g_win, 10, (HDR_H - ox_text_height()) / 2, ttl, COL_HDR_FG);
     }
     ox_button_draw(g_win, &g_btn_reload);
 
@@ -133,7 +133,7 @@ static void render(void) {
 
     /* Status. */
     ox_draw_rect(g_win, 0, g_h - 16, g_w, 16, COL_HDR_BG);
-    ox_draw_text(g_win, 8, g_h - 12, g_status,
+    ox_draw_text_pretty(g_win, 8, g_h - 15, g_status,
                  g_status_err ? COL_ERROR : COL_STATUS);
 
     ox_present(g_win);
@@ -148,9 +148,10 @@ int main(int argc, char **argv) {
     }
     ox_log("oxlog: starting\n");
     if (ox_init() < 0) return 1;
+    ox_text_init("/home/.fonts/default.ttf", 14);
     char title[300];
     snprintf(title, sizeof(title), "Log — %s", g_path);
-    g_win = ox_window_create(g_w, g_h, title);
+    g_win = ox_window_create_resizable(g_w, g_h, title);
     if (g_win < 0) return 1;
     layout();
     load_file();

@@ -322,7 +322,14 @@ fi
 # misbehaves on a particular host.
 DISPLAY_FLAG=""
 case "$(uname -s)" in
-    Darwin) DISPLAY_FLAG="-display ${QEMU_DISPLAY:-cocoa,zoom-to-fit=on}" ;;
+    # macOS: plain cocoa WITHOUT zoom-to-fit. The zoomed path redraws
+    # the scaled view on every partial framebuffer update, which shows
+    # up as black flicker/"vibration" while the guest cursor moves
+    # (FASE 15.3 user report). With no zoom the window is pixel-exact
+    # in points and macOS applies a clean integer Retina scale — the
+    # guest resolution (limine.conf) is picked to fit laptop screens.
+    # Old behaviour: QEMU_DISPLAY=cocoa,zoom-to-fit=on
+    Darwin) DISPLAY_FLAG="-display ${QEMU_DISPLAY:-cocoa}" ;;
     Linux)
         DISPLAY_FLAG="-display ${QEMU_DISPLAY:-gtk,grab-on-hover=on}"
         # If we're on a Wayland session (labwc / sway / GNOME-Wayland /

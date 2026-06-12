@@ -14,26 +14,102 @@
 #include "include/ox.h"
 #include "include/ox_ui.h"
 
-static int char_w(void) { return 8; }
+/* ---- Premium text + bevel helpers (FASE 15.2) ---------------------
+ *
+ * All widget chrome routes through these. Text is the proportional
+ * TTF when /home/.fonts/default.ttf is staged (ox_draw_text_pretty
+ * lazy-loads it), bevels follow the BeOS R5 vocabulary: raised =
+ * light top/left + dark bottom/right, sunken wells invert it, and
+ * faces get a subtle 2-stop vertical gradient so nothing reads as a
+ * flat indie rectangle. */
+
+static void ui_font(void) {
+    static int tried;
+    if (!tried && !ox_text_loaded()) {
+        tried = 1;
+        ox_text_init("/home/.fonts/default.ttf", 14);
+    }
+}
+
+static int ui_text_w(const char *s) {
+    ui_font();
+    return s ? ox_text_width(s) : 0;
+}
+
+static int ui_text_h(void) {
+    ui_font();
+    return ox_text_height();
+}
+
+static void ui_text(ox_win_t win, int x, int y, const char *s,
+                    uint32_t color) {
+    ui_font();
+    ox_draw_text_pretty(win, x, y, s, color);
+}
+
+static uint32_t ui_lerp(uint32_t a, uint32_t b, int num, int den) {
+    if (den <= 0) return a;
+    int ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff;
+    int br = (b >> 16) & 0xff, bg = (b >> 8) & 0xff, bb = b & 0xff;
+    return OX_RGB(ar + (br - ar) * num / den,
+                  ag + (bg - ag) * num / den,
+                  ab + (bb - ab) * num / den);
+}
+
+/* Vertical 2-stop gradient fill. */
+static void ui_vgrad(ox_win_t win, int x, int y, int w, int h,
+                     uint32_t top, uint32_t bot) {
+    if (w <= 0 || h <= 0) return;
+    for (int i = 0; i < h; i++)
+        ox_draw_rect(win, x, y + i, w, 1, ui_lerp(top, bot, i, h - 1));
+}
+
+/* Raised bevel: 1px outline + light top/left, dark bottom/right. */
+static void ui_bevel_raised(ox_win_t win, int x, int y, int w, int h) {
+    ox_draw_rect(win, x,         y,         w, 1, OX_UI_COL_BORDER);
+    ox_draw_rect(win, x,         y + h - 1, w, 1, OX_UI_COL_BORDER);
+    ox_draw_rect(win, x,         y,         1, h, OX_UI_COL_BORDER);
+    ox_draw_rect(win, x + w - 1, y,         1, h, OX_UI_COL_BORDER);
+    ox_draw_rect(win, x + 1,     y + 1,     w - 2, 1, OX_UI_COL_BEVEL_LITE);
+    ox_draw_rect(win, x + 1,     y + 1,     1, h - 2, OX_UI_COL_BEVEL_LITE);
+    ox_draw_rect(win, x + 1,     y + h - 2, w - 2, 1, OX_UI_COL_BEVEL_DARK);
+    ox_draw_rect(win, x + w - 2, y + 1,     1, h - 2, OX_UI_COL_BEVEL_DARK);
+}
+
+/* Sunken well: dark top/left, light bottom/right (lists, tracks). */
+static void ui_bevel_sunken(ox_win_t win, int x, int y, int w, int h) {
+    ox_draw_rect(win, x,         y,         w, 1, OX_UI_COL_WELL_DARK);
+    ox_draw_rect(win, x,         y,         1, h, OX_UI_COL_WELL_DARK);
+    ox_draw_rect(win, x,         y + h - 1, w, 1, OX_UI_COL_WELL_LITE);
+    ox_draw_rect(win, x + w - 1, y,         1, h, OX_UI_COL_WELL_LITE);
+}
 
 /* ---- Button ------------------------------------------------------- */
 
 void ox_button_draw(ox_win_t win, const ox_button_t *b) {
     if (!b) return;
-    uint32_t bg = OX_UI_COL_BTN;
-    if (b->pressed)      bg = OX_UI_COL_BTN_DOWN;
-    else if (b->hover)   bg = OX_UI_COL_BTN_HOT;
-    ox_draw_rect(win, b->x, b->y, b->w, b->h, bg);
-    /* Hard 1px frame. */
-    ox_draw_rect(win, b->x,             b->y,             b->w, 1, OX_UI_COL_BORDER);
-    ox_draw_rect(win, b->x,             b->y + b->h - 1,  b->w, 1, OX_UI_COL_BORDER);
-    ox_draw_rect(win, b->x,             b->y,             1, b->h, OX_UI_COL_BORDER);
-    ox_draw_rect(win, b->x + b->w - 1,  b->y,             1, b->h, OX_UI_COL_BORDER);
+    if (b->pressed) {
+        /* Sunken: flat darker face, inverted bevel, label nudged. */
+        ox_draw_rect(win, b->x + 1, b->y + 1, b->w - 2, b->h - 2,
+                     OX_UI_COL_BTN_DOWN);
+        ox_draw_rect(win, b->x,             b->y,            b->w, 1, OX_UI_COL_BORDER);
+        ox_draw_rect(win, b->x,             b->y + b->h - 1, b->w, 1, OX_UI_COL_BORDER);
+        ox_draw_rect(win, b->x,             b->y,            1, b->h, OX_UI_COL_BORDER);
+        ox_draw_rect(win, b->x + b->w - 1,  b->y,            1, b->h, OX_UI_COL_BORDER);
+        ox_draw_rect(win, b->x + 1, b->y + 1, b->w - 2, 1, OX_UI_COL_BEVEL_DARK);
+        ox_draw_rect(win, b->x + 1, b->y + 1, 1, b->h - 2, OX_UI_COL_BEVEL_DARK);
+    } else {
+        uint32_t top = b->hover ? OX_UI_COL_BTN_TOP_HOT : OX_UI_COL_BTN_TOP;
+        uint32_t bot = b->hover ? OX_UI_COL_BTN_BOT_HOT : OX_UI_COL_BTN_BOT;
+        ui_vgrad(win, b->x + 2, b->y + 2, b->w - 4, b->h - 4, top, bot);
+        ui_bevel_raised(win, b->x, b->y, b->w, b->h);
+    }
     if (b->label) {
-        int tw = (int)strlen(b->label) * char_w();
-        int tx = b->x + (b->w - tw) / 2;
-        int ty = b->y + (b->h - 8) / 2;
-        ox_draw_text(win, tx, ty, b->label, OX_UI_COL_FG);
+        int tw = ui_text_w(b->label);
+        int th = ui_text_h();
+        int tx = b->x + (b->w - tw) / 2 + (b->pressed ? 1 : 0);
+        int ty = b->y + (b->h - th) / 2 + (b->pressed ? 1 : 0);
+        ui_text(win, tx, ty, b->label, OX_UI_COL_FG);
     }
 }
 
@@ -50,13 +126,13 @@ void ox_label_draw(ox_win_t win, const ox_label_t *l) {
     if (l->bg) ox_draw_rect(win, l->x, l->y, l->w, l->h, l->bg);
     if (!l->text) return;
     uint32_t fg = l->fg ? l->fg : OX_UI_COL_FG;
-    int tw = (int)strlen(l->text) * char_w();
+    int tw = ui_text_w(l->text);
     int tx = l->x;
     if (l->align == OX_ALIGN_CENTER)      tx = l->x + (l->w - tw) / 2;
     else if (l->align == OX_ALIGN_RIGHT)  tx = l->x + l->w - tw - 4;
     else                                   tx = l->x + 4;
-    int ty = l->y + (l->h - 8) / 2;
-    ox_draw_text(win, tx, ty, l->text, fg);
+    int ty = l->y + (l->h - ui_text_h()) / 2;
+    ui_text(win, tx, ty, l->text, fg);
 }
 
 /* ---- ListView ----------------------------------------------------- */
@@ -73,28 +149,30 @@ static int lv_visible_rows(const ox_listview_t *lv) {
 void ox_listview_draw(ox_win_t win, const ox_listview_t *lv) {
     if (!lv) return;
     ox_draw_rect(win, lv->x, lv->y, lv->w, lv->h, OX_UI_COL_BG_ALT);
-    /* 1px outline. */
-    ox_draw_rect(win, lv->x,            lv->y,            lv->w, 1, OX_UI_COL_BORDER_LITE);
-    ox_draw_rect(win, lv->x,            lv->y + lv->h-1,  lv->w, 1, OX_UI_COL_BORDER_LITE);
-    ox_draw_rect(win, lv->x,            lv->y,            1, lv->h, OX_UI_COL_BORDER_LITE);
-    ox_draw_rect(win, lv->x + lv->w-1,  lv->y,            1, lv->h, OX_UI_COL_BORDER_LITE);
+    /* Sunken well — lists read as recessed content in R5. */
+    ui_bevel_sunken(win, lv->x, lv->y, lv->w, lv->h);
     int ih = lv_item_h(lv);
     int vis = lv_visible_rows(lv);
+    int th = ui_text_h();
     for (int i = 0; i < vis; i++) {
         int idx = lv->scroll + i;
         if (idx < 0 || idx >= lv->n_items) break;
-        int row_y = lv->y + i * ih;
-        uint32_t bg = OX_UI_COL_BG_ALT;
+        int row_y = lv->y + 1 + i * ih;
+        if (row_y + ih > lv->y + lv->h - 1) break;
         uint32_t fg = OX_UI_COL_FG;
         if (idx == lv->sel) {
-            bg = OX_UI_COL_HI;
+            ui_vgrad(win, lv->x + 1, row_y, lv->w - 2, ih,
+                     OX_UI_COL_HI_TOP, OX_UI_COL_HI_BOT);
             fg = OX_UI_COL_HI_FG;
         } else if (idx == lv->hover) {
-            bg = OX_UI_COL_BG;
+            ox_draw_rect(win, lv->x + 1, row_y, lv->w - 2, ih,
+                         OX_UI_COL_HOVER_ROW);
+        } else {
+            ox_draw_rect(win, lv->x + 1, row_y, lv->w - 2, ih,
+                         OX_UI_COL_BG_ALT);
         }
-        ox_draw_rect(win, lv->x + 1, row_y, lv->w - 2, ih, bg);
         const char *s = lv->items[idx];
-        if (s) ox_draw_text(win, lv->x + 6, row_y + (ih - 8) / 2, s, fg);
+        if (s) ui_text(win, lv->x + 7, row_y + (ih - th) / 2, s, fg);
     }
 }
 
@@ -183,12 +261,32 @@ void ox_scrollview_draw_bar(ox_win_t win, const ox_scrollview_t *sv) {
     if (!sv) return;
     int bw = sv_bar_w(sv);
     int bar_x = sv->x + sv->w - bw;
+    /* Sunken track. */
     ox_draw_rect(win, bar_x, sv->y, bw, sv->h, OX_UI_COL_SCROLL_TR);
+    ui_bevel_sunken(win, bar_x, sv->y, bw, sv->h);
     int ty, th;
     if (!sv_thumb_geom(sv, &ty, &th)) return;
-    uint32_t fg = sv->drag_active ? OX_UI_COL_SCROLL_THUMB_HOT
-                                  : OX_UI_COL_SCROLL_THUMB;
-    ox_draw_rect(win, bar_x + 2, ty, bw - 4, th, fg);
+    /* Raised thumb with BeOS grip lines. */
+    int thx = bar_x + 2, thw = bw - 4;
+    if (ty < sv->y + 2) ty = sv->y + 2;
+    if (ty + th > sv->y + sv->h - 2) th = sv->y + sv->h - 2 - ty;
+    if (th < 8) th = 8;
+    uint32_t face = sv->drag_active ? OX_RGB(196, 212, 232)
+                                    : OX_RGB(222, 222, 222);
+    ox_draw_rect(win, thx, ty, thw, th, face);
+    ox_draw_rect(win, thx,           ty,          thw, 1, OX_UI_COL_BEVEL_LITE);
+    ox_draw_rect(win, thx,           ty,          1, th,  OX_UI_COL_BEVEL_LITE);
+    ox_draw_rect(win, thx,           ty + th - 1, thw, 1, OX_UI_COL_BEVEL_DARK);
+    ox_draw_rect(win, thx + thw - 1, ty,          1, th,  OX_UI_COL_BEVEL_DARK);
+    if (th >= 18 && thw >= 6) {
+        int gy = ty + th / 2 - 3;
+        for (int g = 0; g < 3; g++) {
+            ox_draw_rect(win, thx + 2, gy + g * 3,     thw - 4, 1,
+                         OX_UI_COL_BEVEL_DARK);
+            ox_draw_rect(win, thx + 2, gy + g * 3 + 1, thw - 4, 1,
+                         OX_UI_COL_BEVEL_LITE);
+        }
+    }
 }
 
 void ox_scrollview_clamp(ox_scrollview_t *sv) {
@@ -271,20 +369,25 @@ int ox_scrollview_event(ox_scrollview_t *sv, const ox_event_t *ev) {
 #define COL_DLG_BORDER       OX_RGB( 60,  60,  60)
 
 static void dlg_frame(ox_win_t win, int x, int y, int w, int h, const char *title) {
-    /* Solid dim backdrop around the dialog (cheap modal hint). */
-    /* (Skipped — we draw the dialog on top of the caller's existing
-     *  render, which is already a useful visual cue without an
-     *  expensive alpha-blend pass.) */
-    /* Body. */
-    ox_draw_rect(win, x, y, w, h, COL_DLG_BG);
-    /* 1px frame. */
+    /* Body + raised bevel so the dialog visibly floats over the
+     * caller's content (cheap modal hint, no alpha pass). */
+    ox_draw_rect(win, x + 2, y + 2, w - 4, h - 4, COL_DLG_BG);
     ox_draw_rect(win, x,         y,         w, 1, COL_DLG_BORDER);
     ox_draw_rect(win, x,         y + h - 1, w, 1, COL_DLG_BORDER);
     ox_draw_rect(win, x,         y,         1, h, COL_DLG_BORDER);
     ox_draw_rect(win, x + w - 1, y,         1, h, COL_DLG_BORDER);
-    /* Title bar. */
-    ox_draw_rect(win, x + 1, y + 1, w - 2, 18, COL_DLG_TITLE_BG);
-    if (title) ox_draw_text(win, x + 8, y + 6, title, COL_DLG_TITLE_FG);
+    ox_draw_rect(win, x + 1,     y + 1,     w - 2, 1, OX_UI_COL_BEVEL_LITE);
+    ox_draw_rect(win, x + 1,     y + 1,     1, h - 2, OX_UI_COL_BEVEL_LITE);
+    ox_draw_rect(win, x + 1,     y + h - 2, w - 2, 1, OX_UI_COL_BEVEL_DARK);
+    ox_draw_rect(win, x + w - 2, y + 1,     1, h - 2, OX_UI_COL_BEVEL_DARK);
+    /* Title bar — gradient blue, proportional text. */
+    int th_bar = 20;
+    ui_vgrad(win, x + 2, y + 2, w - 4, th_bar,
+             OX_UI_COL_HI_TOP, OX_UI_COL_HI_BOT);
+    if (title) {
+        int ty = y + 2 + (th_bar - ui_text_h()) / 2;
+        ui_text(win, x + 10, ty, title, COL_DLG_TITLE_FG);
+    }
 }
 
 /* ---- Message box -------------------------------------------------- */
@@ -315,14 +418,15 @@ void ox_msgbox_draw(ox_win_t win, const ox_msgbox_t *m) {
     /* Wrap the message naively across lines using '\n'. */
     if (m->msg) {
         const char *p = m->msg;
-        int line_y = m->y + 32;
+        int line_y = m->y + 34;
+        int lh = ox_text_line_height();
         char buf[256];
         int n = 0;
         while (*p) {
             if (*p == '\n' || n >= (int)sizeof(buf) - 1) {
                 buf[n] = 0;
-                ox_draw_text(win, m->x + 12, line_y, buf, OX_UI_COL_FG);
-                line_y += 12;
+                ui_text(win, m->x + 12, line_y, buf, OX_UI_COL_FG);
+                line_y += lh;
                 n = 0;
                 if (*p == '\n') p++;
                 continue;
@@ -331,7 +435,7 @@ void ox_msgbox_draw(ox_win_t win, const ox_msgbox_t *m) {
         }
         if (n > 0) {
             buf[n] = 0;
-            ox_draw_text(win, m->x + 12, line_y, buf, OX_UI_COL_FG);
+            ui_text(win, m->x + 12, line_y, buf, OX_UI_COL_FG);
         }
     }
     ox_button_draw(win, &m->btn_ok);
@@ -421,7 +525,7 @@ static void fp_reload(ox_filepicker_t *fp) {
 
 static void fp_layout(ox_filepicker_t *fp) {
     int x = fp->x, y = fp->y, w = fp->w, h = fp->h;
-    int title_h = 18;
+    int title_h = 24;
     int path_h  = 22;
     int btn_h   = 26;
     int btn_gap = 8;
@@ -530,13 +634,14 @@ void ox_filepicker_draw(ox_win_t win, const ox_filepicker_t *fp) {
     if (!fp) return;
     dlg_frame(win, fp->x, fp->y, fp->w, fp->h, "Open File");
     /* Path strip. */
-    int title_h = 18;
-    ox_draw_rect(win, fp->x + 1, fp->y + title_h + 1,
-                  fp->w - 2, 22, OX_RGB(232, 232, 232));
+    int title_h = 24;
+    ox_draw_rect(win, fp->x + 2, fp->y + title_h + 1,
+                  fp->w - 4, 22, OX_RGB(232, 232, 232));
     char shown[OX_FP_PATH_MAX + 8];
     snprintf(shown, sizeof(shown), "Path: %s", fp->path);
-    ox_draw_text(win, fp->x + 8, fp->y + title_h + 7, shown,
-                  OX_UI_COL_FG);
+    ui_text(win, fp->x + 10,
+            fp->y + title_h + 1 + (22 - ui_text_h()) / 2, shown,
+            OX_UI_COL_FG);
     ox_button_draw(win, &fp->btn_up);
     /* List. */
     ox_listview_draw(win, &fp->lv);
@@ -548,12 +653,12 @@ void ox_filepicker_draw(ox_win_t win, const ox_filepicker_t *fp) {
         int idx = fp->lv.scroll + i;
         if (idx < 0 || idx >= fp->n_entries) break;
         if (!fp->is_dir[idx]) continue;
-        int row_y = fp->lv.y + i * ih;
+        int row_y = fp->lv.y + 1 + i * ih;
         uint32_t fg = (idx == fp->lv.sel) ? OX_UI_COL_HI_FG : OX_RGB(50, 80, 160);
-        ox_draw_text(win,
-                      fp->lv.x + fp->lv.w - 14,
-                      row_y + (ih - 8) / 2,
-                      "/", fg);
+        ui_text(win,
+                fp->lv.x + fp->lv.w - 14,
+                row_y + (ih - ui_text_h()) / 2,
+                "/", fg);
     }
     /* Buttons. */
     ox_button_draw(win, &fp->btn_ok);

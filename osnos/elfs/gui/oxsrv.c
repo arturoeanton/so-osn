@@ -170,14 +170,25 @@ static int         g_next_id    = 1;
 
 static int         g_dirty = 1;
 
-/* Dirty-rect tracking — when only the cursor moved (most common case),
- * we know exactly what changed visually: old cursor area + new cursor
- * area. Re-composite only that region and blit only that region to FB.
- * Drops per-frame work from 1280×800 (1M pixels memcpy + blit) to
- * ~30×30 (~900 pixels) when cursor moves over wallpaper.
- * g_dirty_full=1 forces the legacy full-screen path. */
-static int g_dirty_full = 1;
-static int g_dirty_x0 = 0, g_dirty_y0 = 0, g_dirty_x1 = 0, g_dirty_y1 = 0;
+/* Dirty-rect tracking — a small LIST of rects instead of one global
+ * bounding box. The single-bbox version unioned far-apart changes
+ * into a huge rect (deskbar clock top-right + a window bottom-left
+ * used to recompose almost the whole screen every second). Each rect
+ * is recomposed + snapshotted + blitted independently, so disjoint
+ * small changes stay small. Overlapping marks merge in place; on
+ * overflow we merge into the entry that grows the least.
+ * g_dirty_full=1 forces the legacy full-screen path.
+ *
+ * The cursor is NOT tracked through this list: process_mouse_event
+ * sets g_cursor_dirty and composite_and_flush restores the old
+ * position from g_back_clean + redraws at the new one — no
+ * recomposition at all for pure cursor motion. */
+#define DIRTY_RECTS_MAX 8
+typedef struct { int x0, y0, x1, y1; } dirty_rect_t;
+static dirty_rect_t g_drects[DIRTY_RECTS_MAX];
+static int          g_dirty_nrects = 0;
+static int          g_dirty_full   = 1;
+static int          g_cursor_dirty = 0;
 
 /* Forward refs — counters defined later in the diagnostics block. */
 static const char *g_last_full_reason = "init";
@@ -212,16 +223,53 @@ static void mark_dirty(int x, int y, int w, int h) {
     if (x1 > (int)g_scr_w)    x1 = (int)g_scr_w;
     if (y1 > (int)g_scr_h)    y1 = (int)g_scr_h;
     if (x >= x1 || y >= y1)   return;
-    if (g_dirty_x0 >= g_dirty_x1) {            /* first dirty mark this frame */
-        g_dirty_x0 = x;  g_dirty_y0 = y;
-        g_dirty_x1 = x1; g_dirty_y1 = y1;
-    } else {
-        if (x  < g_dirty_x0) g_dirty_x0 = x;
-        if (y  < g_dirty_y0) g_dirty_y0 = y;
-        if (x1 > g_dirty_x1) g_dirty_x1 = x1;
-        if (y1 > g_dirty_y1) g_dirty_y1 = y1;
+    /* Merge into an existing rect when they overlap — repeated marks
+     * over the same window collapse into one entry. */
+    for (int i = 0; i < g_dirty_nrects; i++) {
+        dirty_rect_t *r = &g_drects[i];
+        if (x < r->x1 && x1 > r->x0 && y < r->y1 && y1 > r->y0) {
+            if (x  < r->x0) r->x0 = x;
+            if (y  < r->y0) r->y0 = y;
+            if (x1 > r->x1) r->x1 = x1;
+            if (y1 > r->y1) r->y1 = y1;
+            return;
+        }
     }
+    if (g_dirty_nrects < DIRTY_RECTS_MAX) {
+        g_drects[g_dirty_nrects].x0 = x;
+        g_drects[g_dirty_nrects].y0 = y;
+        g_drects[g_dirty_nrects].x1 = x1;
+        g_drects[g_dirty_nrects].y1 = y1;
+        g_dirty_nrects++;
+        return;
+    }
+    /* List full — union into the entry whose bounding box grows the
+     * least, so two distant hot spots don't ping-pong a giant rect. */
+    long best_waste = -1;
+    int  best = 0;
+    for (int i = 0; i < g_dirty_nrects; i++) {
+        dirty_rect_t *r = &g_drects[i];
+        long ux0 = r->x0 < x  ? r->x0 : x;
+        long uy0 = r->y0 < y  ? r->y0 : y;
+        long ux1 = r->x1 > x1 ? r->x1 : x1;
+        long uy1 = r->y1 > y1 ? r->y1 : y1;
+        long waste = (ux1 - ux0) * (uy1 - uy0) -
+                     (long)(r->x1 - r->x0) * (r->y1 - r->y0);
+        if (best_waste < 0 || waste < best_waste) {
+            best_waste = waste;
+            best = i;
+        }
+    }
+    dirty_rect_t *r = &g_drects[best];
+    if (x  < r->x0) r->x0 = x;
+    if (y  < r->y0) r->y0 = y;
+    if (x1 > r->x1) r->x1 = x1;
+    if (y1 > r->y1) r->y1 = y1;
 }
+
+/* Defined after the window-table / Deskbar geometry they reference. */
+static void mark_slot_dirty(int slot);
+static void mark_deskbar_dirty(void);
 
 static int rect_intersects(int ax, int ay, int aw, int ah,
                             int bx0, int by0, int bx1, int by1) {
@@ -261,6 +309,8 @@ static const menu_item_t g_menu[] = {
     { "JS Studio",   "/bin/oxstudio",    0, "notepad"  },
     { "JS: Notes",      "notes",      3, "notepad"  },
     { "JS: Snake",      "snake",      3, "paint"    },
+    { "X11 Demo",    "/bin/xdemo",       0, "paint"    },
+    { "XEyes",       "/bin/xeyes",       0, "info"     },
     { "Settings",    "/bin/oxsettings",  0, "settings" },
     { "Exit Ox",     0,                  2, "info"     },
     { "Reboot",      0,                  1, "info"     },
@@ -350,6 +400,26 @@ static void buf_draw_text(uint32_t *buf, int buf_w, int buf_h,
      * glyphs. With no TTF, ox_text_draw falls back to the same 8x8
      * bitmap path we used to do here directly. */
     ox_text_draw(buf, buf_w, buf_h, x, y, s, color);
+}
+
+/* Vertical 2-stop gradient — the premium-pass replacement for flat
+ * decoration fills (tabs, deskbar, selection bars). Per-row fills,
+ * so the cost matches buf_fill_rect. */
+static uint32_t col_lerp(uint32_t a, uint32_t b, int num, int den) {
+    if (den <= 0) return a;
+    int ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff;
+    int br = (b >> 16) & 0xff, bg = (b >> 8) & 0xff, bb = b & 0xff;
+    return OX_RGB(ar + (br - ar) * num / den,
+                  ag + (bg - ag) * num / den,
+                  ab + (bb - ab) * num / den);
+}
+
+static void buf_vgrad(uint32_t *buf, int buf_w, int buf_h,
+                      int x, int y, int w, int h,
+                      uint32_t top, uint32_t bot) {
+    for (int i = 0; i < h; i++)
+        buf_fill_rect(buf, buf_w, buf_h, x, y + i, w, 1,
+                      col_lerp(top, bot, i, h - 1));
 }
 
 /* Blit a sub-rect from `src` into `dst` (both BGRA full-screen buffers).
@@ -769,12 +839,20 @@ static int alloc_window(uint64_t owner_pid, int w, int h, const char *title,
             g_wins[i].dragging = 0;
             g_wins[i].should_close = 0;
             /* Push to top of stack. */
+            int prev_focus = g_focus_slot;
             if (g_stack_n < MAX_WINS) {
                 g_stack[g_stack_n++] = i;
                 g_focus_slot = i;
             }
             g_dirty = 1;
-            mark_dirty_full_reason("alloc");
+            /* Regional repaint: the new frame, the previously focused
+             * window (its tab dims), and the Deskbar (new tile). The
+             * old full-screen invalidate cost 8-12 ms per open. */
+            mark_slot_dirty(i);
+            if (prev_focus >= 0 && prev_focus != i &&
+                g_wins[prev_focus].used)
+                mark_slot_dirty(prev_focus);
+            mark_deskbar_dirty();
             return i;
         }
     }
@@ -796,6 +874,9 @@ static int find_owner_slot(uint64_t pid, int id) {
 
 static void destroy_slot(int slot) {
     if (slot < 0 || slot >= MAX_WINS || !g_wins[slot].used) return;
+    /* Geometry is still valid here — mark the window's screen rect so
+     * the wallpaper/underlying windows get recomposed regionally. */
+    mark_slot_dirty(slot);
     uint64_t t_destroy0 = now_us();
     if (g_wins[slot].back && g_wins[slot].back_bytes) {
         munmap(g_wins[slot].back, g_wins[slot].back_bytes);
@@ -834,9 +915,11 @@ static void destroy_slot(int slot) {
     g_stack_n = j;
     if (g_focus_slot == slot) {
         g_focus_slot = (g_stack_n > 0) ? g_stack[g_stack_n - 1] : -1;
+        /* The newly focused window's tab turns active — repaint it. */
+        if (g_focus_slot >= 0) mark_slot_dirty(g_focus_slot);
     }
+    mark_deskbar_dirty();                 /* its tile disappears */
     g_dirty = 1;
-    mark_dirty_full_reason("destroy");
 }
 
 static void raise_slot(int slot) {
@@ -848,6 +931,7 @@ static void raise_slot(int slot) {
         g_focus_slot == slot) {
         return;
     }
+    int prev_focus = g_focus_slot;
     int j = 0;
     for (int i = 0; i < g_stack_n; i++) {
         if (g_stack[i] != slot) g_stack[j++] = g_stack[i];
@@ -856,7 +940,12 @@ static void raise_slot(int slot) {
     g_stack_n = j;
     g_focus_slot = slot;
     g_dirty = 1;
-    mark_dirty_full_reason("raise");
+    /* Regional: the raised window's rect gets recomposed with the new
+     * z-order; the previously focused one only changes tab colour. */
+    mark_slot_dirty(slot);
+    if (prev_focus >= 0 && prev_focus != slot && g_wins[prev_focus].used)
+        mark_slot_dirty(prev_focus);
+    mark_deskbar_dirty();
 }
 
 /* ---------------- Window state operations ------------------------ */
@@ -896,7 +985,10 @@ static void minimize_slot(int slot) {
                 break;
             }
         }
+        /* New focus → its tab turns active. */
+        if (g_focus_slot >= 0) mark_slot_dirty(g_focus_slot);
     }
+    mark_deskbar_dirty();    /* tile switches to minimized style */
 }
 
 /* Resize a window's *visible* bounds within its existing backing
@@ -907,10 +999,10 @@ static void minimize_slot(int slot) {
  * land at the correct offsets and never produce a diagonal "stride
  * mismatch" artifact.
  *
- * The IPC_OX_EVENT_RESIZE / lib/libc remap path is kept in the ABI
- * for future grow-beyond-buffer support, but disarmed for now —
- * every app will need to opt in to genuine resize before we re-light
- * the SHM swap. */
+ * This is the legacy/fallback path for windows that did NOT opt in
+ * via ox_window_create_resizable. Opted-in windows go through
+ * commit_resize → swap_window_shm + OX_EV_RESIZE instead (armed in
+ * FASE 15.1). */
 static int resize_window(int slot, int new_w, int new_h) {
     if (slot < 0 || slot >= MAX_WINS) return -1;
     ox_window_t *w = &g_wins[slot];
@@ -980,6 +1072,19 @@ static int swap_window_shm(int slot, int new_w, int new_h) {
     for (size_t k = 0; k < (size_t)new_w * new_h; k++)
         ((uint32_t *)p)[k] = COL_BODY_BG;
 
+    /* Copy the overlapping region of the old backing into the new one
+     * so live drag-resize shows the existing content (clipped or with
+     * a body-colour margin) instead of a blank flash until the client
+     * re-renders at the new dims. */
+    if (w->back && w->buf_w > 0 && w->buf_h > 0) {
+        int copy_w = w->buf_w < new_w ? w->buf_w : new_w;
+        int copy_h = w->buf_h < new_h ? w->buf_h : new_h;
+        for (int row = 0; row < copy_h; row++)
+            memcpy((uint32_t *)p + (size_t)row * new_w,
+                   w->back + (size_t)row * w->buf_w,
+                   (size_t)copy_w * sizeof(uint32_t));
+    }
+
     /* If a previous resize hadn't been ACKed yet (client hadn't sent
      * a PRESENT against the previously-allocated new SHM), release
      * THAT pending now — only one outstanding resize at a time. */
@@ -1033,6 +1138,36 @@ static void send_resize_event(int slot, int new_w, int new_h) {
         struct timespec ts = { 0, 2 * 1000000 };
         nanosleep(&ts, 0);
     }
+}
+
+/* Interactive-resize commit: the armed version of resize_window.
+ * For windows that opted in via ox_window_create_resizable this does
+ * the genuine thing — fresh SHM at the new dims + OX_EV_RESIZE so the
+ * client re-lays out (FASE 15.1; before this the drag could only clip
+ * inside the original buffer). Legacy windows keep the clip-only
+ * behaviour, which is safe without app cooperation. */
+static int commit_resize(int slot, int new_w, int new_h) {
+    if (slot < 0 || slot >= MAX_WINS) return -1;
+    ox_window_t *w = &g_wins[slot];
+    if (!w->used) return -1;
+    if (!w->resizable)
+        return resize_window(slot, new_w, new_h);
+    if (new_w < 120) new_w = 120;
+    if (new_h < 80)  new_h = 80;
+    if (new_w > (int)g_scr_w) new_w = (int)g_scr_w;
+    if (new_h > (int)g_scr_h - DESKBAR_H - TITLEBAR_H)
+        new_h = (int)g_scr_h - DESKBAR_H - TITLEBAR_H;
+    if (new_w == w->w && new_h == w->h) return 0;
+    mark_slot_dirty(slot);             /* old bounds */
+    if (swap_window_shm(slot, new_w, new_h) == 0) {
+        send_resize_event(slot, new_w, new_h);
+    } else {
+        /* SHM alloc failed — degrade to the clip-only path. */
+        return resize_window(slot, new_w, new_h);
+    }
+    mark_slot_dirty(slot);             /* new bounds */
+    g_dirty = 1;
+    return 0;
 }
 
 /* Toggle WIN_NORMAL ↔ WIN_ZOOM.
@@ -1113,6 +1248,7 @@ static void restore_slot(int slot) {
     /* Restore to whatever it was before — assume WIN_NORMAL. We do not
      * track the pre-minimize state precisely; minimize from ZOOM also
      * lands in NORMAL on restore. */
+    int prev_focus = g_focus_slot;
     w->state = WIN_NORMAL;
     g_focus_slot = slot;
     /* Move to top of stack. */
@@ -1122,7 +1258,11 @@ static void restore_slot(int slot) {
     g_stack[j++] = slot;
     g_stack_n = j;
     g_dirty = 1;
-    mark_dirty_full_reason("raise");   /* big change — easier than per-rect */
+    /* Regional: restored window's rect + old focus tab + Deskbar tile. */
+    mark_slot_dirty(slot);
+    if (prev_focus >= 0 && prev_focus != slot && g_wins[prev_focus].used)
+        mark_slot_dirty(prev_focus);
+    mark_deskbar_dirty();
 }
 
 /* ---------------- Compositor ------------------------------------ */
@@ -1253,6 +1393,13 @@ static void beos_draw_resize_handle(int hx, int hy) {
     }
 }
 
+/* Clip rect honored by the window BODY blit while replaying windows
+ * for a dirty-rect recomposition. The body memcpy is the dominant
+ * cost (O(window area)); chrome (1px borders, tab, buttons) is cheap
+ * and idempotent so it draws unclipped. */
+static int g_clip_on = 0;
+static int g_clip_x0, g_clip_y0, g_clip_x1, g_clip_y1;
+
 static void draw_window_frame(int slot) {
     ox_window_t *w = &g_wins[slot];
     if (w->state == WIN_MIN) return;  /* invisible while minimized */
@@ -1280,31 +1427,57 @@ static void draw_window_frame(int slot) {
                   wx + ww, wy,
                   BEOS_BODY_BORDER, wh, COL_BEOS_BORDER);
 
-    /* Yellow tab (BeOS R5 classic). */
+    /* Yellow tab (BeOS R5 classic) — premium pass: the focused tab
+     * gets a subtle vertical gradient + a 1px inner highlight, so it
+     * reads as a softly raised surface instead of a flat sticker. */
     int tx, ty, tw, th;
     beos_tab_geom(slot, &tx, &ty, &tw, &th);
-    uint32_t tab_bg = focused ? COL_BEOS_TAB_BG : COL_BEOS_TAB_INA;
-    buf_fill_rect(g_back, g_scr_w, g_scr_h, tx, ty, tw, th, tab_bg);
+    if (focused) {
+        buf_vgrad(g_back, g_scr_w, g_scr_h, tx + 1, ty + 1, tw - 2, th - 2,
+                  OX_RGB(255, 236, 150), OX_RGB(243, 204, 80));
+        /* Inner top highlight. */
+        buf_fill_rect(g_back, g_scr_w, g_scr_h, tx + 1, ty + 1, tw - 2, 1,
+                      OX_RGB(255, 247, 200));
+    } else {
+        buf_vgrad(g_back, g_scr_w, g_scr_h, tx + 1, ty + 1, tw - 2, th - 2,
+                  OX_RGB(226, 226, 200), OX_RGB(204, 204, 172));
+    }
     /* 1px black outline. */
     buf_fill_rect(g_back, g_scr_w, g_scr_h, tx, ty, tw, 1, COL_BEOS_TAB_BORDER);
     buf_fill_rect(g_back, g_scr_w, g_scr_h, tx, ty + th - 1, tw, 1, COL_BEOS_TAB_BORDER);
     buf_fill_rect(g_back, g_scr_w, g_scr_h, tx, ty, 1, th, COL_BEOS_TAB_BORDER);
     buf_fill_rect(g_back, g_scr_w, g_scr_h, tx + tw - 1, ty, 1, th, COL_BEOS_TAB_BORDER);
 
-    /* Title text — left-aligned, vertical-centered. */
+    /* Title text — left-aligned, vertical-centered on the TTF line. */
     int text_x = tx + BEOS_TAB_PAD_X;
-    int text_y = ty + (th - 8) / 2;
+    int text_y = ty + (th - ox_text_height()) / 2;
     buf_draw_text(g_back, g_scr_w, g_scr_h,
                   text_x, text_y, w->title,
                   focused ? COL_BEOS_TAB_FG : COL_BEOS_TAB_FG_INA);
 
-    /* Three buttons — zoom (0), min (1), close (2). */
+    /* Three buttons — zoom (0), min (1), close (2). Raised bevel +
+     * gradient face; hover brightens the face. */
     for (int idx = 0; idx < 3; idx++) {
         int bx, by, bw, bh;
         beos_btn_geom(slot, idx, &bx, &by, &bw, &bh);
         int hover = point_in(g_cx, g_cy, bx, by, bw, bh);
-        uint32_t fill = hover ? COL_BEOS_BTN_BG_HOT : COL_BEOS_BTN_BG;
-        buf_fill_rect(g_back, g_scr_w, g_scr_h, bx, by, bw, bh, fill);
+        if (hover)
+            buf_vgrad(g_back, g_scr_w, g_scr_h, bx + 1, by + 1,
+                      bw - 2, bh - 2,
+                      OX_RGB(255, 248, 196), OX_RGB(250, 226, 130));
+        else
+            buf_vgrad(g_back, g_scr_w, g_scr_h, bx + 1, by + 1,
+                      bw - 2, bh - 2,
+                      OX_RGB(253, 234, 138), OX_RGB(240, 200, 76));
+        /* Bevel: light top/left inside the black outline. */
+        buf_fill_rect(g_back, g_scr_w, g_scr_h, bx + 1, by + 1, bw - 2, 1,
+                      OX_RGB(255, 246, 190));
+        buf_fill_rect(g_back, g_scr_w, g_scr_h, bx + 1, by + 1, 1, bh - 2,
+                      OX_RGB(255, 246, 190));
+        buf_fill_rect(g_back, g_scr_w, g_scr_h, bx + 1, by + bh - 2,
+                      bw - 2, 1, OX_RGB(196, 158, 48));
+        buf_fill_rect(g_back, g_scr_w, g_scr_h, bx + bw - 2, by + 1,
+                      1, bh - 2, OX_RGB(196, 158, 48));
         /* 1px border around the button. */
         buf_fill_rect(g_back, g_scr_w, g_scr_h, bx, by, bw, 1, COL_BEOS_BTN_DOT);
         buf_fill_rect(g_back, g_scr_w, g_scr_h, bx, by + bh - 1, bw, 1, COL_BEOS_BTN_DOT);
@@ -1340,13 +1513,24 @@ static void draw_window_frame(int slot) {
         int copy_h = scale_zoom ? buf_h : (wh < buf_h ? wh : buf_h);
         if (copy_w <= 0) copy_w = 1;
         if (copy_h <= 0) copy_h = 1;
-        for (int row = 0; row < wh; row++) {
+        /* Clip the body to the active dirty rect: a small damage rect
+         * over a big window copies only the damaged rows/cols. */
+        int row_lo = 0, row_hi = wh;
+        if (g_clip_on) {
+            if (wy + row_lo < g_clip_y0) row_lo = g_clip_y0 - wy;
+            if (wy + row_hi > g_clip_y1) row_hi = g_clip_y1 - wy;
+        }
+        for (int row = row_lo; row < row_hi; row++) {
             int dy = wy + row;
             if (dy < 0 || dy >= (int)g_scr_h) continue;
             /* 1:1 row index unless we're in the legacy scaled-zoom path. */
             int sy = scale_zoom ? (int)((long)row * copy_h / wh) : row;
             if (sy >= buf_h) sy = buf_h - 1;
             int xs = wx, xe = wx + ww;
+            if (g_clip_on) {
+                if (xs < g_clip_x0) xs = g_clip_x0;
+                if (xe > g_clip_x1) xe = g_clip_x1;
+            }
             if (xs < 0) xs = 0;
             if (xe > (int)g_scr_w) xe = g_scr_w;
             int run = xe - xs;
@@ -1405,11 +1589,11 @@ static void draw_menu(void) {
         int hovered = (g_cx >= mx + 1 && g_cx < mx + MENU_W - 1 &&
                        g_cy >= iy && g_cy < iy + MENU_ITEM_H);
         if (hovered) {
-            /* Haiku blue selection — flat rectangle, no rounding,
-             * stops 1px short of the outline. */
-            buf_fill_rect(g_back, g_scr_w, g_scr_h,
-                          mx + 2, iy, MENU_W - 4, MENU_ITEM_H,
-                          COL_MENU_HI);
+            /* Blue selection bar with a soft vertical gradient —
+             * square corners, stops 1px short of the outline. */
+            buf_vgrad(g_back, g_scr_w, g_scr_h,
+                      mx + 2, iy, MENU_W - 4, MENU_ITEM_H,
+                      OX_RGB(122, 168, 215), OX_RGB(84, 134, 187));
         }
         /* Color icon at the left of the item, falling back to mono
          * if /home/.icons/<key>.rgba isn't staged on this disk. */
@@ -1429,7 +1613,7 @@ static void draw_menu(void) {
             }
         }
         buf_draw_text(g_back, g_scr_w, g_scr_h,
-                      mx + 34, iy + (MENU_ITEM_H - 8) / 2,
+                      mx + 34, iy + (MENU_ITEM_H - ox_text_height()) / 2,
                       g_menu[i].label,
                       hovered ? COL_MENU_FG_HI : COL_MENU_FG);
     }
@@ -1466,6 +1650,10 @@ static void restore_rect_from_clean(int dx0, int dy0, int dx1, int dy1) {
 #define DESKBAR_X       ((int)g_scr_w - DESKBAR_W)
 #define DESKBAR_Y       0
 
+static void mark_deskbar_dirty(void) {
+    mark_dirty(DESKBAR_X, DESKBAR_Y, DESKBAR_W, DESKBAR_H);
+}
+
 /* Per-deskbar-element geometry: menu button → tile list → clock. */
 #define DESKBAR_MENU_BTN_W   28
 #define DESKBAR_CLOCK_W      72   /* fits "HH:MM:SS" 8 chars × 8 px */
@@ -1483,11 +1671,22 @@ static int deskbar_tile_geom(int idx, int *out_x, int *out_y,
     int x0 = deskbar_tiles_x0();
     int x1 = deskbar_tiles_x1();
     int avail = x1 - x0;
-    int max_tiles = avail / (DESKBAR_TILE_W + DESKBAR_TILE_GAP);
+    /* Tiles shrink when the strip fills up so EVERY window keeps a
+     * clickable tile — the old fixed width silently dropped windows
+     * past ~8 (they existed but had no tile, so a minimized one was
+     * unreachable). Floor at 14 px: the icon clips but stays hittable.
+     * 16 windows × (14+2) = 256 px fits the ~260 px tile area. */
+    int n  = g_stack_n > 0 ? g_stack_n : 1;
+    int tw = DESKBAR_TILE_W;
+    if (n * (tw + DESKBAR_TILE_GAP) > avail) {
+        tw = avail / n - DESKBAR_TILE_GAP;
+        if (tw < 14) tw = 14;
+    }
+    int max_tiles = avail / (tw + DESKBAR_TILE_GAP);
     if (idx >= max_tiles) return 0;
-    *out_x = x0 + idx * (DESKBAR_TILE_W + DESKBAR_TILE_GAP);
+    *out_x = x0 + idx * (tw + DESKBAR_TILE_GAP);
     *out_y = DESKBAR_Y + 3;
-    *out_w = DESKBAR_TILE_W;
+    *out_w = tw;
     *out_h = DESKBAR_H - 6;
     return 1;
 }
@@ -1509,10 +1708,9 @@ static void icon_key_for_title(const char *title, char *out, int cap) {
     out[n] = 0;
 }
 
-/* Format uptime as HH:MM:SS for the Deskbar. osnos's clock_gettime
- * returns monotonic kernel uptime (no real RTC mapping yet) so we
- * label it "up HH:MM" to be honest about what it is. SS is included
- * so the user can see the clock actually ticking. */
+/* Format the wall clock as HH:MM:SS (UTC) for the Deskbar. Since
+ * FASE 15.2 clock_gettime(CLOCK_REALTIME) is anchored to the CMOS
+ * RTC at boot, so this is real time, not uptime. */
 static void deskbar_format_clock(char *out, size_t cap) {
     struct timespec ts; clock_gettime(0, &ts);
     long total = (long)ts.tv_sec;
@@ -1523,27 +1721,36 @@ static void deskbar_format_clock(char *out, size_t cap) {
 }
 
 static void draw_deskbar(void) {
-    /* Strip background. */
+    /* Strip background — subtle dark gradient so the bar reads as a
+     * solid 3D fixture instead of a flat band. */
+    buf_vgrad(g_back, g_scr_w, g_scr_h,
+              DESKBAR_X, DESKBAR_Y, DESKBAR_W, DESKBAR_H,
+              OX_RGB(66, 66, 66), OX_RGB(38, 38, 38));
+    /* 1px top highlight + lower border (darker). */
     buf_fill_rect(g_back, g_scr_w, g_scr_h,
-                  DESKBAR_X, DESKBAR_Y, DESKBAR_W, DESKBAR_H,
-                  COL_BEOS_DESKBAR_BG);
-    /* 1px lower border (darker). */
+                  DESKBAR_X, DESKBAR_Y, DESKBAR_W, 1,
+                  OX_RGB(92, 92, 92));
     buf_fill_rect(g_back, g_scr_w, g_scr_h,
                   DESKBAR_X, DESKBAR_Y + DESKBAR_H - 1, DESKBAR_W, 1,
                   COL_BEOS_DESKBAR_BORDER);
 
-    /* Menu button — yellow square with "Ox" text. */
+    /* Menu button — yellow square with "Ox" text, gradient face. */
     int mbx = DESKBAR_X + 2, mby = DESKBAR_Y + 2;
     int mbw = DESKBAR_MENU_BTN_W - 4, mbh = DESKBAR_H - 4;
     int mb_hot = point_in(g_cx, g_cy, mbx, mby, mbw, mbh);
-    buf_fill_rect(g_back, g_scr_w, g_scr_h, mbx, mby, mbw, mbh,
-                  mb_hot ? COL_BEOS_BTN_BG_HOT : COL_BEOS_TAB_BG);
+    if (mb_hot)
+        buf_vgrad(g_back, g_scr_w, g_scr_h, mbx, mby, mbw, mbh,
+                  OX_RGB(255, 248, 196), OX_RGB(250, 226, 130));
+    else
+        buf_vgrad(g_back, g_scr_w, g_scr_h, mbx, mby, mbw, mbh,
+                  OX_RGB(255, 236, 150), OX_RGB(240, 200, 76));
     buf_fill_rect(g_back, g_scr_w, g_scr_h, mbx, mby, mbw, 1, COL_BEOS_TAB_BORDER);
     buf_fill_rect(g_back, g_scr_w, g_scr_h, mbx, mby + mbh - 1, mbw, 1, COL_BEOS_TAB_BORDER);
     buf_fill_rect(g_back, g_scr_w, g_scr_h, mbx, mby, 1, mbh, COL_BEOS_TAB_BORDER);
     buf_fill_rect(g_back, g_scr_w, g_scr_h, mbx + mbw - 1, mby, 1, mbh, COL_BEOS_TAB_BORDER);
     buf_draw_text(g_back, g_scr_w, g_scr_h,
-                  mbx + (mbw - 16) / 2, mby + (mbh - 8) / 2,
+                  mbx + (mbw - ox_text_width("Ox")) / 2,
+                  mby + (mbh - ox_text_height()) / 2,
                   "Ox", COL_BEOS_TAB_FG);
 
     /* Window list tiles. */
@@ -1562,7 +1769,18 @@ static void draw_deskbar(void) {
             bg = hot ? COL_BEOS_DESKBAR_TILE_HOT : COL_BEOS_DESKBAR_TILE_MIN;
         else
             bg = hot ? COL_BEOS_DESKBAR_TILE_HOT : COL_BEOS_DESKBAR_TILE;
-        buf_fill_rect(g_back, g_scr_w, g_scr_h, tx, ty, tw, th, bg);
+        /* Raised tile: gradient face + 1px bevel. */
+        buf_vgrad(g_back, g_scr_w, g_scr_h, tx, ty, tw, th,
+                  col_lerp(bg, OX_RGB(255, 255, 255), 1, 5),
+                  col_lerp(bg, OX_RGB(0, 0, 0), 1, 5));
+        buf_fill_rect(g_back, g_scr_w, g_scr_h, tx, ty, tw, 1,
+                      col_lerp(bg, OX_RGB(255, 255, 255), 2, 5));
+        buf_fill_rect(g_back, g_scr_w, g_scr_h, tx, ty, 1, th,
+                      col_lerp(bg, OX_RGB(255, 255, 255), 2, 5));
+        buf_fill_rect(g_back, g_scr_w, g_scr_h, tx, ty + th - 1, tw, 1,
+                      col_lerp(bg, OX_RGB(0, 0, 0), 2, 5));
+        buf_fill_rect(g_back, g_scr_w, g_scr_h, tx + tw - 1, ty, 1, th,
+                      col_lerp(bg, OX_RGB(0, 0, 0), 2, 5));
         /* Tile shows the per-app color icon (24x24 RGBA loaded from
          * /home/.icons/), centered. Falls back to the generic mono
          * glyph when no .rgba file is on disk. */
@@ -1587,7 +1805,7 @@ static void draw_deskbar(void) {
     char clk[8];
     deskbar_format_clock(clk, sizeof(clk));
     int clk_x = DESKBAR_X + DESKBAR_W - DESKBAR_CLOCK_W + 4;
-    int clk_y = DESKBAR_Y + (DESKBAR_H - 8) / 2;
+    int clk_y = DESKBAR_Y + (DESKBAR_H - ox_text_height()) / 2;
     buf_draw_text(g_back, g_scr_w, g_scr_h,
                   clk_x, clk_y, clk, COL_BEOS_DESKBAR_FG);
 }
@@ -1620,6 +1838,10 @@ static void compose_no_cursor_dirty(int dx0, int dy0, int dx1, int dy1) {
                g_wp_scaled  + (size_t)row * g_scr_w + dx0,
                (size_t)dw * sizeof(uint32_t));
     }
+    /* Body blits of replayed windows are clipped to this rect. */
+    g_clip_on = 1;
+    g_clip_x0 = dx0; g_clip_y0 = dy0;
+    g_clip_x1 = dx1; g_clip_y1 = dy1;
     for (int i = 0; i < g_stack_n; i++) {
         int slot = g_stack[i];
         if (slot < 0 || slot >= MAX_WINS || !g_wins[slot].used) continue;
@@ -1633,6 +1855,7 @@ static void compose_no_cursor_dirty(int dx0, int dy0, int dx1, int dy1) {
             draw_window_frame(slot);
         }
     }
+    g_clip_on = 0;
     /* Deskbar always re-rendered if the dirty rect crosses it — it's
      * cheap (small strip). */
     if (rect_intersects(DESKBAR_X, DESKBAR_Y, DESKBAR_W, DESKBAR_H,
@@ -1695,18 +1918,11 @@ static uint64_t now_us(void) {
 static void composite_and_flush(void) {
     if (!g_back || !g_back_clean || !g_wp_scaled) return;
 
-    int full = g_dirty_full || g_dirty_x0 >= g_dirty_x1;
+    /* Safety net: g_dirty set with no recorded damage → full repaint. */
+    int full = g_dirty_full || (g_dirty_nrects == 0 && !g_cursor_dirty);
     uint64_t t0 = now_us();
-    uint64_t dirty_area = 0;
     if (full) {
         g_composite_full_count++;
-    } else {
-        g_composite_dirty_count++;
-        dirty_area = (uint64_t)(g_dirty_x1 - g_dirty_x0) *
-                     (uint64_t)(g_dirty_y1 - g_dirty_y0);
-        g_dirty_area_total += dirty_area;
-    }
-    if (full) {
         /* Full: rebuild no-cursor + cache, then draw cursor on top. */
         compose_no_cursor();
         memcpy(g_back_clean, g_back,
@@ -1719,33 +1935,21 @@ static void composite_and_flush(void) {
         };
         ioctl(g_fb_fd, FBIO_BLIT, &req);
     } else {
-        /* Compute the cursor's old + new bbox union. Anything else
-         * in the dirty rect counts as "content changed" — we rebuild
-         * just that subregion of the clean cache before re-drawing
-         * the cursor. */
-        int cx0 = g_last_cursor_x >= 0 ? g_last_cursor_x : g_cx;
-        int cy0 = g_last_cursor_y >= 0 ? g_last_cursor_y : g_cy;
-        int old_l = cx0, old_t = cy0;
-        int old_r = cx0 + CURSOR_W, old_b = cy0 + CURSOR_H;
-        int new_l = g_cx, new_t = g_cy;
-        int new_r = g_cx + CURSOR_W, new_b = g_cy + CURSOR_H;
-        int cur_l = old_l < new_l ? old_l : new_l;
-        int cur_t = old_t < new_t ? old_t : new_t;
-        int cur_r = old_r > new_r ? old_r : new_r;
-        int cur_b = old_b > new_b ? old_b : new_b;
-
-        /* Is the dirty rect bigger than just the cursor union? If so,
-         * some non-cursor content changed and we need to refresh the
-         * clean cache for that region. */
-        int content_dirty = (g_dirty_x0 < cur_l) || (g_dirty_y0 < cur_t) ||
-                            (g_dirty_x1 > cur_r) || (g_dirty_y1 > cur_b);
-        if (content_dirty) {
-            int cx0r = g_dirty_x0, cy0r = g_dirty_y0;
-            int cx1r = g_dirty_x1, cy1r = g_dirty_y1;
-            compose_no_cursor_dirty(cx0r, cy0r, cx1r, cy1r);
-            snapshot_to_clean(cx0r, cy0r, cx1r, cy1r);
+        g_composite_dirty_count++;
+        /* 1. Recompose + re-cache every damaged rect (content only —
+         *    the cursor is handled separately below). */
+        for (int i = 0; i < g_dirty_nrects; i++) {
+            dirty_rect_t *r = &g_drects[i];
+            compose_no_cursor_dirty(r->x0, r->y0, r->x1, r->y1);
+            snapshot_to_clean(r->x0, r->y0, r->x1, r->y1);
+            g_dirty_area_total += (uint64_t)(r->x1 - r->x0) *
+                                  (uint64_t)(r->y1 - r->y0);
         }
-        /* Restore old cursor area from cache (wipes the cursor). */
+        /* 2. Wipe the cursor's previous position from the clean cache
+         *    (cheap ~12×17 restore), draw it at the new one. */
+        int old_l = g_last_cursor_x >= 0 ? g_last_cursor_x : g_cx;
+        int old_t = g_last_cursor_y >= 0 ? g_last_cursor_y : g_cy;
+        int old_r = old_l + CURSOR_W, old_b = old_t + CURSOR_H;
         if (g_last_cursor_x >= 0) {
             int rx0 = old_l, ry0 = old_t, rx1 = old_r, ry1 = old_b;
             if (rx0 < 0) rx0 = 0;
@@ -1755,24 +1959,47 @@ static void composite_and_flush(void) {
             if (rx0 < rx1 && ry0 < ry1)
                 restore_rect_from_clean(rx0, ry0, rx1, ry1);
         }
-        /* Draw cursor at new position. */
         draw_cursor();
-        g_last_cursor_x = g_cx; g_last_cursor_y = g_cy;
 
-        /* Blit the union of dirty rect + cursor union. */
-        int bx0 = g_dirty_x0 < cur_l ? g_dirty_x0 : cur_l;
-        int by0 = g_dirty_y0 < cur_t ? g_dirty_y0 : cur_t;
-        int bx1 = g_dirty_x1 > cur_r ? g_dirty_x1 : cur_r;
-        int by1 = g_dirty_y1 > cur_b ? g_dirty_y1 : cur_b;
-        if (bx0 < 0) bx0 = 0;
-        if (by0 < 0) by0 = 0;
-        if (bx1 > (int)g_scr_w) bx1 = g_scr_w;
-        if (by1 > (int)g_scr_h) by1 = g_scr_h;
-        if (bx0 < bx1 && by0 < by1) blit_rect(bx0, by0, bx1, by1);
+        /* 3. Blit each damaged rect, then the cursor as TWO small
+         * rects (old erase + new draw) instead of their bounding
+         * union — a fast diagonal flick used to union into a huge
+         * rect, and every extra byte written to VRAM widens the
+         * window in which the host display can catch a half-blitted
+         * frame (visible as dark flicker along the motion path). */
+        for (int i = 0; i < g_dirty_nrects; i++) {
+            dirty_rect_t *r = &g_drects[i];
+            blit_rect(r->x0, r->y0, r->x1, r->y1);
+        }
+        {
+            int nl = g_cx, nt = g_cy;
+            int nr = g_cx + CURSOR_W, nb = g_cy + CURSOR_H;
+            if (nl < 0) nl = 0;
+            if (nt < 0) nt = 0;
+            if (nr > (int)g_scr_w) nr = g_scr_w;
+            if (nb > (int)g_scr_h) nb = g_scr_h;
+            int ol = old_l, ot = old_t, or_ = old_r, ob = old_b;
+            if (ol < 0) ol = 0;
+            if (ot < 0) ot = 0;
+            if (or_ > (int)g_scr_w) or_ = g_scr_w;
+            if (ob > (int)g_scr_h) ob = g_scr_h;
+            int overlap = ol < nr && or_ > nl && ot < nb && ob > nt;
+            if (overlap) {
+                /* Adjacent positions — one slightly larger blit
+                 * beats two overlapping ones. */
+                int ul = ol < nl ? ol : nl, ut = ot < nt ? ot : nt;
+                int ur = or_ > nr ? or_ : nr, ub = ob > nb ? ob : nb;
+                if (ul < ur && ut < ub) blit_rect(ul, ut, ur, ub);
+            } else {
+                if (ol < or_ && ot < ob) blit_rect(ol, ot, or_, ob);
+                if (nl < nr && nt < nb) blit_rect(nl, nt, nr, nb);
+            }
+        }
+        g_last_cursor_x = g_cx; g_last_cursor_y = g_cy;
     }
-    g_dirty_full = 0;
-    g_dirty_x0 = g_dirty_x1 = 0;
-    g_dirty_y0 = g_dirty_y1 = 0;
+    g_dirty_full   = 0;
+    g_dirty_nrects = 0;
+    g_cursor_dirty = 0;
     uint64_t dt = now_us() - t0;
     if (full) {
         g_full_us_total += dt;
@@ -1780,8 +2007,6 @@ static void composite_and_flush(void) {
     } else {
         g_dirty_us_total += dt;
         if (dt > g_dirty_us_max) g_dirty_us_max = dt;
-        /* Track dirty rect area to see if Settings is dirtying huge
-         * rects. dx0/x1 were already cleared above; use saved values. */
     }
 }
 
@@ -1825,6 +2050,9 @@ static void do_reboot(void) {
  * Same IPC queue is FIFO so the WRITE is guaranteed to land AFTER the
  * RESUME's clear. */
 static void resume_underlings(void) {
+    /* Re-enable the cooked-text console path BEFORE consrv resumes —
+     * its clear+prompt must actually paint (FASE 15.1). */
+    if (g_fb_fd >= 0) ioctl(g_fb_fd, FBIO_TEXT_SUPPRESS, 0);
     ipc_msg_t sm;
     memset(&sm, 0, sizeof(sm));
     sm.to   = SERVER_CONSOLE;
@@ -2055,6 +2283,25 @@ static void handle_ipc(const ipc_msg_t *m) {
             w->pending_bytes = 0;
             w->pending_shm[0] = 0;
         }
+        /* Damage-rect present (FASE 15.0): arg1=1 → data carries a
+         * window-relative {x,y,w,h} uint32×4. Only that body region is
+         * recomposed/blitted. Not honored for the legacy scaled-zoom
+         * state (window coords ≠ buffer coords there). */
+        if (m->arg1 == 1 && w->state != WIN_MIN &&
+            !(w->state == WIN_ZOOM && !w->resizable)) {
+            uint32_t r[4];
+            memcpy(r, m->data, sizeof(r));
+            int dx = (int)r[0], dy = (int)r[1];
+            int dw = (int)r[2], dh = (int)r[3];
+            if (dx >= 0 && dy >= 0 && dw > 0 && dh > 0 &&
+                dx < w->w && dy < w->h) {
+                if (dx + dw > w->w) dw = w->w - dx;
+                if (dy + dh > w->h) dh = w->h - dy;
+                mark_dirty(w->x + dx, w->y + dy, dw, dh);
+                return;
+            }
+            /* Bogus rect → fall through to the full-window mark. */
+        }
         mark_dirty(w->x - SHADOW_DEPTH,
                    w->y - TITLEBAR_H - SHADOW_DEPTH,
                    w->w + 2 * SHADOW_DEPTH,
@@ -2079,6 +2326,7 @@ static void handle_ipc(const ipc_msg_t *m) {
         if (strcmp(prev, g_wp_name) != 0) {
             load_wallpaper(g_wp_name);
         }
+        mark_dirty_full_reason("reload");   /* wallpaper covers everything */
         g_dirty = 1;
         (void)from;   /* unused — reload is global */
         return;
@@ -2107,6 +2355,36 @@ static void handle_ipc(const ipc_msg_t *m) {
         if (n > sizeof(r.data)) n = sizeof(r.data);
         memcpy(r.data, g_clipboard, n);
         /* Retry on EAGAIN — client está bloqueado esperando. */
+        for (int attempt = 0; attempt < 100; attempt++) {
+            if (ipc_send(&r) == 0) return;
+            if (errno != EAGAIN) return;
+            struct timespec ts = { 0, 2 * 1000000 };
+            nanosleep(&ts, 0);
+        }
+        return;
+    }
+    case IPC_OX_QUERY_POINTER: {
+        /* Global pointer query (FASE 15.3) — backs tinyX
+         * XQueryPointer so xeyes-style clients can track the cursor
+         * across the whole screen, not just inside their window.
+         * data[1..8] carries the requesting window's body origin so
+         * the client can derive window-relative coords. */
+        ipc_msg_t r;
+        memset(&r, 0, sizeof(r));
+        r.to   = from;
+        r.type = IPC_OX_RESPONSE;
+        r.arg0 = 0;  /* OK */
+        r.arg1 = ((uint64_t)(uint32_t)g_cx << 32) | (uint32_t)g_cy;
+        r.data[0] = (char)g_prev_buttons;
+        int req_id = (int)m->arg0;
+        for (int i = 0; i < MAX_WINS; i++) {
+            if (g_wins[i].used && g_wins[i].id == req_id) {
+                int32_t wx = g_wins[i].x, wy = g_wins[i].y;
+                memcpy(r.data + 1, &wx, 4);
+                memcpy(r.data + 5, &wy, 4);
+                break;
+            }
+        }
         for (int attempt = 0; attempt < 100; attempt++) {
             if (ipc_send(&r) == 0) return;
             if (errno != EAGAIN) return;
@@ -2191,19 +2469,29 @@ static void process_mouse_event(mouse_event_t ev) {
     g_cx = new_cx;
     g_cy = new_cy;
     if (moved) {
-        g_dirty = 1;   /* cursor moved → recompose */
-        mark_dirty(old_cx, old_cy, CURSOR_W, CURSOR_H);
-        mark_dirty(new_cx, new_cy, CURSOR_W, CURSOR_H);
-        /* Hover-state propagation. Instead of full-repainting whenever
-         * the cursor crosses any window titlebar or menu, mark only
-         * those affected regions dirty. Keeps cursor-over-window as
-         * cheap as cursor-over-wallpaper. */
+        g_dirty = 1;          /* cursor moved → repaint */
+        g_cursor_dirty = 1;   /* restore-from-clean fast path, no recompose */
+        /* Hover-state propagation — only when the hover STATE changes
+         * (enter/leave/row change), not on every move while inside.
+         * Marking per-move re-blitted the whole strip 66x/s during
+         * motion, which read as a flickery "vibration" on the host
+         * display (every VRAM rewrite is a chance to catch the blit
+         * mid-row). Cursor motion itself never recomposes. */
         if (g_menu_visible) {
-            int mh = (int)MENU_N * MENU_ITEM_H + 8;
-            mark_dirty(g_menu_x, g_menu_y, MENU_W, mh);
+            static int prev_menu_row = -2;
+            int row = -1;
+            int mh = (int)MENU_N * MENU_ITEM_H + 6;
+            if (g_cx >= g_menu_x + 1 && g_cx < g_menu_x + MENU_W - 1 &&
+                g_cy >= g_menu_y + 3 && g_cy < g_menu_y + mh)
+                row = (g_cy - g_menu_y - 3) / MENU_ITEM_H;
+            if (row != prev_menu_row) {
+                prev_menu_row = row;
+                mark_dirty(g_menu_x, g_menu_y, MENU_W, mh + 2);
+            }
         }
-        /* Any window whose titlebar the cursor entered or left needs
-         * its titlebar redrawn to update close-button hover color. */
+        /* A window's titlebar only needs a redraw when the cursor
+         * crosses its boundary or switches hover between its three
+         * buttons. */
         for (int i = 0; i < g_stack_n; i++) {
             int s = g_stack[i];
             if (!g_wins[s].used) continue;
@@ -2216,8 +2504,20 @@ static void process_mouse_event(mouse_event_t ev) {
                            old_cy >= tb_y0 && old_cy < tb_y1);
             int hit_new = (g_cx  >= tb_x0 && g_cx  < tb_x1 &&
                            g_cy  >= tb_y0 && g_cy  < tb_y1);
-            if (hit_old || hit_new) {
+            if (hit_old != hit_new) {
                 mark_dirty(tb_x0, tb_y0, w->w, TITLEBAR_H);
+            } else if (hit_new) {
+                /* Inside the bar in both frames: redraw only if the
+                 * hovered button changed. */
+                int btn_old = -1, btn_new = -1;
+                for (int idx = 0; idx < 3; idx++) {
+                    int bx, by, bw, bh;
+                    beos_btn_geom(s, idx, &bx, &by, &bw, &bh);
+                    if (point_in(old_cx, old_cy, bx, by, bw, bh)) btn_old = idx;
+                    if (point_in(g_cx,  g_cy,  bx, by, bw, bh)) btn_new = idx;
+                }
+                if (btn_old != btn_new)
+                    mark_dirty(tb_x0, tb_y0, w->w, TITLEBAR_H);
             }
         }
     }
@@ -2296,9 +2596,29 @@ static void process_mouse_event(mouse_event_t ev) {
                 }
             }
         }
-        /* Hover over deskbar: mark deskbar dirty so highlights update. */
+        /* Hover over deskbar: redraw only when the hovered element
+         * (menu button / tile index / nothing) changes — not on every
+         * move inside the strip. */
         if (moved) {
-            mark_dirty(DESKBAR_X, DESKBAR_Y, DESKBAR_W, DESKBAR_H);
+            static int prev_el = -2;
+            int el = -1;
+            int mbx = DESKBAR_X + 2;
+            int mbw = DESKBAR_MENU_BTN_W - 4;
+            if (g_cx >= mbx && g_cx < mbx + mbw) el = 1000;
+            else {
+                int ti = 0;
+                for (int i = 0; i < g_stack_n; i++) {
+                    int s = g_stack[i];
+                    if (s < 0 || s >= MAX_WINS || !g_wins[s].used) continue;
+                    int tx, ty, tw, th;
+                    if (!deskbar_tile_geom(ti++, &tx, &ty, &tw, &th)) break;
+                    if (point_in(g_cx, g_cy, tx, ty, tw, th)) { el = ti; break; }
+                }
+            }
+            if (el != prev_el) {
+                prev_el = el;
+                mark_dirty(DESKBAR_X, DESKBAR_Y, DESKBAR_W, DESKBAR_H);
+            }
         }
         /* Don't fall through to window logic when over Deskbar. */
         return;
@@ -2326,7 +2646,7 @@ static void process_mouse_event(mouse_event_t ev) {
             if ((new_w != rw->w || new_h != rw->h) &&
                 (now - resize_last_ms) >= resize_throttle_ms) {
                 resize_last_ms = now;
-                resize_window(g_focus_slot, new_w, new_h);
+                commit_resize(g_focus_slot, new_w, new_h);
             }
         } else {
             /* Mouse released — fire one final resize so the buffer
@@ -2342,7 +2662,7 @@ static void process_mouse_event(mouse_event_t ev) {
             if (final_w > (int)g_scr_w - rw->x) final_w = g_scr_w - rw->x;
             if (final_h > (int)g_scr_h - rw->y) final_h = g_scr_h - rw->y;
             if (final_w != rw->w || final_h != rw->h) {
-                resize_window(g_focus_slot, final_w, final_h);
+                commit_resize(g_focus_slot, final_w, final_h);
             }
             g_wins[g_focus_slot].resizing = 0;
         }
@@ -2451,7 +2771,8 @@ static void process_mouse_event(mouse_event_t ev) {
      * with the LATEST coords. Avoids flooding the client with 100s
      * of intermediate positions when the user wiggles fast. */
     if (moved && slot >= 0 && !is_title &&
-        !g_wins[g_focus_slot >= 0 ? g_focus_slot : 0].dragging) {
+        !(g_focus_slot >= 0 && g_focus_slot < MAX_WINS &&
+          g_wins[g_focus_slot].dragging)) {
         g_pending_move = 1;
         g_pending_move_slot = slot;
     }
@@ -2635,11 +2956,18 @@ int main(int argc, char **argv) {
     fprintf(stderr, "oxsrv: fb %ux%u bpp=%u pitch=%u\n",
             g_scr_w, g_scr_h, info.bits_per_pixel, info.line_length);
 
+    /* From here on WE own the screen: stop the kernel's cooked-text
+     * console path from painting over the composition (tty echo, app
+     * stdout, shell prompt redraws — the "screen vibrates" flashes).
+     * Everything still tees to serial. Restored in resume_underlings.
+     * FASE 15.1. */
+    ioctl(g_fb_fd, FBIO_TEXT_SUPPRESS, 1);
+
     /* Try to load a proportional TTF font for chrome text. If no font
      * is installed at /home/.fonts/default.ttf the call returns -1
      * and every ox_text_* call falls back to the 8x8 bitmap font.
      * Either way the WM keeps booting. */
-    if (ox_text_init("/home/.fonts/default.ttf", 12) == 0) {
+    if (ox_text_init("/home/.fonts/default.ttf", 14) == 0) {
         fprintf(stderr, "oxsrv: TTF font loaded\n");
     } else {
         fprintf(stderr, "oxsrv: no TTF font, using 8x8 bitmap fallback\n");
@@ -2722,6 +3050,13 @@ int main(int argc, char **argv) {
      * starving the rest of the system or saturating the IPC queue.
      */
     long frame = 0; (void)frame;
+    /* Frame pacing — composite at most once per FRAME_MS (~66 Hz).
+     * Events still drain at full speed every iteration; only the
+     * composite+blit is paced. Without a cap, a PRESENT-heavy client
+     * (oxterm scrolling) or a QEMU mouse storm makes us composite
+     * hundreds of times per second for frames nobody can see. */
+    #define FRAME_MS 15
+    uint64_t last_comp_ms = 0;
     for (;;) {
         if (g_quit) {
             /* "Exit Ox" was selected from the menu. Wake consrv +
@@ -2804,9 +3139,10 @@ int main(int argc, char **argv) {
             g_pending_move = 0;
             g_pending_move_slot = -1;
         }
-        if (g_dirty) {
+        if (g_dirty && now_ms - last_comp_ms >= FRAME_MS) {
             composite_and_flush();
             g_dirty = 0;
+            last_comp_ms = now_ms;
         }
         /* Heartbeat every ~2 SECONDS (time-based, not frame-based —
          * event-driven loop fires hundreds of times per second). */
@@ -2891,7 +3227,14 @@ int main(int argc, char **argv) {
         pfds[0].fd = g_mouse_fd; pfds[0].events = POLLIN; pfds[0].revents = 0;
         pfds[1].fd = g_input_fd; pfds[1].events = POLLIN; pfds[1].revents = 0;
         pfds[2].fd = -1;         pfds[2].events = POLL_IPC_PENDING; pfds[2].revents = 0;
-        poll(pfds, 3, 50);
+        /* If a composite is pending (paced out above), wake exactly
+         * when the frame budget elapses instead of the idle 50 ms. */
+        int timeout_ms = 50;
+        if (g_dirty) {
+            uint64_t since = now_ms - last_comp_ms;
+            timeout_ms = since >= FRAME_MS ? 1 : (int)(FRAME_MS - since);
+        }
+        poll(pfds, 3, timeout_ms);
     }
     return 0;
 }

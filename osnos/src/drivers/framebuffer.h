@@ -44,6 +44,11 @@ void framebuffer_write_bytes(
 
 void framebuffer_backspace(void);
 
+/* FASE 15.1 — 1: the cooked-text path stops painting (GUI server owns
+ * the screen; serial tee unaffected). 0: restore. Driven by the
+ * OSNOS_FBIO_TEXT_SUPPRESS ioctl on /dev/fb0. */
+void framebuffer_set_text_suppressed(int on);
+
 /* Visible terminal area in CHARACTERS (after margins). Used by
  * /bin/ovi and other TUIs via ioctl(TIOCGWINSZ). */
 unsigned short framebuffer_cols(void);

@@ -318,6 +318,32 @@ int ox_clipboard_get(char *buf, int cap) {
     return (int)n;
 }
 
+int ox_query_pointer(ox_win_t win, int *out_x, int *out_y,
+                     int *out_win_ox, int *out_win_oy,
+                     int *out_buttons) {
+    if (g_server_pid == 0 && ox_init() < 0) return -1;
+    ipc_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = IPC_OX_QUERY_POINTER;
+    m.arg0 = (uint64_t)(win > 0 ? win : 0);
+    /* Response data: [0]=buttons, [1..4]=win origin x (i32 LE),
+     * [5..8]=win origin y. +1 spare for the NUL send_and_wait_resp
+     * appends. */
+    char data[12];
+    memset(data, 0, sizeof(data));
+    long packed = send_and_wait_resp(&m, data, sizeof(data));
+    if (packed < 0) return -1;
+    if (out_x) *out_x = (int)(((uint64_t)packed >> 32) & 0xffffffffu);
+    if (out_y) *out_y = (int)((uint64_t)packed & 0xffffffffu);
+    if (out_buttons) *out_buttons = (int)(unsigned char)data[0];
+    int32_t ox_ = 0, oy_ = 0;
+    memcpy(&ox_, data + 1, 4);
+    memcpy(&oy_, data + 5, 4);
+    if (out_win_ox) *out_win_ox = (int)ox_;
+    if (out_win_oy) *out_win_oy = (int)oy_;
+    return 0;
+}
+
 void ox_window_set_title(ox_win_t win, const char *title) {
     if (g_server_pid == 0) return;
     ipc_msg_t m;
@@ -357,6 +383,27 @@ void ox_draw_text(ox_win_t win, int x, int y, const char *s,
     local_draw_text(lw, x, y, s, color);
 }
 
+/* Proportional anti-aliased text (FASE 15.2 premium pass). Routes
+ * through ox_text_draw so apps get the same TTF the window server
+ * uses, lazily loading the default UI font on first call — zero
+ * setup for the caller. Falls back to the 8x8 bitmap font when no
+ * TTF is staged on disk. Use this where the caller does NOT depend
+ * on the fixed 8-px glyph grid (labels, buttons, list rows);
+ * grid-addressed UIs (oxterm cells, oxnotepad body) keep
+ * ox_draw_text. */
+void ox_draw_text_pretty(ox_win_t win, int x, int y, const char *s,
+                          uint32_t color) {
+    if (!s) return;
+    ox_local_win_t *lw = local_lookup((int)win);
+    if (!lw || !lw->back) return;
+    static int tried;
+    if (!tried && !ox_text_loaded()) {
+        tried = 1;
+        ox_text_init("/home/.fonts/default.ttf", 14);
+    }
+    ox_text_draw(lw->back, lw->w, lw->h, x, y, s, color);
+}
+
 void ox_draw_image(ox_win_t win, int x, int y, int w, int h,
                     const uint32_t *bgra, int src_pitch_px) {
     if (!bgra) return;
@@ -371,6 +418,28 @@ void ox_present(ox_win_t win) {
     memset(&m, 0, sizeof(m));
     m.type = IPC_OX_PRESENT;
     m.arg0 = (uint64_t)win;
+    send_one(&m);
+}
+
+/* Damage-rect present (FASE 15.0): tell oxsrv only `x,y,w,h` (window-
+ * relative) changed since the last present. The compositor recomposes
+ * + blits just that region instead of the whole window frame — a
+ * blinking cursor stops costing a full-window recomposition. Degenerate
+ * rects fall back to a legacy full-window present so callers can pass
+ * their dirty-tracking bbox unconditionally. */
+void ox_present_rect(ox_win_t win, int x, int y, int w, int h) {
+    if (g_server_pid == 0) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (w <= 0 || h <= 0) { ox_present(win); return; }
+    ipc_msg_t m;
+    memset(&m, 0, sizeof(m));
+    m.type = IPC_OX_PRESENT;
+    m.arg0 = (uint64_t)win;
+    m.arg1 = 1;
+    uint32_t r[4] = { (uint32_t)x, (uint32_t)y,
+                      (uint32_t)w, (uint32_t)h };
+    memcpy(m.data, r, sizeof(r));
     send_one(&m);
 }
 

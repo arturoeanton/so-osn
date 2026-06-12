@@ -278,6 +278,32 @@ static int https_fetch(const char *host, int port, const char *path,
     br_ssl_engine_set_x509(&sc.eng, &xnc.vtable);
     br_ssl_engine_set_versions(&sc.eng, BR_TLS12, BR_TLS12);
     br_ssl_engine_set_buffer(&sc.eng, iobuf, sizeof(iobuf), 1);
+
+    /* Seed the X.509 clock. Without it end_chain aborts with
+     * TIME_UNKNOWN *before* extracting the server pkey — our wrapper
+     * maps the error to OK but the engine later dies with
+     * BR_ERR_UNEXPECTED on the missing key, which is why HTTPS never
+     * worked here while oxbrowser (which does this) did. Same
+     * days-since-0AD math as oxbrowser's do_tls_fetch. */
+    {
+        time_t now_secs = time(0);
+        if (now_secs > 0) {
+            uint32_t days = (uint32_t)((long)now_secs / 86400 + 719528);
+            uint32_t hms  = (uint32_t)((long)now_secs % 86400);
+            br_x509_minimal_set_time(&xnc.minimal, days, hms);
+        }
+    }
+
+    /* Seed the handshake RNG — BearSSL's HMAC_DRBG needs entropy
+     * before client_reset or the ClientHello nonce generation can
+     * fail outright. */
+    {
+        extern long osnos_getrandom(void *buf, unsigned long len);
+        unsigned char seed[32];
+        if (osnos_getrandom(seed, sizeof(seed)) == (long)sizeof(seed))
+            br_ssl_engine_inject_entropy(&sc.eng, seed, sizeof(seed));
+    }
+
     br_ssl_client_reset(&sc, host, 0);
 
     char req[1024];
@@ -312,6 +338,15 @@ static int https_fetch(const char *host, int port, const char *path,
             size_t avail;
             unsigned char *p = br_ssl_engine_recvapp_buf(&sc.eng, &avail);
             size_t to_copy = (got + avail < cap - 1) ? avail : (cap - 1 - got);
+            if (to_copy == 0) {
+                /* Response buffer full (big page, e.g. google.com).
+                 * ack(0) here used to spin this loop forever — the
+                 * engine stays in RECVAPP with nothing consumed.
+                 * Treat it like EOF: keep what we have. */
+                nslog("oxnetsurf: response > %zu bytes, truncating\n",
+                      cap - 1);
+                break;
+            }
             memcpy(resp + got, p, to_copy);
             got += to_copy;
             br_ssl_engine_recvapp_ack(&sc.eng, to_copy);

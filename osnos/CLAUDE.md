@@ -39,8 +39,11 @@ ISO, sd.img) and runs QEMU directly.
   - `osn-server/` — **the actual ring-3 servers**: `consrv.c`,
     `kbdsrv.c`, `shellsrv.c` (FASE 10 done).
   - `gui/` — **Ox window system** (FASE 12): `oxsrv.c` (server),
-    plus four GUI client apps: `oxnotepad.c`, `oxcalc.c`,
-    `oxterm.c` (PTY + minishell child), `oxsettings.c`.
+    plus ~16 GUI client apps (`oxnotepad.c`, `oxcalc.c`,
+    `oxterm.c` (PTY + shell child), `oxsettings.c`, `oxfiles.c`,
+    `oxlog.c`, `oxjs.c`, `oxstudio.c`, `oxnetsurf.c`, …) and
+    `xdemo.c` — a stock Xlib client built against the tinyX shim
+    (FASE 15.1, see below).
   - `libc.lds` — linker script shared by libc-linked ELFs.
   - `tests/user_hello.lds` — bare ELF's own linker script.
 - `vendor/` — `tinycc/` (0.9.27), `lua/` (5.4.7), `jq/` (1.7.1) ported
@@ -85,7 +88,8 @@ From this directory:
 QEMU is launched with `-M pc` (NOT `q35`) — the `block_ata` driver
 talks PIO to the legacy 0x1F0 ports; q35 attaches disks to AHCI and
 the driver wouldn't see anything. NIC is `rtl8139`, with slirp NAT
-hostfwds `tcp::8080-:80`, `tcp::9034-:9034`, `udp::1234-:1234` so
+hostfwds `tcp::8088-:80`, `tcp::9034-:9034`, `udp::1234-:1234`
+(defaults; override with `make run HTTP_PORT=… TCP_PORT=… UDP_PORT=…`) so
 `httpd` and the `net/` demos are reachable from the host.
 
 Toolchain: `clang` + `ld.lld`. Kernel CFLAGS are `-mcmodel=kernel
@@ -110,7 +114,8 @@ tables and enter the kernel via `syscall` (preferred) or `int 0x80`
 
 Scheduler: timer-driven preemptive in CPL=3 (50 ms quantum), still
 cooperative for ring-0 tasks (kernel servers must yield). PIT @ 100 Hz
-on IRQ 0.
+on IRQ 0. Idle = `sti; hlt` (FASE 15.0) — when nothing is READY the
+CPU sleeps until the next IRQ instead of busy-spinning.
 
 See `ARCH.md` for a full layered diagram + IPC and syscall
 walkthroughs. See `STATUS.md` for the running history of what works
@@ -139,9 +144,11 @@ Boot path (`src/kernel/main.c`, `kmain`):
    (PCI scan; silent if no NIC), `net_init` (ARP + RX dispatch).
 6. Microkernel state: `ipc_init → pipe_init → pty_init → task_init →
    reaper_init → scheduler_init → syscall_init → ramfs_init → bootstrap_fs`.
-7. Spawn the kernel-side hardware feeders as cooperative ring-0 tasks:
-   `keyboard` (drains PS/2 into `/dev/input0`), `mouse` (PS/2 AUX →
-   `/dev/mouse0`), `serial-in` (COM1 RX → `tty_input`).
+7. Spawn the remaining kernel-side feeder as a cooperative ring-0
+   task: `serial-in` (RX ring → `tty_input`, self-paced at 10 ms).
+   PS/2 keyboard/mouse are IRQ-driven since FASE 15.0 (`ps2_irq_init`,
+   IRQ1/IRQ12 → `/dev/input0` + `/dev/mouse0` directly); serial RX is
+   IRQ4 → 1 KiB ring (`serial_enable_rx_irq`).
 8. Spawn the ring-3 servers via `proc_execve("/bin/consrv")`,
    `/bin/kbdsrv`, `/bin/shellsrv`, registering each one against its
    `SERVER_*` ID. An `init-respawn` watchdog task respawns any of
@@ -188,8 +195,11 @@ Boot path (`src/kernel/main.c`, `kmain`):
     kernel-mode page-fault recovery.
   - `uaccess.{c,h}` — `copy_from_user` / `copy_to_user`, asm core
     redirected to `__uaccess_copy_bytes_fault` via the extable.
-  - `fpu.{c,h}` — CR0/CR4 + FNINIT at boot. **No per-task FXSAVE
-    yet** — concurrent FP use across user tasks may corrupt state.
+  - `fpu.{c,h}` — CR0/CR4 + FNINIT at boot, plus `fpu_save` /
+    `fpu_restore` (FXSAVE/FXRSTOR into the 512-byte aligned
+    `task_t.fpu_state`). `task_run_next` saves the outgoing task's
+    FP/SSE + MSR_FS_BASE and restores the incoming one's — concurrent
+    FP across user tasks is safe.
   - `reaper.{c,h}` — queues kstacks freed at task death; drained at
     the top of every `scheduler_tick`. Also collects DEAD slots.
   - `syscall.{c,h}` — Linux x86_64 syscall numbers + `syscall_dispatch(frame)`.
@@ -323,7 +333,10 @@ Boot path (`src/kernel/main.c`, `kmain`):
   `arpa/inet.h`, `netinet/in.h`, `linux/fb.h`, `osnos_ipc.h`.
   `ox.h` is the Ox window-system client API; `linux/fb.h` mirrors
   Linux's `<linux/fb.h>` so a future tinyX port resolves the same
-  identifiers. Internals:
+  identifiers. **`X11/{X.h, Xlib.h, Xutil.h, keysym.h}`** +
+  `xlib.c` are tinyX (FASE 15.1): a source-compatible Xlib subset
+  over Ox — constants match real X11 numerically; classic Xlib
+  clients (see `elfs/gui/xdemo.c`) compile unmodified. Internals:
   `crt0.S` (`_start` → argc/argv/envp → `main` → `_exit`),
   `unistd.c` (Linux errno convention `-1 + errno`), `signal.c` +
   `sigtramp.S` (sigframe + `__sigtramp`), `setjmp.S`, `pthread.c`,
@@ -397,9 +410,9 @@ packed into a single message (the legacy shell used `os_strlcat` to
 build one buffer and emit once). Per-line sends overflow the queue
 and get silently dropped as EAGAIN.
 
-**No per-task FPU save yet.** Single-task FP (e.g. TCC compiling in
-the foreground) is fine; mixing FP across multiple concurrent ring-3
-tasks may corrupt state. Real FXSAVE lands when needed.
+**Per-task FPU save is real.** `task_run_next` FXSAVEs the outgoing
+task into `task_t.fpu_state` and FXRSTORs the incoming one (plus
+MSR_FS_BASE for TLS) — concurrent FP across ring-3 tasks is safe.
 
 **QEMU machine type matters.** `block_ata` talks PIO to legacy 0x1F0;
 `-M pc` attaches the IDE disk there. `-M q35` would attach via AHCI

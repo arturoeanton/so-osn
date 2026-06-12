@@ -3,6 +3,7 @@
 #include <stddef.h>
 
 #include "../drivers/framebuffer.h"
+#include "../drivers/rtc.h"
 #include "../drivers/serial.h"
 #include "../fs/devfs.h"
 #include "../fs/vfs.h"
@@ -1609,12 +1610,13 @@ int64_t sys_access(const char *path, int mode) {
 }
 
 /*
- * sys_time — POSIX time(2). Returns seconds "since the epoch" — but
- * osnos has no RTC, so we report seconds since boot. Good enough for
- * elapsed-time arithmetic; absolute clocks will need a real RTC.
+ * sys_time — POSIX time(2). Real epoch seconds since FASE 15.2: the
+ * CMOS RTC is read once at boot (rtc_boot_epoch) and the PIT uptime
+ * is added on top. Falls back to seconds-since-boot when the RTC
+ * read failed (rtc_boot_epoch() == 0), the pre-RTC behaviour.
  */
 int64_t sys_time(int64_t *t) {
-    int64_t secs = (int64_t)(timer_ms() / 1000);
+    int64_t secs = rtc_boot_epoch() + (int64_t)(timer_ms() / 1000);
     if (t) {
         if (copy_to_user(t, &secs, sizeof(secs)) != OSNOS_OK) {
             return err(OSNOS_EFAULT);
@@ -1633,9 +1635,9 @@ struct osnos_timespec {
 };
 
 /*
- * sys_clock_gettime — POSIX clock_gettime(2). Today both REALTIME
- * and MONOTONIC report the same value (ticks since boot, no RTC).
- * Other clock IDs return -EINVAL.
+ * sys_clock_gettime — POSIX clock_gettime(2). REALTIME = RTC epoch +
+ * uptime (FASE 15.2); MONOTONIC stays ticks-since-boot. Other clock
+ * IDs return -EINVAL.
  */
 int64_t sys_clock_gettime(int clk_id, void *tp) {
     if (clk_id != OSNOS_CLOCK_REALTIME &&
@@ -1645,6 +1647,7 @@ int64_t sys_clock_gettime(int clk_id, void *tp) {
     uint64_t ms = timer_ms();
     struct osnos_timespec ts;
     ts.tv_sec  = (int64_t)(ms / 1000);
+    if (clk_id == OSNOS_CLOCK_REALTIME) ts.tv_sec += rtc_boot_epoch();
     ts.tv_nsec = (int64_t)((ms % 1000) * 1000000);
 
     if (copy_to_user(tp, &ts, sizeof(ts)) != OSNOS_OK) return err(OSNOS_EFAULT);
@@ -3403,6 +3406,12 @@ int64_t sys_ioctl(int fd, uint64_t request, void *arg) {
             kfree(scratch);
             return 0;
         }
+        case OSNOS_FBIO_TEXT_SUPPRESS: {
+            /* Scalar arg by value: 1 = GUI owns the screen (cooked
+             * text stops painting), 0 = restore. */
+            framebuffer_set_text_suppressed((int)(uint64_t)arg != 0);
+            return 0;
+        }
         default:
             return -(int64_t)OSNOS_ENOTTY;
         }
@@ -3654,9 +3663,27 @@ int64_t sys_poll(void *u_fds, uint64_t nfds, int timeout_ms) {
         return err(OSNOS_EFAULT);
 
     uint64_t now = timer_ms();
-    uint64_t deadline = (timeout_ms > 0) ? now + (uint64_t)timeout_ms : 0;
     task_t *self = task_current();
     uint64_t self_pid = self ? self->pid : 0;
+
+    /* The deadline must survive block_restart_syscall (which re-issues
+     * the whole syscall on wake) — recomputing it here on every
+     * restart meant a finite timeout never expired. First entry arms
+     * the task-persistent deadline; re-entries reuse it; every return
+     * path below disarms it. */
+    uint64_t deadline = 0;
+    if (timeout_ms > 0) {
+        if (self && self->poll_deadline_armed) {
+            deadline = self->poll_deadline_ms;
+        } else {
+            deadline = now + (uint64_t)timeout_ms;
+            if (self) {
+                self->poll_deadline_ms    = deadline;
+                self->poll_deadline_armed = 1;
+            }
+        }
+    }
+#define POLL_DISARM() do { if (self) self->poll_deadline_armed = 0; } while (0)
 
     for (;;) {
         int ready = 0;
@@ -3690,6 +3717,7 @@ int64_t sys_poll(void *u_fds, uint64_t nfds, int timeout_ms) {
         }
 
         if (ready > 0) {
+            POLL_DISARM();
             if (copy_to_user(u_fds, kfds, bytes) != OSNOS_OK)
                 return err(OSNOS_EFAULT);
             return ready;
@@ -3697,12 +3725,14 @@ int64_t sys_poll(void *u_fds, uint64_t nfds, int timeout_ms) {
 
         if (timeout_ms == 0) {
             /* Non-blocking poll — return 0 immediately. */
+            POLL_DISARM();
             if (copy_to_user(u_fds, kfds, bytes) != OSNOS_OK)
                 return err(OSNOS_EFAULT);
             return 0;
         }
 
         if (timeout_ms > 0 && timer_ms() >= deadline) {
+            POLL_DISARM();
             if (copy_to_user(u_fds, kfds, bytes) != OSNOS_OK)
                 return err(OSNOS_EFAULT);
             return 0;
@@ -3721,11 +3751,13 @@ int64_t sys_poll(void *u_fds, uint64_t nfds, int timeout_ms) {
         uint64_t wake = now2 + quantum;
         if (timeout_ms > 0 && wake > deadline) wake = deadline;
         if (block_restart_syscall(wake, SYS_POLL) != 0) {
+            POLL_DISARM();
             if (copy_to_user(u_fds, kfds, bytes) != OSNOS_OK)
                 return err(OSNOS_EFAULT);
             return 0;
         }
     }
+#undef POLL_DISARM
 }
 
 int64_t sys_select(int nfds,

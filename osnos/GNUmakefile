@@ -9,16 +9,30 @@ LIMINE_INC := $(DEPSDIR)/limine-protocol/include
 FREESTD_INC := $(DEPSDIR)/freestnd-c-hdrs/include
 LINKER := $(DEPSDIR)/linker-scripts/$(ARCH).lds
 
+# This Makefile relies on GNU make >= 3.82 pattern-rule selection
+# (shortest stem wins). Apple ships 3.81 (2006) as /usr/bin/make, which
+# picks the FIRST matching pattern rule instead — the generic kernel
+# rule then compiles vendor/ sources with kernel CFLAGS and the build
+# explodes with bogus include errors. Use Homebrew's `gmake`.
+ifeq ($(filter-out 3.81 3.80,$(MAKE_VERSION)),)
+$(error GNU make $(MAKE_VERSION) is too old. Install GNU make 4.x and run `gmake` (brew install make))
+endif
+
 CC := clang
 LD := ld.lld
 # Use llvm-* binutils on macOS because the native `/usr/bin/ar` invokes
-# BSD ranlib which rejects ELF members ("not a mach-o file"), and
-# `objcopy` doesn't ship at all. On Linux, GNU binutils' plain `ar` /
-# `objcopy` handle ELF correctly, so we prefer them as the second fallback
-# after llvm-*. The hardcoded brew path is the last resort for macOS
-# users whose llvm keg isn't symlinked onto PATH.
-AR      := $(shell command -v llvm-ar      2>/dev/null || command -v ar      2>/dev/null || echo /opt/homebrew/opt/llvm/bin/llvm-ar)
-OBJCOPY := $(shell command -v llvm-objcopy 2>/dev/null || command -v objcopy 2>/dev/null || echo /opt/homebrew/opt/llvm/bin/llvm-objcopy)
+# BSD ranlib which rejects ELF members ("not a mach-o file" → empty
+# symbol index → every libc symbol comes out undefined at link), and
+# `objcopy` doesn't ship at all. The brew keg path is probed BEFORE the
+# plain names because on macOS `command -v ar` finds the broken BSD ar;
+# on Linux the keg path doesn't exist and GNU binutils' plain `ar` /
+# `objcopy` handle ELF correctly.
+AR      := $(shell command -v llvm-ar      2>/dev/null || \
+                   { test -x /opt/homebrew/opt/llvm/bin/llvm-ar && echo /opt/homebrew/opt/llvm/bin/llvm-ar; } || \
+                   command -v ar      2>/dev/null)
+OBJCOPY := $(shell command -v llvm-objcopy 2>/dev/null || \
+                   { test -x /opt/homebrew/opt/llvm/bin/llvm-objcopy && echo /opt/homebrew/opt/llvm/bin/llvm-objcopy; } || \
+                   command -v objcopy 2>/dev/null)
 
 CFLAGS := -g -O2 -pipe \
 	-Wall -Wextra -std=gnu11 \
@@ -210,6 +224,8 @@ USER_ELF_LIBC_SRCS := \
     elfs/gui/oxjs.c \
     elfs/gui/oxstudio.c \
     elfs/gui/oxnetsurf.c \
+    elfs/gui/xdemo.c \
+    elfs/gui/xeyes.c \
     elfs/tools/uxsh.c
 
 # musl-linked ELFs (vendor/musl). Declared early so USER_ELF_LIST sees it.
@@ -545,10 +561,18 @@ $(ISO): $(BUILD)/$(OUTPUT) limine.conf
 
 run: run-bios
 
+# Host-side forward ports — default HTTP is 8088 because 8080 is
+# routinely taken on dev machines (Docker, other projects). Override
+# per-invocation if needed:
+#   gmake run HTTP_PORT=8081
+HTTP_PORT ?= 8088
+TCP_PORT  ?= 9034
+UDP_PORT  ?= 1234
+
 run-bios: $(ISO) $(SD_IMG)
 	$(QEMU) -M pc -cdrom $(ISO) -boot d \
 	    -drive file=$(SD_IMG),format=raw,if=ide,index=0,media=disk \
-	    -netdev user,id=net0,hostfwd=tcp::8080-:80,hostfwd=tcp::9034-:9034,hostfwd=udp::1234-:1234 \
+	    -netdev user,id=net0,hostfwd=tcp::$(HTTP_PORT)-:80,hostfwd=tcp::$(TCP_PORT)-:9034,hostfwd=udp::$(UDP_PORT)-:1234 \
 	    -device rtl8139,netdev=net0 \
 	    $(QEMUFLAGS)
 
@@ -656,7 +680,7 @@ $(BUILD)/$(BEARSSL_DIR)/%.c.o: $(BEARSSL_DIR)/%.c
 	    $(BEARSSL_DEFS) -c $< -o $@
 
 $(BEARSSL_A): $(BEARSSL_OBJS)
-	ar rcs $@ $^
+	$(AR) rcs $@ $^
 
 # --------------------------------------------------------------------------
 # Duktape 2.7.0 — small embeddable ECMAScript engine for JS-as-app
@@ -711,7 +735,7 @@ $(TLSE_OBJ): $(TLSE_DIR)/tlse.c $(TLSE_DIR)/libtomcrypt.c $(TLSE_DIR)/tlse.h
 	    -I src/include -I $(TLSE_DIR) $(TLSE_CPPFLAGS) -c $< -o $@
 
 $(TLSE_A): $(TLSE_OBJ)
-	ar rcs $@ $^
+	$(AR) rcs $@ $^
 
 # Override for oxbrowser: link in libbearssl.a (BearSSL — TLS 1.2
 # client). Replaces libtlse.a (whose ClientHello was rejected by all
@@ -1039,7 +1063,7 @@ $(BUILD)/$(TCC_DIR)/lib/libtcc1.c.o: $(TCC_DIR)/lib/libtcc1.c
 	$(CC) $(USER_CFLAGS) -w -isystem $(FREESTD_INC) -I $(LIBC_INC) -I src/include -c $< -o $@
 
 $(LIBTCC1_A): $(LIBTCC1_OBJS)
-	ar rcs $@ $^
+	$(AR) rcs $@ $^
 
 # crti.o / crtn.o stubs — empty .init / .fini sections so TCC's link
 # step finds the expected glibc-style scaffolding files. crt0.S

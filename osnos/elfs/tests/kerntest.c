@@ -58,7 +58,7 @@ static long sys_taskinfo_raw(size_t idx, osnos_taskinfo_t *out) {
 
 static void test_taskinfo(void) {
     int saw_shell    = 0;
-    int saw_keyboard = 0;
+    int saw_serialin = 0;
     int saw_console  = 0;
     int saw_self     = 0;
     int n_user       = 0;
@@ -78,7 +78,10 @@ static void test_taskinfo(void) {
             strcmp(info.name, "shellsrv") == 0 ||
             strcmp(info.name, "busybox")  == 0 ||
             strcmp(info.name, "sh")       == 0) saw_shell++;
-        if (strcmp(info.name, "keyboard") == 0) saw_keyboard++;
+        /* FASE 15.0: el feeder "keyboard" (poll PS/2) fue reemplazado
+         * por el handler IRQ1 — ya no existe como task. El feeder
+         * ring-0 que queda es "serial-in" (paced, drena el ring RX). */
+        if (strcmp(info.name, "serial-in") == 0) saw_serialin++;
         /* Console server: "console" pre-FASE-10.1, "consrv" desde
          * FASE 10.1 (ring-3 ELF). Cualquier nombre cuenta. */
         if (strcmp(info.name, "console")  == 0 ||
@@ -88,7 +91,7 @@ static void test_taskinfo(void) {
     }
 
     CHECK(saw_shell    == 1, "taskinfo: shell server present (busybox/shellsrv)");
-    CHECK(saw_keyboard == 1, "taskinfo: keyboard feeder present");
+    CHECK(saw_serialin == 1, "taskinfo: serial-in feeder present");
     CHECK(saw_console  == 1, "taskinfo: console server present (consrv)");
     CHECK(saw_self     == 1, "taskinfo: own task visible");
     CHECK(n_user       >= 2, "taskinfo: at least two ring-3 tasks");

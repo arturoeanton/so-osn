@@ -8,6 +8,8 @@
 #include "../drivers/framebuffer.h"
 #include "../drivers/lapic.h"
 #include "../drivers/pic.h"
+#include "../drivers/ps2_irq.h"
+#include "../drivers/rtc.h"
 #include "../drivers/rtl8139.h"
 #include "../drivers/serial.h"
 #include "../proc/exec.h"
@@ -135,6 +137,7 @@ void kmain(void) {
     pic_init();            /* remap 8259 to 0x20-0x2F, mask all lines */
     lapic_init();          /* enable LAPIC + LINT0=ExtINT (q35 needs this) */
     timer_init();          /* PIT @ 100 Hz, installs IDT[0x20], unmask IRQ0 */
+    rtc_init();            /* CMOS wall clock — anchors time(2) to real epoch */
     block_ata_init();      /* IDENTIFY primary master; FS layer mounts it */
     rtl8139_init();        /* PCI scan + driver; silent if no NIC */
     net_init();            /* register RX dispatch + ARP cache */
@@ -154,21 +157,13 @@ void kmain(void) {
     bootstrap_fs();
 
     /*
-     * Kernel-side "keyboard" task is now a hardware-poll feeder only
-     * (FASE 10.2): every tick it drains keyboard_poll into the
-     * /dev/input0 ring. The user-visible policy layer (TTY feed +
-     * IPC_KEY_EVENT) moved to the ring-3 kbdsrv ELF spawned below.
-     * The kernel task does NOT register against SERVER_KEYBOARD;
-     * that ID belongs to kbdsrv (sys_tty_input enforces it).
+     * PS/2 input is IRQ-driven since FASE 15.0 (ps2_irq_init below):
+     * IRQ1/IRQ12 handlers feed /dev/input0 + /dev/mouse0 directly.
+     * The old always-READY "keyboard"/"mouse" poll feeder tasks are
+     * gone — that's also what allows the scheduler to HLT when idle.
+     * The user-visible policy layer (TTY feed + IPC_KEY_EVENT) stays
+     * in the ring-3 kbdsrv ELF spawned below.
      */
-    int keyboard_pid = task_create("keyboard", keyboard_server_tick);
-    (void)keyboard_pid;
-
-    /* PS/2 mouse feeder (FASE 11.4): polls the AUX port each tick,
-     * decodes 3-byte packets, pushes mouse_event_t into the
-     * /dev/mouse0 devfs ring. Mirror of the keyboard pattern. */
-    int mouse_pid = task_create("mouse", mouse_server_tick);
-    (void)mouse_pid;
 
     /* Serial input feeder (FASE 10.7): pulls bytes off COM1's RX
      * register each tick and pushes them through tty_input(), the
@@ -247,6 +242,15 @@ void kmain(void) {
 
     keyboard_server_init();
     mouse_server_init();
+    /* Enable IRQ1/IRQ12 delivery AFTER both PS/2 init sequences —
+     * their command/ACK handshakes poll 0x60 directly and an early
+     * interrupt would steal the ACK bytes. IF is still 0 here, so
+     * nothing fires until the sti below. */
+    ps2_irq_init();
+    /* Serial RX → IRQ4 + software ring (FASE 15.0). The serial-in
+     * feeder keeps draining via serial_try_getc, which now reads the
+     * ring — the 16-byte HW FIFO can no longer overrun. */
+    serial_enable_rx_irq();
 
     /*
      * Everything is set up — enable hardware interrupts. From this

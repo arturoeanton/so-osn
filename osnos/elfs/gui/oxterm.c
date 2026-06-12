@@ -443,7 +443,9 @@ static void render(void) {
                       OX_RGB(45, 45, 60));
         ox_draw_text(g_win, MARGIN, g_win_h - STATUS_H + 6, hint, COL_TERM_CURSOR);
     }
-    ox_present(g_win);
+    /* Body-only damage: the chrome (tab/borders/shadow) didn't change,
+     * so don't make oxsrv recompose it (FASE 15.0 damage rects). */
+    ox_present_rect(g_win, 0, 0, g_win_w, g_win_h);
     g_dirty = 0;
 }
 

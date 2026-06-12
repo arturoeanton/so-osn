@@ -66,7 +66,8 @@ with Limine, runs in QEMU, and ships:
   non-blocking with EINPROGRESS-retry). Without this shim,
   oxnetsurf only painted the chrome and aborted the first fetch.
 - **lighttpd 1.4.76** (FASE 14.5) — real webserver serving
-  HTTP/1.1 from `/home`; `curl http://localhost:8080/` -> 200 OK.
+  HTTP/1.1 from `/home`; `curl http://localhost:8088/` -> 200 OK
+  (default hostfwd port since FASE 15.1; override with `make run HTTP_PORT=…`).
 - **Real networking** (FASE 14-misc-3):
   `nslookup google.com -> 142.251.x.x` (DNS UDP resolver via musl
   `getaddrinfo`) and `ping 8.8.8.8 -> 64 bytes ttl=255` (SOCK_RAW
@@ -178,7 +179,7 @@ GUI apps — all on top of a microkernel written from scratch.
 | **`sys_recvfrom` UDP path preserves `src_ip/src_port`** | OK | Used to route via `sock_recv` which discarded the peer -> musl resolver rejected the reply (FASE 14.6) |
 | **`SOCK_RAW` + ICMP echo (ping)** | OK | `socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)`; ip_handle mirrors to raw socket pool; `ping 8.8.8.8 -> "64 bytes from 8.8.8.8 ttl=255"` (FASE 14.6) |
 | DNS resolver + getaddrinfo (via slirp 10.0.2.3) | OK | `nslookup google.com -> 142.251.128.46` (FASE 14.6) |
-| `/bin/httpd` serving FAT16 over HTTP | OK | hostfwd 8080 |
+| `/bin/httpd` serving FAT16 over HTTP | OK | hostfwd 8088 (default, overridable) |
 | **`/bin/lighttpd` 1.4.76 real webserver** | OK | poll-based, 10 builtin mods, serves `/home` (FASE 14.5) |
 | **`SIOCGIFCONF` + 7 SIOC* ioctls** | OK | `ifconfig` shows eth0 (10.0.2.15 + MAC 52:54:00:12:34:56) + lo |
 | Demos (`/bin/tcpclient`, `udptest`, `echotcp`, `selectserver`, `udp_send`, `udp_connect`) | OK | |
@@ -670,6 +671,272 @@ performance**: ox.http.get blocks the entire event loop during
 the fetch, no async/promises. OK for simple apps ("press
 reload"), but a browser-like app would need an integrated
 mainloop.
+
+### FASE 15.0 — Premium fluidity: IRQ input + idle HLT + regional compositor — **CLOSED**
+
+Quality leap for interactive latency and compositor efficiency.
+Built + verified on macOS host (see build notes below).
+
+**Kernel — IRQ-driven input + idle:**
+- OK **PS/2 keyboard + mouse via IRQ 1 / IRQ 12**
+  (`src/drivers/ps2_irq.c`). The 8042 command byte enables both
+  interrupt bits; the handlers reuse the existing
+  `keyboard_poll`/`mouse_poll` state machines and push into the
+  same `/dev/input0` + `/dev/mouse0` rings. The always-READY
+  "keyboard"/"mouse" poll feeder tasks are gone; events arrive in
+  microseconds instead of "next scheduler round".
+- OK **Serial RX via IRQ 4 + 1 KiB software ring** (`serial.c`).
+  The 16-byte HW FIFO overran whenever ring-0 stayed busy (with
+  the GUI running, serial console input lost ~half its bytes —
+  `oxterm &` arrived as `xem&`). IRQ4 drains the FIFO into the
+  ring on arrival; `serial_try_getc` consumes the ring first.
+  `serial-in` feeder now paces itself (wakeup_at_ms + 10 ms).
+- OK **Idle HLT in the scheduler** (`scheduler_tick`): when no
+  task is READY, `sti; hlt` until the next IRQ instead of
+  busy-spinning (with a cli-guarded `task_any_ready()` recheck to
+  close the lost-wakeup window). Host CPU while the GUI idles:
+  ~1.4%.
+- OK **`sys_poll` finite timeouts actually expire**. The
+  `block_restart_syscall` mechanism re-executes the whole syscall
+  on wake, so the deadline recomputed on every restart and
+  `poll(50)` behaved like `poll(-1)` (froze the Deskbar clock and
+  any timeout-paced loop). The deadline now persists in
+  `task_t.poll_deadline_ms` across restarts (armed on first
+  entry, disarmed on every return path).
+
+**Ox compositor — regional repaints + frame pacing:**
+- OK **Dirty-rect LIST (8 entries)** replaces the single global
+  bounding box (which unioned far-apart damage — deskbar clock
+  top-right + cursor bottom-left used to recompose ~the whole
+  screen). Overlapping marks merge; on overflow the entry with
+  least bbox growth absorbs the new rect.
+- OK **Window create / destroy / raise / restore / minimize are
+  regional** — they used to force a full-screen repaint (8-12 ms
+  each). Verified live: a session of open + type + close shows
+  `full=1` (only the boot paint) in the heartbeat.
+- OK **Cursor motion fully decoupled** (`g_cursor_dirty`):
+  restore-from-clean + redraw + blit union; never recomposes.
+- OK **Body-blit clipping** (`g_clip_*`): replaying a window for
+  a small dirty rect copies only the damaged rows/cols instead of
+  the full body.
+- OK **Frame pacing ~66 Hz** (`FRAME_MS 15`): events drain every
+  iteration, composite+blit at most once per frame budget; poll
+  timeout shrinks to the remaining budget when damage is pending.
+- OK **Client damage rects in PRESENT** (ABI FASE 15.0):
+  `IPC_OX_PRESENT arg1=1` + `data={x,y,w,h}` (window-relative)
+  marks only that body region. New libc API `ox_present_rect()`
+  (falls back to full present for degenerate rects / legacy
+  scaled-zoom windows). `oxterm` adopted (body-only presents).
+- OK Bug fixes: `g_wins[g_focus_slot]` bounds check on the
+  pending-move path; Deskbar tiles now shrink (floor 14 px) so
+  all 16 windows keep a clickable tile (used to silently drop
+  past ~8).
+
+**Build on macOS (gmake + llvm):**
+- OK GNUmakefile guards against GNU make 3.81 (Apple's
+  `/usr/bin/make`) — its first-match pattern-rule selection
+  compiled vendor sources with kernel CFLAGS. Use Homebrew
+  `gmake`.
+- OK `AR` detection probes `/opt/homebrew/opt/llvm/bin/llvm-ar`
+  BEFORE plain `ar` (BSD ar emits an empty symbol index for ELF
+  members — every libc symbol came out undefined). All `ar rcs`
+  recipes now use `$(AR)`.
+
+**Tests:** `alltest` 18/21 after the phase (kerntest expectation
+updated: the "keyboard" feeder task no longer exists by design).
+Remaining 3 fails are sd.img staging issues unrelated to this
+phase (tcc sysroot incomplete on macOS-built images; `hello_dyn`
+linked against a host-path libc.so name; serialtest flaky under
+alltest only) — tracked for FASE 15.1.
+
+### FASE 15.1 — Interactive resize armed + tinyX (Xlib subset over Ox) — **CLOSED**
+
+Premium-UI track (real window resize everywhere) + first slice of
+the Linux X compatibility track. Verified live in QEMU headless
+(screendump + serial heartbeat + PS/2 mouse driven via the QEMU
+monitor).
+
+**Ox server — drag-resize protocol armed (`elfs/gui/oxsrv.c`):**
+- OK **`commit_resize()`** — the armed counterpart of the old
+  clip-only `resize_window()`. For windows that opted in via
+  `ox_window_create_resizable`, dragging the bottom-right handle
+  now does the genuine thing: `swap_window_shm()` (fresh SHM at
+  the new dims) + `IPC_OX_EVENT_RESIZE` so the client re-lays
+  out. Live during the drag (100 ms throttle) + one final commit
+  on release. Legacy windows keep the safe clip-only behaviour.
+- OK **Content-preserving swaps**: `swap_window_shm` seeds the new
+  buffer with the body colour and then copies the overlapping
+  region of the old backing, so live resize shows the existing
+  content instead of a blank flash until the client repaints.
+  Safe vs. queued stale events: kernel SHM refcounts unlink
+  (client mappings survive), and the libc side skips a remap whose
+  SHM is already gone — the newest resize event always wins.
+- OK Verified: drag oxnotepad/xdemo by the handle → window grows
+  for real (more usable area, no pixel scaling), app reflows, no
+  stride artifacts, `full=` stays at 1 (resize repaints are
+  regional).
+
+**Apps — resize opt-in + reflow:**
+- OK Trivial opt-ins (already had `OX_EV_RESIZE` handlers):
+  `oxlog`, `oxmem`, `oxipc`, `oxnet` — now created resizable.
+- OK `oxfiles`: dynamic `g_w/g_h` layout (toolbar / sidebar /
+  list / right-aligned sizes), RESIZE handler keeps the selection
+  visible, and **mouse-wheel scrolling** (3 rows per notch) which
+  was missing entirely.
+- OK `oxnotepad`: layout macros (`BODY_W/BODY_H/VIS_LINES/...`)
+  now derive from live `g_w/g_h`; RESIZE handler clamps scroll +
+  keeps the cursor visible. Editor, find/replace strip and status
+  bar all reflow.
+- Resizable fleet now: oxterm, oxstudio, oxnotepad, oxfiles,
+  oxlog, oxmem, oxipc, oxnet (8 of 16).
+
+**tinyX — Xlib subset over Ox (X compat, slice 1):**
+- OK New headers `lib/libc/include/X11/{X.h, Xlib.h, Xutil.h,
+  keysym.h}` — constants and types match real X11 numerically
+  (event codes, masks, Button*, XK_*; same ABI-fidelity rule as
+  errno/keycodes). New `lib/libc/xlib.c` (~500 LOC) in
+  libosnos_c.a.
+- OK Implemented: XOpenDisplay/XCloseDisplay, XCreateSimpleWindow
+  (→ resizable Ox window), XStoreName, XMapWindow (synthesizes
+  the first Expose), XSelectInput (mask-filtered delivery),
+  XCreateGC/XFreeGC/XSetForeground/XSetBackground,
+  XFillRectangle/XDrawRectangle/XDrawLine (Bresenham)/XDrawPoint/
+  XDrawString (baseline-anchored, 8x8 font)/XClearWindow/
+  XClearArea, XFlush/XSync/XPending/XNextEvent (flushes before
+  blocking, like real Xlib), XInternAtom/XSetWMProtocols
+  (WM_DELETE_WINDOW handshake), XLookupString (keysyms from
+  kernel keycodes; X keycode = kernel keycode + 8, evdev rule).
+- OK Event mapping: KeyPress, ButtonPress/Release (wheel =
+  Button4/5), MotionNotify, Expose, **ConfigureNotify** (from
+  OX_EV_RESIZE — drag-resize reaches X clients), ClientMessage
+  (WM_DELETE_WINDOW) / DestroyNotify on close.
+- OK **`/bin/xdemo`** (`elfs/gui/xdemo.c`): a deliberately stock
+  Xlib program (would build on Linux with `cc xdemo.c -lX11`)
+  acting as the acceptance test. Verified live: window + BeOS
+  decoration, Expose-driven redraw, click stamps (ButtonPress),
+  r/g/b color keys (XLookupString), drag-resize → ConfigureNotify
+  → re-render at the new size (hint line shows live WxH), `q`
+  quits cleanly (wins drops to 0).
+- WARN Not implemented (deliberate, see header comment): pixmaps,
+  real fonts, colormaps, any wire protocol. Pixels are 0xRRGGBB
+  TrueColor. Next slices: XPutImage-style blits, more keysyms,
+  XSizeHints honoured by oxsrv, file-backed mmap → real tinyX.
+
+### FASE 15.2 — Premium polish: 1080p + TTF everywhere + RTC + NetSurf HTTPS — **CLOSED**
+
+Direct response to user feedback ("se ve antiguo e indie", "píxeles
+gordos, falta suavidad"): kill the chunky-pixel look and the flat
+1-px-border widgets. Verified live via QEMU screendumps.
+
+**Resolution (the "fat pixels" root cause):**
+- OK `limine.conf` now requests **1920x1080x32** (was the 1280x800
+  default, which the host display nearest-neighbor-stretched). The
+  compositor + regional damage tracking absorb the 2x pixel count
+  without measurable lag (heartbeat unchanged).
+
+**Typography:**
+- OK New libc API **`ox_draw_text_pretty()`** (lib/libc/ox.c):
+  proportional anti-aliased TTF text into the window backing,
+  lazy-loading `/home/.fonts/default.ttf` on first call; transparent
+  8x8 fallback. Apps keep `ox_draw_text` where layout math assumes
+  the 8-px glyph grid (oxterm cells, oxnotepad body).
+- OK Default UI font bumped 12 → **14 px** (oxsrv decorations, ox_ui,
+  pretty-text path) to match the 1080p density.
+- OK Adopted: **oxfiles** (toolbar path / sidebar / file names /
+  sizes right-aligned with real text metrics), **oxlog** (header +
+  status), all ox_ui widget labels, oxsrv menu/tab/clock already
+  routed through ox_text.
+
+**BeOS R5 bevel pass (ox_ui + oxsrv decorations):**
+- OK ox_ui got a bevel/gradient vocabulary (OX_UI_COL_BEVEL_*,
+  ui_vgrad/ui_bevel_raised/ui_bevel_sunken): buttons = raised bevel
+  + 2-stop gradient face + pressed-sunken with label nudge; lists =
+  sunken wells with gradient selection bar + faint hover row;
+  scrollbars = sunken track + raised thumb with BeOS grip lines;
+  dialogs = raised frame + gradient title bar.
+- OK oxsrv: focused tab = yellow vertical gradient + inner top
+  highlight; tab buttons = gradient + bevel inside the black
+  outline; root-menu hover = gradient selection bar; Deskbar =
+  dark gradient strip with top highlight + raised gradient tiles;
+  "Ox" menu button = gradient face. All text vertically centered on
+  the real TTF line height.
+
+**Kernel — CMOS RTC (`src/drivers/rtc.c`, new):**
+- OK One-shot MC146818 read at boot (update-in-progress dance, BCD +
+  12h handling, century register with sanity clamps).
+  `rtc_boot_epoch()` anchors the wall clock; `sys_time` and
+  `sys_clock_gettime(CLOCK_REALTIME)` now return **real UNIX epoch**
+  (MONOTONIC stays boot-relative). Boot log: `rtc: 2026-6-12
+  18:27:14 UTC epoch=1781288834`. Deskbar clock now shows real UTC.
+
+**NetSurf HTTPS (was: never worked):**
+- OK Root cause (vs. working oxbrowser): `https_fetch` skipped
+  `br_x509_minimal_set_time()` — BearSSL's X.509 engine aborted with
+  TIME_UNKNOWN *before* extracting the server pkey, so the handshake
+  died later on the missing key — and never injected DRBG entropy.
+  Both ported from oxbrowser's do_tls_fetch; the time seed now uses
+  the real RTC epoch, so expiry validation is genuine.
+- OK Verified live: `oxnetsurf https://example.com` → TLS 1.2
+  handshake + 828 bytes fetched + page rendered. (The remaining
+  `parse_chunk err=65547` on example.com reproduces identically over
+  plain HTTP — it's the known v1 parser limitation, tracked
+  separately.)
+
+**Port defaults:** QEMU hostfwd HTTP default moved 8080 → **8088**
+(8080 is routinely taken by Docker/other projects); override with
+`make run HTTP_PORT=…`.
+
+### FASE 15.3 — xeyes port + global pointer + cursor-motion flicker fix + HTTPS robustness — **CLOSED**
+
+**xeyes — first real X11 app PORTED (not rewritten):**
+- OK `elfs/gui/xeyes.c`: the eye geometry constants, pupil-tracking
+  math (`computePupil`) and eye rendering (eyeLiner / eyeBall with
+  the abstract eye-space → pixel transform) are taken from the
+  original X Consortium xeyes (Eyes.c / Eyes.h / transform.c, MIT
+  license, Keith Packard). The Xt/Xaw widget shell is replaced by a
+  plain-Xlib main loop (osnos has no Xt yet) polling the pointer at
+  10 Hz like the original's timer. Builds unmodified on Linux with
+  `cc xeyes.c -lX11 -lm`. In the root menu as "XEyes". Verified
+  live: pupils track the cursor across the whole desktop.
+- OK tinyX grew: **XFillArc / XDrawArc** (integer ellipse rasterizer
+  with X 1/64-degree angle clipping, no libm) and **XQueryPointer**
+  (global position + window-relative coords + button mask).
+- OK New Ox protocol op **IPC_OX_QUERY_POINTER (0x71)** + libc
+  `ox_query_pointer()`: screen cursor position, button mask, and the
+  queried window's body origin in one round-trip.
+
+**Cursor-motion flicker ("línea negra vibrante" user report):**
+- OK Root cause: over-invalidation while the pointer moves. The menu
+  rect was re-marked dirty on EVERY move while open, the Deskbar on
+  every move inside it, and any titlebar the cursor was over on
+  every move — each one a recompose + VRAM re-blit per frame, and
+  every VRAM rewrite is a chance for the host display to catch a
+  half-written frame (perceived as dark vibration along the motion
+  path; rock solid when idle). Now hover marking fires only on
+  STATE changes: menu row change, deskbar element change, titlebar
+  enter/leave or button-hover change.
+- OK Cursor blit: old∪new bounding union replaced by two small
+  rects (merged only when they overlap) — a fast diagonal flick no
+  longer rewrites a huge rect every frame.
+
+- OK Host-side flicker root cause (the part the hover fix couldn't
+  reach): `build_and_run.sh` ran QEMU with `-display
+  cocoa,zoom-to-fit=on` on macOS — the zoomed cocoa view re-renders
+  the scaled frame on every partial framebuffer update, which reads
+  as black vibration while the guest cursor moves (idle = no
+  updates = rock solid). Now: plain `cocoa` (no zoom) + framebuffer
+  default 1440x900x32, which fits 1:1 in points on 13" MacBook
+  displays → integer Retina scaling, crisp and update-flicker-free.
+  Override: `QEMU_DISPLAY=cocoa,zoom-to-fit=on` env var, and bump
+  limine.conf to 1920x1080x32 for big monitors.
+
+**HTTPS robustness (user report "sigue fallando"):**
+- OK Big-page hang fixed: when the response filled RESP_MAX (e.g.
+  google.com uncompressed > 256 KiB), the BearSSL receive loop
+  called `recvapp_ack(0)` forever — the engine stayed in RECVAPP
+  with nothing consumed and the fetch never returned. Now a full
+  buffer ends the read (truncating, logged). example.com-sized
+  pages were unaffected, which is why the first verification passed.
 
 ### FASE 15 — Drivers to ring 3 (pending item from original FASE 11)
 - TODO IRQ delegation via IPC from kernel-side handlers

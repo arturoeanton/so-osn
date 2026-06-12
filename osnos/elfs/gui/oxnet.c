@@ -122,7 +122,7 @@ int main(int argc, char **argv) {
     (void)argc; (void)argv;
     ox_log("oxnet: starting\n");
     if (ox_init() < 0) return 1;
-    g_win = ox_window_create(g_w, g_h, "Network");
+    g_win = ox_window_create_resizable(g_w, g_h, "Network");
     if (g_win < 0) return 1;
     layout();
     slurp(&g_panels[0]);
